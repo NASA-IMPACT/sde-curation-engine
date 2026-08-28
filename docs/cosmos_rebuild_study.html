@@ -1,0 +1,322 @@
+<title>COSMOS Rebuild Study</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira:wdth,wght@87.5,400..700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400..700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #FAFBFC;
+    --bg-raise: #F0F4F6;
+    --ink: #1C232B;
+    --ink-soft: #4A5763;
+    --line: #D8E0E4;
+    --accent: #0E7490;
+    --accent-ink: #0A5A70;
+    --warn: #B45309;
+    --warn-bg: #FBF3E7;
+    --good-bg: #E9F4F6;
+    --code-bg: #EEF2F4;
+  }
+  :root:not([data-theme="light"]) { }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #10161B;
+      --bg-raise: #182028;
+      --ink: #DCE5EA;
+      --ink-soft: #93A4B0;
+      --line: #2A3640;
+      --accent: #22B8CF;
+      --accent-ink: #4FC9DC;
+      --warn: #E8A04C;
+      --warn-bg: #251D12;
+      --good-bg: #12262C;
+      --code-bg: #1B252D;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #10161B;
+    --bg-raise: #182028;
+    --ink: #DCE5EA;
+    --ink-soft: #93A4B0;
+    --line: #2A3640;
+    --accent: #22B8CF;
+    --accent-ink: #4FC9DC;
+    --warn: #E8A04C;
+    --warn-bg: #251D12;
+    --good-bg: #12262C;
+    --code-bg: #1B252D;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+    font-size: 1.02rem;
+    line-height: 1.62;
+    margin: 0;
+    padding: 3rem 1.25rem 5rem;
+  }
+  .page { max-width: 46rem; margin: 0 auto; }
+
+  h1, h2, h3 {
+    font-family: "Saira", "Archivo", "Helvetica Neue", Arial, sans-serif;
+    font-stretch: 87.5%;
+    line-height: 1.15;
+    text-wrap: balance;
+    color: var(--ink);
+  }
+  h1 { font-size: 2.35rem; font-weight: 700; letter-spacing: -0.01em; margin: 0.4rem 0 0.6rem; }
+  h2 { font-size: 1.42rem; font-weight: 650; margin: 3rem 0 0.8rem; padding-top: 1.6rem; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.08rem; font-weight: 600; margin: 1.8rem 0 0.4rem; }
+  h2 .sec-no { color: var(--accent); font-weight: 600; margin-right: 0.55rem; font-variant-numeric: tabular-nums; }
+
+  .eyebrow {
+    font-family: "Saira", Arial, sans-serif; font-stretch: 87.5%;
+    text-transform: uppercase; letter-spacing: 0.14em; font-size: 0.72rem; font-weight: 600;
+    color: var(--accent);
+  }
+  .meta {
+    font-family: "Saira", Arial, sans-serif; font-stretch: 87.5%;
+    color: var(--ink-soft); font-size: 0.85rem; margin-bottom: 2.4rem;
+  }
+  .meta a { color: var(--accent-ink); }
+
+  p { margin: 0 0 1rem; max-width: 70ch; }
+  ul, ol { margin: 0 0 1.1rem; padding-left: 1.4rem; }
+  li { margin-bottom: 0.35rem; }
+  a { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  strong { font-weight: 650; }
+
+  code, .path {
+    font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.84em;
+    background: var(--code-bg);
+    border-radius: 3px;
+    padding: 0.08em 0.32em;
+  }
+  pre {
+    font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+    font-size: 0.8rem; line-height: 1.55;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.9rem 1.1rem;
+    overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; }
+
+  .tablewrap { overflow-x: auto; margin: 1.2rem 0 1.6rem; }
+  table {
+    border-collapse: collapse; width: 100%;
+    font-family: "Saira", Arial, sans-serif; font-stretch: 87.5%;
+    font-size: 0.87rem; line-height: 1.45;
+  }
+  th {
+    text-align: left; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.72rem;
+    color: var(--ink-soft);
+    border-bottom: 2px solid var(--accent);
+    padding: 0.45rem 0.7rem 0.45rem 0;
+  }
+  td { border-bottom: 1px solid var(--line); padding: 0.5rem 0.7rem 0.5rem 0; vertical-align: top; }
+  td:first-child { font-weight: 600; white-space: nowrap; }
+  .cmp td:first-child { white-space: normal; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  .callout {
+    background: var(--good-bg);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 6px 6px 0;
+    padding: 1rem 1.3rem;
+    margin: 1.4rem 0;
+  }
+  .callout.warn { background: var(--warn-bg); border-left-color: var(--warn); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .label {
+    font-family: "Saira", Arial, sans-serif; font-stretch: 87.5%;
+    text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.7rem; font-weight: 650;
+    display: block; margin-bottom: 0.35rem;
+  }
+  .callout .label { color: var(--accent-ink); }
+  .callout.warn .label { color: var(--warn); }
+
+  .req { margin-bottom: 0.4rem; }
+  .req b {
+    font-family: "IBM Plex Mono", monospace; font-size: 0.8em; font-weight: 500;
+    color: var(--accent-ink); margin-right: 0.3rem;
+  }
+
+  .toc {
+    background: var(--bg-raise);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 1rem 1.4rem;
+    font-family: "Saira", Arial, sans-serif; font-stretch: 87.5%;
+    font-size: 0.88rem;
+    margin: 0 0 1rem;
+  }
+  .toc ol { margin: 0.3rem 0 0; padding-left: 1.2rem; }
+  .toc li { margin-bottom: 0.15rem; }
+  .toc a { text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  .lifecycle {
+    display: flex; gap: 0.5rem; align-items: stretch; flex-wrap: wrap;
+    font-family: "Saira", Arial, sans-serif; font-stretch: 87.5%;
+    margin: 1.2rem 0 1.4rem;
+  }
+  .stage {
+    flex: 1 1 10rem;
+    background: var(--bg-raise);
+    border: 1px solid var(--line);
+    border-top: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 0.7rem 0.9rem;
+  }
+  .stage b { display: block; font-size: 0.92rem; font-weight: 650; margin-bottom: 0.2rem; }
+  .stage span { font-size: 0.78rem; color: var(--ink-soft); line-height: 1.4; display: block; }
+  .arrow { align-self: center; color: var(--accent); font-weight: 700; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .stage { transition: transform 120ms ease; }
+    .stage:hover { transform: translateY(-2px); }
+  }
+</style>
+
+<div class="page">
+  <span class="eyebrow">Assessment &amp; Options Report</span>
+  <h1>COSMOS Rebuild Study</h1>
+  <p class="meta">
+    Review of <a href="https://github.com/NASA-IMPACT/COSMOS">NASA-IMPACT/COSMOS</a> · requirements distilled from code + in-repo design docs · options for a lightweight reimplementation, including a Claude skill · 2026-08-28
+  </p>
+
+  <div class="toc">
+    <strong>Contents</strong>
+    <ol>
+      <li><a href="#what">What COSMOS is</a></li>
+      <li><a href="#model">Core domain model</a></li>
+      <li><a href="#integrations">External integrations</a></li>
+      <li><a href="#requirements">Distilled requirements</a></li>
+      <li><a href="#options">Reimplementation options A–E</a></li>
+      <li><a href="#recommendation">Recommendation</a></li>
+      <li><a href="#pitfalls">Porting pitfalls</a></li>
+    </ol>
+  </div>
+
+  <h2 id="what"><span class="sec-no">1</span>What COSMOS Is</h2>
+  <p>COSMOS (Curated Organizational System for Metadata and Science) is the curation web application behind NASA's <strong>Science Discovery Engine</strong>. Curators use it to decide which URLs from crawled NASA web sources get indexed into the SDE — a Sinequa-based search deployment — and with what metadata: title, document type, SMD division, TDAMM astronomy tags.</p>
+  <p>Think of it as a <strong>quality-control checkpoint between a web crawler and a search engine</strong>: the crawler dumps in everything it finds; curators write rules ("patterns") to throw out junk, fix titles, and tag content; only the approved, cleaned-up set is promoted to production indexing.</p>
+  <ul>
+    <li><strong>Stack:</strong> Django 4.2 + PostgreSQL + Celery/SQS + Redis; DRF with server-side DataTables; Bootstrap/jQuery frontend; Docker Compose deploys.</li>
+    <li><strong>Scale:</strong> ~24.5k lines of Python across 7 apps (≈12.2k non-migration code in the core app), ~4.7k lines of custom JS, ~3k lines of templates. Collections range from 1 URL to over 100,000; full-text dumps reach ~1.8M records.</li>
+    <li><strong>Activity:</strong> 1,300+ merged PRs, latest January 2026. <strong>No open-source license is declared</strong> — port behavior, not code.</li>
+  </ul>
+
+  <h2 id="model"><span class="sec-no">2</span>Core Domain Model</h2>
+
+  <h3>The URL lifecycle</h3>
+  <div class="lifecycle">
+    <div class="stage"><b>DumpUrl</b><span>Raw rows from a dev-server crawl: url, scraped title/text, tags</span></div>
+    <div class="arrow">→</div>
+    <div class="stage"><b>DeltaUrl</b><span>Work-in-progress diff vs. production; carries to_delete tombstones</span></div>
+    <div class="arrow">→</div>
+    <div class="stage"><b>CuratedUrl</b><span>Approved production set, exported to the Sinequa indexer</span></div>
+  </div>
+  <p><strong>Migration (dump → delta):</strong> diff each dump row against curated on <code>scraped_title, tdamm_tag, division</code>; create deltas only where different, plus deletion deltas for curated URLs that vanished from the crawl; apply all patterns; clear the dump. <strong>Promotion (delta → curated):</strong> on "Curated" status, upsert every delta (NULLs are explicit values), delete tombstoned rows, clear deltas. Patterns are <em>not</em> re-applied at promotion — their effects travel as plain field values. The three-table design exists because Sinequa reindexes are expensive and asynchronous: the tool must hold a proposed state for weeks.</p>
+
+  <h3>The pattern system (the heart of the tool)</h3>
+  <div class="tablewrap"><table>
+    <tr><th>Pattern</th><th>Effect</th></tr>
+    <tr><td>Exclude</td><td>Mark matching URLs excluded from indexing</td></tr>
+    <tr><td>Include</td><td>Force-include — always wins over exclude</td></tr>
+    <tr><td>Title</td><td>Rewrite title: literal text + <code>{url}</code>/<code>{title}</code>/<code>{collection}</code> + <code>xpath://…</code> extraction from the live page</td></tr>
+    <tr><td>Document type</td><td>Assign Images / Data / Documentation / Software &amp; Tools / Missions &amp; Instruments</td></tr>
+    <tr><td>Division</td><td>Assign SMD division (Astrophysics, BPS, Earth Science, Heliophysics, Planetary, General)</td></tr>
+  </table></div>
+  <p>Patterns match an individual URL or a multi-URL wildcard (<code>*</code> glob → regex). The required behaviors, all documented in the repo's own <code>README_PATTERN_*.md</code> spec files: <strong>idempotent application</strong> with per-pattern effect tracking; <strong>unapply logic</strong> (deleting a pattern generates deltas reversing its effects — the next most specific pattern takes over, else the curated value, else NULL); <strong>include-over-exclude precedence</strong>; and <strong>"smallest match set wins" specificity resolution</strong> for field-modifying patterns, ties broken by longest pattern string.</p>
+
+  <h3>Workflow state machines</h3>
+  <p>A 20-state workflow status drives automation on transition: <em>Ready for Engineering</em> generates scraper configs and pushes to GitHub; <em>Indexing Finished on Dev</em> fetches full text; <em>Ready for Curation</em> generates indexer configs; <em>Curated</em> promotes deltas; <em>QC Perfect/Minor</em> appends the collection to the public query config. Eleven transitions post Slack notifications. A parallel 7-state reindexing status tracks the re-crawl loop, and Sinequa's indexer itself polls COSMOS for its next job and reports back through an API endpoint. Auxiliary requirements: manual-overrides-ML paired metadata fields (<code>tdamm_tag_manual</code> / <code>tdamm_tag_ml</code>), required-URL acceptance checks, per-collection comments, and auto-logged status history.</p>
+
+  <h2 id="integrations"><span class="sec-no">3</span>External Integrations</h2>
+  <ul>
+    <li><strong>Sinequa, inbound:</strong> 9 named server configs; paginated <code>search.query</code> and <code>engine.sql</code> full-text pulls with adaptive batch backoff.</li>
+    <li><strong>Sinequa, outbound configs:</strong> XML generation for scraper/indexer/job configs from templates; COSMOS patterns normalized to Sinequa wildcard rules and title/doc-type mappings.</li>
+    <li><strong>Sinequa, outbound URL lists:</strong> <code>/curated-urls-api/&lt;folder&gt;/</code> — the machine-facing product of the whole app: non-excluded URLs as <code>{url, title, document_type, file_extension, tree_root, tdamm_tag}</code>, consumed by a Sinequa C# plugin.</li>
+    <li><strong>GitHub:</strong> branch → commit XMLs → PR against the Sinequa config repo; metadata read-back and a DB-vs-GitHub consolidation diff view.</li>
+    <li><strong>Slack</strong> webhook notifications; <strong>AWS</strong> SQS/S3/SES; an <strong>external ML inference microservice</strong> for TDAMM and division classification with per-tag confidence thresholds and off-peak scheduling.</li>
+  </ul>
+
+  <h2 id="requirements"><span class="sec-no">4</span>Distilled Requirements</h2>
+  <p><strong>Must have</strong> — the irreducible core:</p>
+  <div class="req"><b>R1</b>Named collections with source URL, division, connector type, lifecycle status.</div>
+  <div class="req"><b>R2</b>Ingest a crawl dump of URLs (+ titles/text/metadata) per collection.</div>
+  <div class="req"><b>R3</b>Rule-based curation: the five pattern types with idempotency, unapply, include-precedence, and specificity resolution.</div>
+  <div class="req"><b>R4</b>Diff-based staging: review new / modified / deleted URLs before promoting.</div>
+  <div class="req"><b>R5</b>Promote to a curated production list; export it in the exact shape the indexer consumes.</div>
+  <div class="req"><b>R6</b>Generate crawler/indexer configs from templates driven by collection metadata.</div>
+  <div class="req"><b>R7</b>Workflow status per collection with an auditable history.</div>
+  <p style="margin-top:1rem"><strong>Should have:</strong></p>
+  <div class="req"><b>R8</b>Multi-curator assignment and simple auth.</div>
+  <div class="req"><b>R9</b>Automated metadata suggestion (doc type, division, TDAMM) preserving manual-overrides-ML semantics.</div>
+  <div class="req"><b>R10</b>Notifications on state changes (Slack / GitHub).</div>
+  <div class="req"><b>R11</b>Bulk operations across tens of thousands of URLs with acceptable performance.</div>
+  <p style="margin-top:1rem"><strong>Peripheral</strong> (candidates to drop): <span class="req" style="display:inline"><b>R12</b></span> feedback app, environmental-justice app, admin conveniences, DB backup commands, Sinequa dashboards, deployment scaffolding.</p>
+
+  <h2 id="options"><span class="sec-no">5</span>Reimplementation Options</h2>
+  <p>COSMOS is big because it is a multi-curator production web service. The irreducible logic — patterns, diff, promotion, config generation — is on the order of 1–2k lines. An everyday analogy: COSMOS is a full commercial kitchen built to serve one signature dish; the recipe fits on two pages, and the question is how much kitchen you actually need — a food truck (CLI), a home kitchen (small web app), or a personal chef who cooks on request (Claude skill).</p>
+
+  <h3>Option A — Python CLI engine (<code>cosmos-lite</code>) on SQLite</h3>
+  <p>A pip-installable package: Typer CLI + library API, SQLite/DuckDB store, Jinja2 for the Sinequa XML templates.</p>
+  <pre><code>cosmos-lite ingest &lt;collection&gt; dump.csv          # R2
+cosmos-lite pattern add --type exclude --match "*/legacy/*"
+cosmos-lite apply | diff | promote &lt;collection&gt;   # R3, R4, R5
+cosmos-lite export &lt;collection&gt; --format urllist|xml
+cosmos-lite status &lt;collection&gt; --set curated     # R7</code></pre>
+  <p>Covers R1–R7 and R11; classification via optional API calls (R9). Drops the web UI and multi-user auth. Roughly 1.5–2.5k lines with a pytest suite that encodes the pattern semantics from the in-repo READMEs. Matches the house preference for Python with tests built in. Weakness: no grid for eyeballing 10k URLs — mitigate with a generated HTML review report or Datasette over the SQLite file.</p>
+
+  <h3>Option B — Claude Code skill wrapping the engine</h3>
+  <p>A skill whose <code>SKILL.md</code> encodes the curation workflow, with data in a git-tracked folder (<code>collection.yaml</code>, <code>patterns.yaml</code>, <code>curated.parquet</code>, <code>deltas.parquet</code>). The skill drives the Option-A engine and adds what COSMOS needed servers for: <strong>Claude classifies content conversationally</strong> (R9 with zero infrastructure), <strong>drafts patterns by inspecting URL structure</strong> — something COSMOS cannot do — and runs QC sampling. Git supplies the audit trail. Single-curator by construction; bulk work stays in scripts so Claude reviews samples and aggregates rather than paging through 100k URLs. Per workspace rules, actually building this goes through the <code>akd_care_design_process</code>; this report is its Phase-1 input.</p>
+
+  <h3>Option C — Minimal web app (FastAPI + HTMX + SQLite)</h3>
+  <p>One 3–5k-line service reusing the Option-A engine, adding simple auth (R8) and a real curation grid — the one thing CLIs do badly and exactly where COSMOS's bulk lives (the workbench page alone is 2,276 lines of JS). Choose this only if multiple non-technical curators need simultaneous point-and-click access; at that point, trimming COSMOS itself is worth weighing against a rewrite.</p>
+
+  <h3>Option D — Git-native pipeline (files + CI as the state machine)</h3>
+  <p>No database, no server: URLs as Parquet, patterns as YAML, all in a repo. CI runs <code>apply</code>/<code>diff</code> on push; <strong>the pull request is the curation review</strong>; merge is promotion; a release tag is "in production". Config XMLs are CI-committed artifacts. Astonishingly little code (engine + ~200 lines of workflow YAML) and PR-native notifications — but curators must live in GitHub, which the SDE team already partly does.</p>
+
+  <h3>Option E — Assemble from data tools (Datasette / NocoDB)</h3>
+  <p>Point an existing table UI at the SQLite store; scripts do the rest. Fastest browsable UI for near-zero code, but pattern lifecycle logic stays script-side and you inherit another tool's deployment. Worth knowing; rarely the best endpoint.</p>
+
+  <div class="tablewrap"><table class="cmp">
+    <tr><th></th><th>A · CLI engine</th><th>B · Claude skill</th><th>C · Mini web app</th><th>D · Git-native</th><th>E · Data tools</th></tr>
+    <tr><td>Core logic R1–R7</td><td>✅</td><td>✅ via A</td><td>✅ via A</td><td>✅ via A</td><td>⚠️ partial</td></tr>
+    <tr><td>Multi-curator R8</td><td>—</td><td>—</td><td>✅</td><td>⚠️ via GitHub</td><td>✅</td></tr>
+    <tr><td>ML suggestion R9</td><td>⚠️ API calls</td><td>✅ native</td><td>⚠️ API calls</td><td>⚠️ in CI</td><td>—</td></tr>
+    <tr><td>Notifications R10</td><td>—</td><td>⚠️ MCP / git</td><td>⚠️</td><td>✅ PR-native</td><td>—</td></tr>
+    <tr><td>100k-URL scale R11</td><td>✅</td><td>✅ scripts</td><td>✅</td><td>⚠️ git limits</td><td>⚠️</td></tr>
+    <tr><td>Review UI</td><td>HTML report</td><td>conversational</td><td>✅ grid</td><td>PR diff</td><td>✅ grid</td></tr>
+    <tr><td class="num">Est. new code</td><td class="num">1.5–2.5k lines</td><td class="num">+ skill &amp; glue</td><td class="num">+ 2–3k lines</td><td class="num">+ CI YAML</td><td class="num">+ config</td></tr>
+    <tr><td>Ops burden</td><td>none</td><td>none</td><td>1 small service</td><td>none (CI)</td><td>1 tool</td></tr>
+  </table></div>
+
+  <h2 id="recommendation"><span class="sec-no">6</span>Recommendation</h2>
+  <div class="callout">
+    <span class="label">Recommended path</span>
+    <p><strong>Build A, wrap it in B, adopt D's promotion-by-PR when a second curator appears.</strong></p>
+    <p>Phase 1: the <code>cosmos-lite</code> engine, porting pattern and diff semantics with a pytest suite lifted from COSMOS's own README specs. Phase 2: design the curation skill through the AKD CARE process, with the engine as its tool layer — Claude supplies classification, pattern drafting, and QC sampling. Phase 3 (optional): add the HTMX grid or GitHub-PR flow on the same engine, no rework.</p>
+    <p>Collapse the 20-state workflow to ~6 states (Backlog → Scraped → Curating → Curated → Config Generated → Live) and keep reindexing as a "needs re-curation" flag until proven insufficient. Skip the feedback app, EJ app, backup tooling, and dashboards entirely.</p>
+  </div>
+
+  <h2 id="pitfalls"><span class="sec-no">7</span>Porting Pitfalls</h2>
+  <div class="callout warn">
+    <span class="label">Learned from the code review</span>
+    <ol style="margin-bottom:0">
+      <li><strong>Two pattern systems coexist</strong> — legacy and delta; XML generation still reads the legacy one. Reimplement only the delta semantics plus the Sinequa wildcard normalizer.</li>
+      <li><strong>Global URL uniqueness is load-bearing</strong> — several unapply paths query by URL without a collection filter. Scope to (collection, url) and fix the queries, or keep the constraint consciously.</li>
+      <li><strong>Title resolution uses guarded <code>eval()</code> and live HTTP fetches</strong> — the language is small; use a plain substitution engine with explicit, batched fetches.</li>
+      <li><strong>Include/exclude "create" is a toggle</strong> (duplicate create = delete) — decide explicitly whether to keep that contract.</li>
+      <li><strong>Specificity resolution and the 6-case unapply spec</strong> are the subtle logic — encode both as tests before implementing.</li>
+      <li><strong>Avoid the performance trap:</strong> COSMOS applies patterns synchronously in model save/delete with per-URL writes; make apply/unapply bulk set operations.</li>
+      <li><strong>Design in an error surface from day one</strong> — the repo's own still-unimplemented ADR admits async failures are invisible to users.</li>
+      <li><strong>Security hygiene:</strong> the current Sinequa client disables TLS verification and puts dev credentials in query strings; don't carry that over.</li>
+    </ol>
+  </div>
+
+  <p class="meta" style="margin-top:3rem">Full working documents: <code>cosmos_requirements.md</code> and <code>cosmos_reimplementation_options.md</code> in <code>Projects/cosmos/</code>. Sources: NASA-IMPACT/COSMOS repository (clone reviewed at HEAD, 2026-01-30) — notably <code>sde_collections/models/README_*.md</code>, <code>collection_choice_fields.py</code>, <code>delta_patterns.py</code>, <code>sinequa_api.py</code>, <code>config_generation/db_to_xml.py</code>.</p>
+</div>
