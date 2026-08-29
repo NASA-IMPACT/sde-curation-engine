@@ -28,11 +28,15 @@ class JobManager:
         self.scraper = scraper
         self._tasks: dict[int, asyncio.Task] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._starting: set[str] = set()  # collections with a job being created (TOCTOU guard)
 
     # ── infrastructure ─────────────────────────────────────────────────
 
-    def _lock(self, collection_id: str) -> asyncio.Lock:
+    def lock(self, collection_id: str) -> asyncio.Lock:
+        """One lock per collection, shared by scrape ingest and curation writes."""
         return self._locks.setdefault(collection_id, asyncio.Lock())
+
+    _lock = lock
 
     def active_for(self, collection_id: str) -> JobRun | None:
         for t in self._tasks.values():
@@ -57,6 +61,16 @@ class JobManager:
         task.add_done_callback(lambda t: self._tasks.pop(job.id, None))
         return job
 
+    async def cancel(self, collection_id: str) -> JobRun | None:
+        """Cancel the running job for a collection; waits until it has recorded 'failed'."""
+        for jid, t in list(self._tasks.items()):
+            j: JobRun | None = getattr(t, "job", None)
+            if j and j.collection_id == collection_id and not t.done():
+                t.cancel()
+                await asyncio.gather(t, return_exceptions=True)
+                return await self.db.get_job(jid)
+        return None
+
     async def shutdown(self) -> None:
         for t in list(self._tasks.values()):
             t.cancel()
@@ -71,13 +85,18 @@ class JobManager:
     # ── scrape ─────────────────────────────────────────────────────────
 
     async def start_scrape(self, c: Collection) -> JobRun:
-        if self.active_for(c.collection_id):
-            raise JobConflict(f"a job is already running for {c.collection_id}")
-        job = await self.db.insert_job(
-            JobRun(collection_id=c.collection_id, kind=JobKind.SCRAPE, state=JobState.RUNNING)
-        )
-        self._emit(c, job)
-        return await self._spawn(job, self._run_scrape(c, job))
+        cid = c.collection_id
+        if cid in self._starting or self.active_for(cid) or self.lock(cid).locked():
+            raise JobConflict(f"a job is already running for {cid}")
+        self._starting.add(cid)
+        try:
+            job = await self.db.insert_job(
+                JobRun(collection_id=cid, kind=JobKind.SCRAPE, state=JobState.RUNNING)
+            )
+            self._emit(c, job)
+            return await self._spawn(job, self._run_scrape(c, job))
+        finally:
+            self._starting.discard(cid)
 
     async def _run_scrape(self, c: Collection, job: JobRun) -> None:
         async with self._lock(c.collection_id):
@@ -92,18 +111,20 @@ class JobManager:
                 result = await self.scraper.run(c, on_progress)
                 docs = parse_documents(result.documents_path)
                 n = await self.ingest_dump(c.collection_id, docs)
+                # deltas computed against the previous dump are now meaningless
+                await self.db.replace_deltas(c.collection_id, [], [])
                 job.progress = {**job.progress, "docs": n, "summary": _brief(result.summary)}
                 job.external_ref = result.external_ref or job.external_ref
                 await self.db.finish_job(job, JobState.SUCCEEDED)
                 updated = await self.db.set_status(
                     c.collection_id, Status.SCRAPED, note=f"scrape ok: {n} documents", force=True
                 )
-                if c.status in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE):
+                if c.curated_count:  # anything already promoted must be re-reviewed
                     await self.db.set_flag(c.collection_id, True)
                     updated.needs_recuration = True
                 self._emit(updated, job)
             except asyncio.CancelledError:
-                await self.db.finish_job(job, JobState.FAILED, error="cancelled (engine shutdown)")
+                await self.db.finish_job(job, JobState.FAILED, error="cancelled by user or shutdown")
                 self._emit(c, job)
                 raise
             except (ScrapeError, OSError, ValueError) as e:

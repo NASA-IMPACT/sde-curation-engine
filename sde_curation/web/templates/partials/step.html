@@ -1,0 +1,79 @@
+{# panel for one pipeline step. context: c, job, step (Status), steps (pipeline_steps), stats #}
+{% set step = step or selected or c.status %}
+{% set info = (steps or pipeline_steps(c)) | selectattr('status', 'equalto', step) | first %}
+{% set running = job and job.state == 'running' %}
+{% set cid = c.collection_id %}
+{% macro btn(label, url, hint, primary=False, disabled=False, confirm=None, then=None, method='post') -%}
+  <button class="{{ 'primary' if primary else 'secondary' }}" title="{{ hint }}"
+          {% if disabled or running %}disabled{% endif %}
+          hx-{{ method }}="{{ url }}{% if then %}?then={{ then }}{% endif %}" hx-swap="none"
+          {% if confirm %}hx-confirm="{{ confirm }}"{% endif %}>{{ label }}</button>
+{%- endmacro %}
+<div class="step-head">
+  <strong>Step {{ info.index }} · {{ info.label }}</strong>
+  <span class="state-tag {{ info.state }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[info.state] }}</span>
+  {% if running %}<span class="spinner"></span> <small class="muted">{{ job.kind }} running… {{ job.progress.docs or 0 }} docs</small>
+    <button class="secondary mini" hx-post="/api/collections/{{ cid }}/jobs/cancel" hx-swap="none" hx-confirm="Cancel the running {{ job.kind }} job?">Cancel</button>{% endif %}
+</div>
+<p class="muted">{{ info.hint }}</p>
+
+{% if step == 'backlog' %}
+  <dl class="meta"><dt>Seed</dt><dd><a href="{{ c.seed_url }}" target="_blank" rel="noopener">{{ c.seed_url }}</a></dd>
+      <dt>Max pages</dt><dd>{{ c.max_pages }}</dd><dt>Division</dt><dd>{{ c.division }}</dd></dl>
+  <div class="inline">
+    {{ btn('Scrape' if info.state == 'current' else 'Re-scrape', '/api/collections/' ~ cid ~ '/scrape',
+           'Run the crawler on the seed URL' ~ ('; a newer crawl will flag the collection for re-curation' if info.state == 'done' else ''),
+           primary=(info.state == 'current'), confirm=('Re-run the crawl? Existing dump is replaced.' if info.state == 'done' else None)) }}
+  </div>
+
+{% elif step == 'scraped' %}
+  {% set sj = stats.last_scrape %}
+  {% if sj %}
+  <dl class="meta"><dt>Last crawl</dt><dd><span class="job j-{{ sj.state }}">{{ sj.state }}</span> {{ sj.started_at.strftime('%Y-%m-%d %H:%M') }}Z
+      {% if sj.error %}<span class="err">{{ sj.error }}</span>{% endif %}</dd>
+      <dt>URLs</dt><dd>{{ c.dump_count }} in dump{% if sj.progress.failed %}, {{ sj.progress.failed }} failed to fetch{% endif %}</dd>
+      {% if sj.progress.summary and sj.progress.summary.failures_by_reason %}<dt>Failures</dt><dd>{{ sj.progress.summary.failures_by_reason }}</dd>{% endif %}</dl>
+  {% else %}<p class="muted">Not scraped yet.</p>{% endif %}
+  <div class="inline">
+    {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Compute deltas vs. the curated set and open the curation page',
+           primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '/curate') }}
+    {{ btn('Re-scrape', '/api/collections/' ~ cid ~ '/scrape', 'Run the crawler again', confirm='Re-run the crawl? Existing dump is replaced.') }}
+  </div>
+
+{% elif step == 'curating' %}
+  <dl class="meta"><dt>Deltas</dt><dd>{{ c.delta_count }} pending ({{ stats.delta_counts.new }} new, {{ stats.delta_counts.modified }} modified, {{ stats.delta_counts.deleted }} deleted, {{ stats.delta_counts.excluded }} excluded)</dd>
+      <dt>Patterns</dt><dd>{{ stats.pattern_count }}</dd></dl>
+  <div class="inline">
+    {% if info.state == 'todo' %}
+      {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Scrape first', primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '/curate') }}
+    {% else %}
+      <a class="button primary" href="/collections/{{ cid }}/curate">Open curation</a>
+      {{ btn('Recompute deltas', '/api/collections/' ~ cid ~ '/recompute', 'Re-run the diff against the latest crawl (safe to repeat)', disabled=(c.dump_count == 0)) }}
+      {{ btn('Promote → curated' if c.delta_count else 'Mark curated', '/api/collections/' ~ cid ~ '/promote',
+             'Apply all pending deltas to the curated set' if c.delta_count else 'No pending deltas: mark the collection curated',
+             primary=(c.status == 'curating'), disabled=(c.status != 'curating'),
+             confirm=('Promote ' ~ c.delta_count ~ ' deltas to the curated set?') if c.delta_count else None) }}
+    {% endif %}
+  </div>
+
+{% elif step == 'curated' %}
+  <dl class="meta"><dt>Curated</dt><dd>{{ c.curated_count }} URLs ({{ stats.curated_excluded }} excluded from indexing)</dd></dl>
+  <div class="inline">
+    {% if info.state == 'todo' %}<span class="muted">Promote the deltas in step 3 first.</span>
+    {% else %}
+      <button class="primary" disabled title="Phase 5 — export + test indexing not built yet">Index to test</button>
+      {{ btn('Review / re-curate', '/api/collections/' ~ cid ~ '/recompute', 'Recompute deltas against the current crawl and open the curation page (status changes only if something differs)', then='/collections/' ~ cid ~ '/curate') }}
+    {% endif %}
+  </div>
+
+{% elif step == 'config_generated' %}
+  <p class="muted">Export the curated set to S3 and dispatch the WEB_COSMOS indexer against the test index. <em>Not built yet (Phase 5).</em></p>
+  <div class="inline"><button class="primary" disabled title="Phase 5">Index to test</button>
+    {% if info.state != 'todo' %}<button class="secondary" disabled title="Phase 5">Re-index</button>{% endif %}</div>
+
+{% elif step == 'live' %}
+  <p class="muted">Validate test-index counts/titles against the curated set, then index to production. <em>Not built yet (Phase 6).</em></p>
+  <div class="inline"><button class="primary" disabled title="Phase 6">Validate &amp; go live</button></div>
+{% endif %}
+
+{% if job and job.state == 'failed' and step == c.status %}<div class="err">Last {{ job.kind }} failed: {{ job.error }}</div>{% endif %}

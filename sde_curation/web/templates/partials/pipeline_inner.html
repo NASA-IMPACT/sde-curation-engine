@@ -1,0 +1,13 @@
+<ol class="pipeline">
+  {% for s in pipeline_steps(c) %}
+  <li class="{{ s.state }} {% if s.status == (selected or c.status) %}selected{% endif %}" title="{{ s.hint }}" role="button" tabindex="0"
+      hx-trigger="click, keyup[key=='Enter']"
+      hx-get="/collections/{{ c.collection_id }}/step/{{ s.status }}" hx-target="#step-panel" hx-swap="innerHTML"
+      hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.classList.add('selected')">
+    <span class="n">{{ loop.index }}</span> {{ s.label }}</li>
+  {% endfor %}
+  {% if c.needs_recuration %}<li class="warn" title="A newer crawl exists — re-curate and re-index">⚠ needs re-curation</li>{% endif %}
+</ol>
+<div id="step-panel" class="next">
+  {% include "partials/step.html" %}
+</div>

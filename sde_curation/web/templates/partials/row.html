@@ -1,19 +1,6 @@
 <tr id="row-{{ c.collection_id|dom_id }}"
     hx-get="/collections/{{ c.collection_id }}/row"
-    hx-trigger="sse:collection[detail.data.includes('\"{{ c.collection_id }}\"')]"
-    hx-swap="outerHTML">
-  <td><a href="/collections/{{ c.collection_id }}">{{ c.name }}</a><br><small class="muted">{{ c.collection_id }}</small></td>
-  <td><span class="status s-{{ c.status }}">{{ c.status }}</span>
-      {% if c.needs_recuration %}<span class="flag" title="needs re-curation">⚠</span>{% endif %}</td>
-  <td>{{ c.dump_count }}</td>
-  <td>{{ c.delta_count }}</td>
-  <td>{{ c.curated_count }}</td>
-  <td>{% if job %}<span class="job j-{{ job.state }}" title="{{ job.error or '' }}">{{ job.kind }} · {{ job.state }}</span>
-      {% if job.progress.docs is defined %}<small class="muted"> {{ job.progress.docs }} docs{% if job.progress.failed %} / {{ job.progress.failed }} failed{% endif %}</small>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
-  <td><time datetime="{{ c.updated_at.isoformat() }}">{{ c.updated_at.strftime('%Y-%m-%d %H:%M:%S') }}Z</time></td>
-  <td class="actions">
-    {% if not (job and job.state == 'running') %}
-    <button hx-post="/api/collections/{{ c.collection_id }}/scrape" hx-target="closest tr" hx-swap="outerHTML" title="Run crawl">Scrape</button>
-    {% else %}<span class="spinner" title="running"></span>{% endif %}
-  </td>
+    hx-trigger="sse:collection[detail.data.includes('\"{{ c.collection_id }}\"')], every 10s"
+    hx-sync="this:replace" hx-swap="innerHTML">
+{% include "partials/row_cells.html" %}
 </tr>

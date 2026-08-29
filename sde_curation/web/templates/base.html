@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js"></script>
   <script src="/static/sse.js"></script>
+  <script src="/static/json-enc.js"></script>
 </head>
 <body hx-ext="sse" sse-connect="/events">
   <header>
@@ -18,6 +19,13 @@
     // Connection indicator: green when the SSE stream is open.
     document.body.addEventListener('htmx:sseOpen', () => document.getElementById('conn').classList.add('on'));
     document.body.addEventListener('htmx:sseError', () => document.getElementById('conn').classList.remove('on'));
+    // One place for server-side refusals (4xx/5xx). Aborted/replaced requests never alert.
+    document.body.addEventListener('htmx:responseError', (e) => {
+      let msg = e.detail.xhr.responseText || e.detail.xhr.statusText;
+      try { msg = JSON.parse(msg).detail || msg; } catch (_) {}
+      alert(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    });
+
   </script>
 </body>
 </html>

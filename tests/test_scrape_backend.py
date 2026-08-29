@@ -3,7 +3,6 @@
 import asyncio
 import json
 import sys
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -17,33 +16,7 @@ from sde_curation.backends.scrape import (
 )
 from sde_curation.config import Settings
 from sde_curation.models import Collection, Division
-
-FAKE_RUN_PY = textwrap.dedent(
-    """
-    import json, sys, time
-    from pathlib import Path
-    ROOT = Path(__file__).resolve().parent
-    job = json.loads(Path(sys.argv[sys.argv.index("--job") + 1]).read_text())
-    cid = job["collection_id"]
-    log = ROOT / "logs" / "jobs" / f"{cid}.log"; log.parent.mkdir(parents=True, exist_ok=True)
-    docs = ROOT / "output" / "collections" / f"{cid}.json"; docs.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("w") as out:
-        out.write(f"# job={cid}.json collection_id={cid}\\n# seed={job['seed']}\\n")
-        if job.get("max_pages") == 13:  # sentinel: simulate a crash
-            out.write("\\n# ERROR: RuntimeError('boom')\\n# exit=1 elapsed_s=0.1\\n"); sys.exit(1)
-        n = job["max_pages"]
-        for i in range(1, n + 1):
-            st = "fail" if i % 5 == 0 else "ok"
-            out.write(f"  {i:<5} {st:<10} {0:<6} {job['seed']}/p{i}\\n"); out.flush()
-            time.sleep(0.02)
-        out.write(f"  ... {n - n // 5} docs / {n // 5} failed  (cap {n})\\n")
-        out.write("\\n# exit=0 elapsed_s=0.5\\n")
-    docs.write_text(json.dumps([
-        {"url": f"{job['seed']}/p{i}", "title": f"Page {i}", "full_text": "text " * 5, "content_type": "text/html", "depth": 0}
-        for i in range(1, n + 1) if i % 5
-    ]))
-    """
-)
+from tests.conftest import FAKE_RUN_PY
 
 
 @pytest.fixture

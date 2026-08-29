@@ -138,6 +138,10 @@ class LocalSubprocessScraper:
         tail = asyncio.create_task(self._tail(p["log"], on_progress, proc))
         try:
             stdout, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            proc.kill()
+            await proc.wait()
+            raise
         finally:
             tail.cancel()
         progress = LogProgress()

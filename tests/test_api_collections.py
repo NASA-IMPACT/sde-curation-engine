@@ -4,6 +4,7 @@ import json
 import yaml
 
 from sde_curation.events import sse_format
+from tests.conftest import seed_dump
 
 
 async def test_create_list_get(client, settings):
@@ -26,13 +27,23 @@ async def test_status_change_and_history(client):
     await client.post("/api/collections", json={"seed_url": "https://a.org", "name": "A"})
     r = await client.post("/api/collections/a.org/status", json={"status": "live"})
     assert r.status_code == 409  # illegal transition
+    r = await client.post("/api/collections/a.org/status", json={"status": "scraped"})
+    assert r.status_code == 409 and "scrape first" in r.text  # data rule: no dump yet
+    await seed_dump(client, "a.org")
     r = await client.post("/api/collections/a.org/status", json={"status": "scraped", "note": "manual"})
     assert r.status_code == 200 and r.json()["status"] == "scraped"
     hist = (await client.get("/api/collections/a.org/history")).json()
     assert [h["new_status"] for h in hist] == ["backlog", "scraped"] and hist[1]["note"] == "manual"
-    # htmx request gets the row partial back
-    r = await client.post("/api/collections/a.org/status", json={"status": "curating"}, headers={"HX-Request": "true"})
+    # htmx request from a dashboard row gets the row partial back; elsewhere a refresh header
+    r = await client.post("/api/collections/a.org/status", json={"status": "curating"},
+                          headers={"HX-Request": "true", "HX-Target": "row-a_org"})
     assert r.status_code == 200 and 'id="row-a_org"' in r.text and "curating" in r.text
+    r = await client.post("/api/collections/a.org/status", json={"status": "curated"}, headers={"HX-Request": "true"})
+    assert r.status_code == 409 and "nothing has been promoted" in r.text
+    r = await client.post("/api/collections/a.org/status?then=/x", json={"status": "scraped"}, headers={"HX-Request": "true"})
+    assert r.status_code == 200 and r.headers["HX-Redirect"] == "/x"
+    r = await client.post("/api/collections/a.org/status", json={"status": "curating"}, headers={"HX-Request": "true"})
+    assert r.headers["HX-Refresh"] == "true"
 
 
 async def test_pages_render(client):
@@ -40,13 +51,14 @@ async def test_pages_render(client):
     home = await client.get("/")
     assert home.status_code == 200 and "Alpha" in home.text and 'sse-connect="/events"' in home.text
     page = await client.get("/collections/a.org")
-    assert page.status_code == 200 and "Status history" in page.text
+    assert page.status_code == 200 and "History" in page.text and "pipeline" in page.text
     assert (await client.get("/collections/nope")).status_code == 404
     assert (await client.get("/static/htmx.min.js")).status_code == 200
 
 
 async def test_sse_receives_status_event(app, client):
     await client.post("/api/collections", json={"seed_url": "https://a.org", "name": "A"})
+    await seed_dump(client, "a.org")
     bus = app.state.bus
     got = []
 

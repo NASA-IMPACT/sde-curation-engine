@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import yaml
@@ -27,3 +28,7 @@ def write_patterns_yaml(root: Path, collection_id: str, patterns: list[Pattern])
     data = [p.model_dump(mode="json", exclude={"collection_id"}) for p in patterns]
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return path
+
+
+def remove_collection_files(root: Path, collection_id: str) -> None:
+    shutil.rmtree(root / collection_id, ignore_errors=True)

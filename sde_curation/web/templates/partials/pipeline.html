@@ -1,0 +1,8 @@
+{# Stable wrapper owns the SSE trigger + polling timer; only its contents are swapped, so a
+   burst of events can never lose the listener/timer. Re-renders at the collection's current step. #}
+<div id="pipeline-{{ c.collection_id|dom_id }}" class="pipeline-wrap"
+     hx-get="/collections/{{ c.collection_id }}/pipeline"
+     hx-trigger="sse:collection[detail.data.includes('\"{{ c.collection_id }}\"')], every 5s"
+     hx-sync="this:replace" hx-swap="innerHTML">
+{% include "partials/pipeline_inner.html" %}
+</div>

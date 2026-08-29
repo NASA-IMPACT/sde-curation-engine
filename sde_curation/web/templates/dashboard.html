@@ -1,9 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="toolbar">
+  {% if error %}<div class="banner err">{{ error }}</div>{% endif %}
   <form method="post" action="/collections" class="inline">
-    <input name="seed_url" placeholder="https://science.nasa.gov/" required size="34">
-    <input name="name" placeholder="Display name" required size="22">
+    <input name="seed_url" placeholder="https://science.nasa.gov/" required size="34" value="{{ form.seed_url if form else '' }}">
+    <input name="name" placeholder="Display name" required size="22" value="{{ form.name if form else '' }}">
     <select name="division">
       {% for d in ["General","Astrophysics","Biological and Physical Sciences","Earth Science","Heliophysics","Planetary Science"] %}
       <option>{{ d }}</option>{% endfor %}
@@ -17,9 +18,8 @@
   <thead>
     <tr><th>Collection</th><th>Status</th><th>Dump</th><th>Delta</th><th>Curated</th><th>Last job</th><th>Updated</th><th></th></tr>
   </thead>
-  <tbody sse-swap="collection_deleted" hx-swap="none">
-    {% for r in rows %}{% with c=r.c, job=r.job %}{% include "partials/row.html" %}{% endwith %}{% endfor %}
-    {% if not rows %}<tr><td colspan="8" class="muted">No collections yet.</td></tr>{% endif %}
+  <tbody id="rows" hx-get="/rows" hx-trigger="sse:collection_deleted, sse:collection_created" hx-swap="innerHTML" hx-sync="this:replace">
+    {% include "partials/rows.html" %}
   </tbody>
 </table>
 {% endblock %}

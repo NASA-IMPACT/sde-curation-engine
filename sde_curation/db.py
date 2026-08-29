@@ -11,6 +11,8 @@ import aiosqlite
 
 from .models import (
     Collection,
+    CuratedUrl,
+    DeltaUrl,
     DumpUrl,
     JobRun,
     JobState,
@@ -268,6 +270,109 @@ class Database:
             (collection_id, limit, offset),
         )
         return [DumpUrl(**dict(r)) for r in await cur.fetchall()]
+
+    async def load_dump(self, collection_id: str) -> list[DumpUrl]:
+        cur = await self.conn.execute(
+            "SELECT collection_id,url,scraped_title,content_type,depth FROM dump_urls WHERE collection_id=?",
+            (collection_id,),
+        )
+        return [DumpUrl(**dict(r)) for r in await cur.fetchall()]
+
+    async def dump_urls(self, collection_id: str) -> list[str]:
+        cur = await self.conn.execute(
+            "SELECT url FROM dump_urls WHERE collection_id=?", (collection_id,)
+        )
+        return [r[0] for r in await cur.fetchall()]
+
+    async def dump_full_text(self, collection_id: str) -> dict[str, str | None]:
+        cur = await self.conn.execute(
+            "SELECT url, full_text FROM dump_urls WHERE collection_id=?", (collection_id,)
+        )
+        return {r[0]: r[1] for r in await cur.fetchall()}
+
+    # ── deltas / curated ───────────────────────────────────────────────
+
+    async def load_deltas(self, collection_id: str) -> list[DeltaUrl]:
+        cur = await self.conn.execute(
+            "SELECT * FROM delta_urls WHERE collection_id=?", (collection_id,)
+        )
+        return [DeltaUrl(**dict(r)) for r in await cur.fetchall()]
+
+    async def list_deltas(
+        self, collection_id: str, *, kind: str | None = None, excluded: bool | None = None,
+        q: str | None = None, limit: int = 100, offset: int = 0,
+    ) -> tuple[list[DeltaUrl], int]:
+        where, args = ["collection_id=?"], [collection_id]
+        if kind:
+            where.append("kind=?"); args.append(kind)
+        if excluded is not None:
+            where.append("excluded=?"); args.append(int(excluded))
+        if q:
+            where.append("(url LIKE ? OR title LIKE ? OR scraped_title LIKE ?)")
+            args += [f"%{q}%"] * 3
+        w = " AND ".join(where)
+        cur = await self.conn.execute(f"SELECT COUNT(*) FROM delta_urls WHERE {w}", args)
+        total = (await cur.fetchone())[0]
+        cur = await self.conn.execute(
+            f"SELECT * FROM delta_urls WHERE {w} ORDER BY kind, url LIMIT ? OFFSET ?",
+            [*args, limit, offset],
+        )
+        return [DeltaUrl(**dict(r)) for r in await cur.fetchall()], total
+
+    async def replace_deltas(
+        self, collection_id: str, deltas: list[DeltaUrl], effects: list[tuple[int, str, str]]
+    ) -> None:
+        await self.conn.execute("DELETE FROM delta_urls WHERE collection_id=?", (collection_id,))
+        await self.conn.executemany(
+            """INSERT INTO delta_urls (collection_id,url,kind,scraped_title,title,division,document_type,
+               excluded,title_ml,division_ml,document_type_ml) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            [(d.collection_id, d.url, d.kind, d.scraped_title, d.title, d.division, d.document_type,
+              int(d.excluded), d.title_ml, d.division_ml, d.document_type_ml) for d in deltas],
+        )
+        await self.conn.execute(
+            "DELETE FROM pattern_effects WHERE collection_id=?", (collection_id,)
+        )
+        await self.conn.executemany(
+            "INSERT OR IGNORE INTO pattern_effects (pattern_id,collection_id,url,field) VALUES (?,?,?,?)",
+            [(pid, collection_id, url, fld) for pid, url, fld in effects],
+        )
+        await self.conn.execute(
+            "UPDATE collections SET delta_count=?, updated_at=? WHERE collection_id=?",
+            (len(deltas), _iso(utcnow()), collection_id),
+        )
+        await self.conn.commit()
+
+    async def set_delta_ml(self, collection_id: str, items: list[dict[str, Any]]) -> int:
+        """Bulk-write ML suggestions (never touches the effective fields)."""
+        await self.conn.executemany(
+            """UPDATE delta_urls SET title_ml=COALESCE(?, title_ml), division_ml=COALESCE(?, division_ml),
+               document_type_ml=COALESCE(?, document_type_ml) WHERE collection_id=? AND url=?""",
+            [(i.get("title"), i.get("division"), i.get("document_type"), collection_id, i["url"])
+             for i in items],
+        )
+        await self.conn.commit()
+        return len(items)
+
+    async def load_curated(self, collection_id: str) -> list[CuratedUrl]:
+        cur = await self.conn.execute(
+            "SELECT * FROM curated_urls WHERE collection_id=?", (collection_id,)
+        )
+        return [CuratedUrl(**dict(r)) for r in await cur.fetchall()]
+
+    async def replace_curated(self, collection_id: str, rows: list[CuratedUrl]) -> int:
+        await self.conn.execute("DELETE FROM curated_urls WHERE collection_id=?", (collection_id,))
+        await self.conn.executemany(
+            """INSERT INTO curated_urls (collection_id,url,scraped_title,title,division,document_type,excluded)
+               VALUES (?,?,?,?,?,?,?)""",
+            [(r.collection_id, r.url, r.scraped_title, r.title, r.division, r.document_type,
+              int(r.excluded)) for r in rows],
+        )
+        await self.conn.execute(
+            "UPDATE collections SET curated_count=?, updated_at=? WHERE collection_id=?",
+            (len(rows), _iso(utcnow()), collection_id),
+        )
+        await self.conn.commit()
+        return len(rows)
 
     # ── patterns ───────────────────────────────────────────────────────
 
