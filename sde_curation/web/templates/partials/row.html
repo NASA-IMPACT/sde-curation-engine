@@ -9,6 +9,11 @@
   <td>{{ c.delta_count }}</td>
   <td>{{ c.curated_count }}</td>
   <td>{% if job %}<span class="job j-{{ job.state }}" title="{{ job.error or '' }}">{{ job.kind }} · {{ job.state }}</span>
-      {% if job.progress %}<small class="muted"> {{ job.progress }}</small>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+      {% if job.progress.docs is defined %}<small class="muted"> {{ job.progress.docs }} docs{% if job.progress.failed %} / {{ job.progress.failed }} failed{% endif %}</small>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
   <td><time datetime="{{ c.updated_at.isoformat() }}">{{ c.updated_at.strftime('%Y-%m-%d %H:%M:%S') }}Z</time></td>
+  <td class="actions">
+    {% if not (job and job.state == 'running') %}
+    <button hx-post="/api/collections/{{ c.collection_id }}/scrape" hx-target="closest tr" hx-swap="outerHTML" title="Run crawl">Scrape</button>
+    {% else %}<span class="spinner" title="running"></span>{% endif %}
+  </td>
 </tr>

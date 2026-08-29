@@ -14,9 +14,11 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from ..backends.scrape import make_scrape_backend
 from ..config import Settings, get_settings
 from ..db import Database
 from ..events import EventBus, sse_format
+from ..jobs import JobConflict, JobManager
 from ..models import Collection, CollectionCreate, Status
 from ..store import write_collection_yaml
 
@@ -51,9 +53,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.db = db
         app.state.bus = EventBus()
+        jobs = JobManager(settings, db, app.state.bus, scraper=make_scrape_backend(settings))
+        app.state.jobs = jobs
+        await jobs.recover()
         try:
             yield
         finally:
+            await jobs.shutdown()
             await db.close()
 
     app = FastAPI(title="SDE Curation Engine", version="0.1.0", lifespan=lifespan)
@@ -185,6 +191,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_history(request: Request, collection_id: str):
         await must_get(request, collection_id)
         return await db(request).status_history(collection_id)
+
+    # ── jobs ───────────────────────────────────────────────────────────
+
+    @app.post("/api/collections/{collection_id}/scrape", status_code=202, response_model=None)
+    async def api_scrape(request: Request, collection_id: str):
+        c = await must_get(request, collection_id)
+        jobs: JobManager = request.app.state.jobs
+        try:
+            job = await jobs.start_scrape(c)
+        except JobConflict as e:
+            raise HTTPException(409, str(e)) from e
+        if _is_htmx(request):
+            return templates.TemplateResponse(
+                request, "partials/row.html", await row_context(request, c)
+            )
+        return job
+
+    @app.get("/api/collections/{collection_id}/jobs")
+    async def api_jobs(request: Request, collection_id: str):
+        await must_get(request, collection_id)
+        return await db(request).list_jobs(collection_id)
+
+    @app.get("/api/collections/{collection_id}/dump")
+    async def api_dump(request: Request, collection_id: str, limit: int = 100, offset: int = 0):
+        await must_get(request, collection_id)
+        rows = await db(request).list_dump(collection_id, limit=min(limit, 1000), offset=offset)
+        return [r.model_dump(exclude={"full_text"}) for r in rows]
 
     # ── SSE ────────────────────────────────────────────────────────────
 

@@ -15,11 +15,11 @@
 
 <table id="collections">
   <thead>
-    <tr><th>Collection</th><th>Status</th><th>Dump</th><th>Delta</th><th>Curated</th><th>Last job</th><th>Updated</th></tr>
+    <tr><th>Collection</th><th>Status</th><th>Dump</th><th>Delta</th><th>Curated</th><th>Last job</th><th>Updated</th><th></th></tr>
   </thead>
   <tbody sse-swap="collection_deleted" hx-swap="none">
     {% for r in rows %}{% with c=r.c, job=r.job %}{% include "partials/row.html" %}{% endwith %}{% endfor %}
-    {% if not rows %}<tr><td colspan="7" class="muted">No collections yet.</td></tr>{% endif %}
+    {% if not rows %}<tr><td colspan="8" class="muted">No collections yet.</td></tr>{% endif %}
   </tbody>
 </table>
 {% endblock %}

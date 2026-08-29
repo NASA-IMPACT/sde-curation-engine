@@ -11,6 +11,7 @@ import aiosqlite
 
 from .models import (
     Collection,
+    DumpUrl,
     JobRun,
     JobState,
     Pattern,
@@ -238,6 +239,35 @@ class Database:
             "SELECT * FROM status_history WHERE collection_id=? ORDER BY id", (collection_id,)
         )
         return [StatusHistory(**dict(r)) for r in await cur.fetchall()]
+
+    # ── dump urls ──────────────────────────────────────────────────────
+
+    async def replace_dump(self, collection_id: str, rows: list[DumpUrl]) -> int:
+        """Bulk-replace the dump for a collection in one transaction; returns row count."""
+        await self.conn.execute("DELETE FROM dump_urls WHERE collection_id=?", (collection_id,))
+        await self.conn.executemany(
+            """INSERT OR REPLACE INTO dump_urls
+               (collection_id,url,scraped_title,full_text,content_type,depth) VALUES (?,?,?,?,?,?)""",
+            [(r.collection_id, r.url, r.scraped_title, r.full_text, r.content_type, r.depth)
+             for r in rows],
+        )
+        cur = await self.conn.execute(
+            "SELECT COUNT(*) FROM dump_urls WHERE collection_id=?", (collection_id,)
+        )
+        n = (await cur.fetchone())[0]
+        await self.conn.execute(
+            "UPDATE collections SET dump_count=?, updated_at=? WHERE collection_id=?",
+            (n, _iso(utcnow()), collection_id),
+        )
+        await self.conn.commit()
+        return n
+
+    async def list_dump(self, collection_id: str, limit: int = 100, offset: int = 0) -> list[DumpUrl]:
+        cur = await self.conn.execute(
+            "SELECT * FROM dump_urls WHERE collection_id=? ORDER BY url LIMIT ? OFFSET ?",
+            (collection_id, limit, offset),
+        )
+        return [DumpUrl(**dict(r)) for r in await cur.fetchall()]
 
     # ── patterns ───────────────────────────────────────────────────────
 

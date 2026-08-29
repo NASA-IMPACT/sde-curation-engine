@@ -23,3 +23,6 @@ button { background:var(--accent); color:#fff; border-color:var(--accent); curso
 .dot { width:.6rem; height:.6rem; border-radius:50%; background:#dc2626; display:inline-block; } .dot.on { background:#16a34a; }
 dl.meta { display:grid; grid-template-columns:max-content 1fr; gap:.2rem 1rem; }
 dl.meta dt { color:var(--muted); } dl.meta dd { margin:0; }
+.actions button { padding:.15rem .5rem; font-size:.8rem; }
+.spinner { width:.9rem; height:.9rem; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; display:inline-block; animation:spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
