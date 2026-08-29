@@ -1,0 +1,14 @@
+<tr id="row-{{ c.collection_id|dom_id }}"
+    hx-get="/collections/{{ c.collection_id }}/row"
+    hx-trigger="sse:collection[detail.data.includes('\"{{ c.collection_id }}\"')]"
+    hx-swap="outerHTML">
+  <td><a href="/collections/{{ c.collection_id }}">{{ c.name }}</a><br><small class="muted">{{ c.collection_id }}</small></td>
+  <td><span class="status s-{{ c.status }}">{{ c.status }}</span>
+      {% if c.needs_recuration %}<span class="flag" title="needs re-curation">⚠</span>{% endif %}</td>
+  <td>{{ c.dump_count }}</td>
+  <td>{{ c.delta_count }}</td>
+  <td>{{ c.curated_count }}</td>
+  <td>{% if job %}<span class="job j-{{ job.state }}" title="{{ job.error or '' }}">{{ job.kind }} · {{ job.state }}</span>
+      {% if job.progress %}<small class="muted"> {{ job.progress }}</small>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+  <td><time datetime="{{ c.updated_at.isoformat() }}">{{ c.updated_at.strftime('%Y-%m-%d %H:%M:%S') }}Z</time></td>
+</tr>

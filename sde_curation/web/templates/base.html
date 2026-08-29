@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}SDE Curation Engine{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/sse.js"></script>
+</head>
+<body hx-ext="sse" sse-connect="/events">
+  <header>
+    <a href="/" class="brand">SDE Curation Engine</a>
+    <span id="conn" class="dot" title="SSE connection"></span>
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+  <script>
+    // Connection indicator: green when the SSE stream is open.
+    document.body.addEventListener('htmx:sseOpen', () => document.getElementById('conn').classList.add('on'));
+    document.body.addEventListener('htmx:sseError', () => document.getElementById('conn').classList.remove('on'));
+  </script>
+</body>
+</html>

@@ -47,4 +47,4 @@ async def test_health(tmp_path):
         AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
     ):
         r = await c.get("/health")
-    assert r.status_code == 200 and r.json() == {"ok": True, "db": "ok"}
+    assert r.status_code == 200 and r.json() == {"ok": True, "db": "ok", "sse_clients": 0}

@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}{{ c.name }} · SDE Curation Engine{% endblock %}
+{% block content %}
+<h1>{{ c.name }} <small class="muted">{{ c.collection_id }}</small></h1>
+
+<table id="collections"><tbody>
+  {% set job = jobs[0] if jobs else None %}
+  {% include "partials/row.html" %}
+</tbody></table>
+
+<dl class="meta">
+  <dt>Seed</dt><dd><a href="{{ c.seed_url }}" target="_blank" rel="noopener">{{ c.seed_url }}</a></dd>
+  <dt>Division</dt><dd>{{ c.division }}</dd>
+  <dt>Connector</dt><dd>{{ c.connector }}</dd>
+  <dt>Max pages</dt><dd>{{ c.max_pages }}</dd>
+</dl>
+
+<section>
+  <h2>Set status</h2>
+  <form hx-post="/api/collections/{{ c.collection_id }}/status" hx-ext="json-enc" hx-target="#row-{{ c.collection_id|dom_id }}" hx-swap="outerHTML" class="inline"
+        hx-headers='{"Content-Type":"application/json"}' hx-vals='js:{status: document.getElementById("st").value, note: document.getElementById("note").value}'>
+    <select id="st" name="status">{% for s in statuses %}<option {% if s == c.status %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+    <input id="note" name="note" placeholder="note" size="30">
+    <button>Apply</button>
+  </form>
+</section>
+
+<section>
+  <h2>Status history</h2>
+  <table>
+    <thead><tr><th>At</th><th>From</th><th>To</th><th>Note</th></tr></thead>
+    <tbody>{% for h in history|reverse %}
+      <tr><td>{{ h.at.strftime('%Y-%m-%d %H:%M:%S') }}Z</td><td>{{ h.old_status or '—' }}</td><td>{{ h.new_status }}</td><td>{{ h.note or '' }}</td></tr>
+    {% endfor %}</tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Jobs</h2>
+  {% if jobs %}
+  <table>
+    <thead><tr><th>#</th><th>Kind</th><th>State</th><th>Started</th><th>Finished</th><th>Error</th></tr></thead>
+    <tbody>{% for j in jobs %}
+      <tr><td>{{ j.id }}</td><td>{{ j.kind }}</td><td><span class="job j-{{ j.state }}">{{ j.state }}</span></td>
+          <td>{{ j.started_at.strftime('%H:%M:%S') }}</td><td>{{ j.finished_at.strftime('%H:%M:%S') if j.finished_at else '' }}</td>
+          <td class="err">{{ j.error or '' }}</td></tr>
+    {% endfor %}</tbody>
+  </table>
+  {% else %}<p class="muted">No jobs yet.</p>{% endif %}
+</section>
+{% endblock %}
