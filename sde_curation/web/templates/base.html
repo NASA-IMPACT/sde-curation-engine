@@ -16,6 +16,19 @@
   </header>
   <main>{% block content %}{% endblock %}</main>
   <script>
+    // Per-URL edits = exact-URL patterns (used by the Deltas grid).
+    async function editField(cid, url, type, value) {
+      const r = await fetch(`/api/collections/${encodeURIComponent(cid)}/urls`, {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(value ? {url, type, value} : {url, type, value: null})});
+      if (!r.ok) { let m = await r.text(); try { m = JSON.parse(m).detail || m; } catch (_) {} alert(m); return; }
+      location.reload();
+    }
+    function editTitle(cid, url, current) {
+      const v = prompt("Title for\n" + url + "\n\nTip: {title} = scraped title, {collection} = collection name", current);
+      if (v === null) return;
+      if (!v.trim()) { alert("Title cannot be empty. To fall back to the pattern/curated value, delete the exact-URL title pattern in Patterns & AI."); return; }
+      editField(cid, url, "title", v);
+    }
     // Connection indicator: green when the SSE stream is open.
     document.body.addEventListener('htmx:sseOpen', () => document.getElementById('conn').classList.add('on'));
     document.body.addEventListener('htmx:sseError', () => document.getElementById('conn').classList.remove('on'));

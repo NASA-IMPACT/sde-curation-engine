@@ -51,7 +51,12 @@ async def test_pages_render(client):
     home = await client.get("/")
     assert home.status_code == 200 and "Alpha" in home.text and 'sse-connect="/events"' in home.text
     page = await client.get("/collections/a.org")
-    assert page.status_code == 200 and "History" in page.text and "pipeline" in page.text
+    assert page.status_code == 200 and "pipeline" in page.text and 'role="tab"' in page.text
+    for tab in ("overview", "urls", "patterns", "activity"):
+        r = await client.get(f"/collections/a.org?tab={tab}")
+        assert r.status_code == 200 and f'data-tab="{tab}"' in r.text, tab
+    assert "Status history" in (await client.get("/collections/a.org?tab=activity")).text
+    assert (await client.get("/collections/a.org?tab=bogus")).status_code == 200  # falls back to overview
     assert (await client.get("/collections/nope")).status_code == 404
     assert (await client.get("/static/htmx.min.js")).status_code == 200
 

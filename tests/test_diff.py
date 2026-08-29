@@ -47,9 +47,9 @@ def test_pattern_change_on_curated_row_creates_modified_delta_and_effects():
 def test_recompute_preserves_ml_suggestions():
     d = dump(("https://x/a", "A"))
     first = rc(d, [])
-    first.deltas[0].division_ml = "Heliophysics"
+    first.deltas[0].division_ai = "Heliophysics"
     again = rc(d, [], prev=first.deltas)
-    assert again.deltas[0].division_ml == "Heliophysics"
+    assert again.deltas[0].division_ai == "Heliophysics"
 
 
 def test_promote_upserts_and_tombstones():

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
@@ -21,6 +23,7 @@ from ..curation import CurationService
 from ..db import Database
 from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
+from ..llm.base import LLMError, make_llm
 from ..models import (
     Collection,
     CollectionCreate,
@@ -64,9 +67,9 @@ def next_action(c: Collection, job) -> dict:
                 "hint": "Run the crawler on the seed URL"}
     if c.status is Status.SCRAPED:
         return {"label": "Start curating", "kind": "post", "url": f"/api/collections/{cid}/recompute",
-                "then": f"/collections/{cid}/curate", "hint": "Compute deltas vs. the curated set"}
+                "then": f"/collections/{cid}?tab=urls&set=deltas", "hint": "Compute deltas vs. the curated set"}
     if c.status is Status.CURATING:
-        return {"label": "Open curation", "kind": "link", "url": f"/collections/{cid}/curate",
+        return {"label": "Open curation", "kind": "link", "url": f"/collections/{cid}?tab=urls&set=deltas",
                 "hint": "Review deltas, add patterns, then promote"}
     if c.status is Status.CURATED:
         return {"label": "Index to test", "kind": "disabled", "hint": "Phase 5 — not built yet"}
@@ -96,7 +99,22 @@ def pipeline_steps(c: Collection) -> list[dict]:
     ]
 
 
-templates.env.globals.update(next_action=next_action, pipeline_steps=pipeline_steps)
+STATUS_ICON = {Status.BACKLOG: "○", Status.SCRAPED: "⬇", Status.CURATING: "✎", Status.CURATED: "✓",
+               Status.CONFIG_GENERATED: "⚙", Status.LIVE: "●"}
+STATUS_LABEL = {st: label for st, label, _ in PIPELINE}
+
+
+def status_icon(st) -> str:
+    return STATUS_ICON.get(Status(st), "")
+
+
+def status_label(st) -> str:
+    return STATUS_LABEL.get(Status(st), str(st))
+
+
+templates.env.globals.update(
+    next_action=next_action, pipeline_steps=pipeline_steps, status_icon=status_icon, status_label=status_label
+)
 
 
 class StatusChange(BaseModel):
@@ -125,6 +143,11 @@ def tri_bool(v: str | None) -> bool | None:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+class AiDecision(BaseModel):
+    url: str
+    field: Literal["title", "division", "document_type"]
+
+
 def _is_htmx(request: Request) -> bool:
     return request.headers.get("HX-Request") == "true"
 
@@ -149,7 +172,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.db = db
         app.state.bus = EventBus()
-        jobs = JobManager(settings, db, app.state.bus, scraper=make_scrape_backend(settings))
+        jobs = JobManager(
+            settings, db, app.state.bus, scraper=make_scrape_backend(settings),
+            llm=lambda: make_llm(settings),  # lazy: a missing API key only fails the LLM job
+        )
         app.state.jobs = jobs
         app.state.curation = CurationService(db, lock_for=jobs.lock)
         await jobs.recover()
@@ -223,18 +249,137 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rows = [await row_context(request, c) for c in await db(request).list_collections()]
         return templates.TemplateResponse(request, "partials/rows.html", {"rows": rows})
 
+    TABS = ("overview", "urls", "patterns", "activity")
+    SETS = ("dump", "deltas", "curated")
+
+    def list_params(request: Request) -> dict[str, Any]:
+        qp = request.query_params
+        try:
+            page = max(1, int(qp.get("page", 1)))
+        except ValueError:
+            page = 1
+        try:
+            per = max(10, min(500, int(qp.get("per", 50))))
+        except ValueError:
+            per = 50
+        return {
+            "q": (qp.get("q") or "").strip() or None, "kind": qp.get("kind") or None,
+            "excluded": tri_bool(qp.get("excluded")), "division": qp.get("division") or None,
+            "document_type": qp.get("document_type") or None, "page": page, "per": per,
+        }
+
+    async def urls_context(request: Request, c: Collection, set_: str) -> dict[str, Any]:
+        d, lp = db(request), list_params(request)
+        off = (lp["page"] - 1) * lp["per"]
+        effects: dict[str, dict[str, str]] = {}
+        has_delta: set[str] = set()
+        if set_ == "dump":
+            rows, total = await d.list_dump(c.collection_id, limit=lp["per"], offset=off, q=lp["q"])
+        elif set_ == "curated":
+            rows, total = await d.list_curated(
+                c.collection_id, limit=lp["per"], offset=off, q=lp["q"], excluded=lp["excluded"]
+            )
+            has_delta = await d.urls_with_deltas(c.collection_id, [r.url for r in rows])
+        else:
+            rows, total = await d.list_deltas(
+                c.collection_id, kind=lp["kind"], excluded=lp["excluded"], q=lp["q"],
+                division=lp["division"], document_type=lp["document_type"], limit=lp["per"], offset=off,
+            )
+            effects = await d.effects_for(c.collection_id, [r.url for r in rows])
+        return {
+            **lp, "set": set_, "rows": rows, "total": total, "pages": max(1, -(-total // lp["per"])),
+            "effects": effects, "has_delta": has_delta, "divisions": list(Division),
+            "doc_types": list(DocumentType), "kinds": ["new", "modified", "deleted"],
+        }
+
+    async def tab_context(request: Request, c: Collection, tab: str) -> dict[str, Any]:
+        d = db(request)
+        job = await d.latest_job(c.collection_id)
+        ctx: dict[str, Any] = {"c": c, "job": job, "tab": tab, "statuses": list(Status)}
+        if tab == "overview":
+            step = request.query_params.get("step")
+            sel = Status(step) if step in {s.value for s in Status} else c.status
+            ctx.update(await step_context(request, c, sel)); ctx["selected"] = sel
+        elif tab == "urls":
+            set_ = request.query_params.get("set") or ("deltas" if c.delta_count else "curated" if c.curated_count else "dump")
+            if set_ not in SETS:
+                set_ = "deltas"
+            ctx.update(await urls_context(request, c, set_))
+        elif tab == "patterns":
+            ctx.update(
+                patterns=await curation(request).pattern_stats(c),
+                suggestions=await d.list_pattern_suggestions(c.collection_id, "pending"),
+                classifiable=len(await d.deltas_for_llm(c.collection_id)),
+                llm_name=settings.llm_provider, divisions=list(Division), doc_types=list(DocumentType),
+                pattern_types=list(PatternType),
+            )
+        else:
+            ctx.update(history=await d.status_history(c.collection_id), jobs=await d.list_jobs(c.collection_id, 50))
+        return ctx
+
+    async def header_context(request: Request, c: Collection) -> dict[str, Any]:
+        ctx = await step_context(request, c, c.status)
+        return {"c": c, "job": ctx["job"], "stats": ctx["stats"]}
+
     @app.get("/collections/{collection_id}", response_class=HTMLResponse)
-    async def collection_page(request: Request, collection_id: str, step: str | None = None):
+    async def collection_page(request: Request, collection_id: str, tab: str = "overview"):
         c = await must_get(request, collection_id)
-        sel = Status(step) if step in {s.value for s in Status} else c.status
-        ctx = await step_context(request, c, sel)
-        ctx["selected"] = sel
-        ctx.update(
-            history=await db(request).status_history(collection_id),
-            jobs=await db(request).list_jobs(collection_id),
-            statuses=list(Status),
-        )
+        tab = tab if tab in TABS else "overview"
+        ctx = await header_context(request, c)
+        ctx.update(await tab_context(request, c, tab))
+        ctx["selected"] = ctx.get("selected", c.status)
         return templates.TemplateResponse(request, "collection.html", ctx)
+
+    @app.get("/collections/{collection_id}/header", response_class=HTMLResponse)
+    async def collection_header(request: Request, collection_id: str):
+        c = await must_get(request, collection_id)
+        return templates.TemplateResponse(request, "partials/header.html", await header_context(request, c))
+
+    @app.get("/collections/{collection_id}/tab/{tab}", response_class=HTMLResponse)
+    async def collection_tab(request: Request, collection_id: str, tab: str):
+        c = await must_get(request, collection_id)
+        tab = tab if tab in TABS else "overview"
+        ctx = await tab_context(request, c, tab)
+        ctx["selected"] = ctx.get("selected", c.status)
+        return templates.TemplateResponse(request, f"partials/tab_{tab}.html", ctx)
+
+    @app.get("/collections/{collection_id}/urls/{set_}")
+    async def collection_urls(request: Request, collection_id: str, set_: str, format: str | None = None):
+        c = await must_get(request, collection_id)
+        if set_ not in SETS:
+            raise HTTPException(404, "unknown set")
+        if format == "csv":
+            return await urls_csv(request, c, set_)
+        ctx = {"c": c, "job": await db(request).latest_job(collection_id), **await urls_context(request, c, set_)}
+        return templates.TemplateResponse(request, "partials/urls_table.html", ctx)
+
+    async def urls_csv(request: Request, c: Collection, set_: str):
+        import csv
+        import io
+
+        d, lp = db(request), list_params(request)
+        if set_ == "dump":
+            rows, _ = await d.list_dump(c.collection_id, limit=1_000_000, q=lp["q"])
+            cols = ["url", "scraped_title", "content_type", "depth", "text_len", "in_curated"]
+            data = [[r[k] for k in cols] for r in rows]
+        elif set_ == "curated":
+            rows, _ = await d.list_curated(c.collection_id, limit=1_000_000, q=lp["q"], excluded=lp["excluded"])
+            cols = ["url", "excluded", "scraped_title", "title", "division", "document_type"]
+            data = [[getattr(r, k) for k in cols] for r in rows]
+        else:
+            rows, _ = await d.list_deltas(
+                c.collection_id, kind=lp["kind"], excluded=lp["excluded"], q=lp["q"],
+                division=lp["division"], document_type=lp["document_type"], limit=1_000_000,
+            )
+            cols = ["kind", "url", "excluded", "scraped_title", "title", "division", "document_type",
+                    "title_ai", "division_ai", "document_type_ai"]
+            data = [[getattr(r, k) for k in cols] for r in rows]
+        buf = io.StringIO()
+        w = csv.writer(buf); w.writerow(cols); w.writerows(data)
+        return Response(
+            buf.getvalue(), media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{c.collection_id}-{set_}.csv"'},
+        )
 
     async def step_context(request: Request, c: Collection, step: Status) -> dict:
         d = db(request)
@@ -388,10 +533,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await db(request).list_jobs(collection_id)
 
     @app.get("/api/collections/{collection_id}/dump")
-    async def api_dump(request: Request, collection_id: str, limit: int = 100, offset: int = 0):
+    async def api_dump(
+        request: Request, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None
+    ):
         await must_get(request, collection_id)
-        rows = await db(request).list_dump(collection_id, limit=min(limit, 1000), offset=offset)
-        return [r.model_dump(exclude={"full_text"}) for r in rows]
+        rows, total = await db(request).list_dump(
+            collection_id, limit=max(1, min(limit, 1000)), offset=max(0, offset), q=q or None
+        )
+        return {"total": total, "items": rows}
+
+    @app.get("/api/collections/{collection_id}/curated")
+    async def api_curated(
+        request: Request, collection_id: str, limit: int = 100, offset: int = 0,
+        q: str | None = None, excluded: str | None = None,
+    ):
+        await must_get(request, collection_id)
+        rows, total = await db(request).list_curated(
+            collection_id, limit=max(1, min(limit, 1000)), offset=max(0, offset), q=q or None,
+            excluded=tri_bool(excluded),
+        )
+        return {"total": total, "items": rows}
 
     # ── curation ───────────────────────────────────────────────────────
 
@@ -510,26 +671,102 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         emit_collection(request, c)
         return htmx_done(request, {"curated": n, "status": c.status})
 
-    @app.get("/collections/{collection_id}/curate", response_class=HTMLResponse)
-    async def curate_page(
-        request: Request, collection_id: str, kind: str | None = None,
-        excluded: str | None = None, q: str | None = None, page: int = 1,
-    ):
-        c = await must_get(request, collection_id)
-        per, page = 50, max(1, page)
-        kind, excluded = kind or None, tri_bool(excluded)
-        rows, total = await db(request).list_deltas(
-            collection_id, kind=kind, excluded=excluded, q=q or None, limit=per, offset=(page - 1) * per
+    @app.get("/collections/{collection_id}/curate", include_in_schema=False)
+    async def curate_page(request: Request, collection_id: str):
+        """Old curation page → the URLs › Deltas tab of the workbench (filters preserved)."""
+        await must_get(request, collection_id)
+        qs = str(request.url.query)
+        return RedirectResponse(
+            f"/collections/{collection_id}?tab=urls&set=deltas" + (f"&{qs}" if qs else ""), status_code=302
         )
-        ctx = {
-            "c": c, "job": await db(request).latest_job(collection_id),
-            "rows": rows, "total": total, "page": page, "pages": max(1, -(-total // per)),
-            "kind": kind, "excluded": excluded, "q": q or "",
-            "patterns": await curation(request).pattern_stats(c),
-            "divisions": list(Division), "doc_types": list(DocumentType),
-            "pattern_types": list(PatternType),
-        }
-        return templates.TemplateResponse(request, "curate.html", ctx)
+
+    # ── LLM assist ─────────────────────────────────────────────────────
+
+    async def _start_llm(request: Request, collection_id: str, starter) -> Any:
+        c = await must_get(request, collection_id)
+        jobs: JobManager = request.app.state.jobs
+        try:
+            job = await starter(jobs, c)
+        except JobConflict as e:
+            raise HTTPException(409, str(e)) from e
+        except LLMError as e:
+            raise HTTPException(409, str(e)) from e
+        return htmx_done(request, job)
+
+    @app.post("/api/collections/{collection_id}/suggest/patterns", status_code=202, response_model=None)
+    async def api_suggest_patterns(request: Request, collection_id: str):
+        """LLM drafts patterns from a sample of crawled URLs → pending suggestions (accept/reject)."""
+        c = await must_get(request, collection_id)
+        if c.dump_count == 0:
+            raise HTTPException(409, "no crawl dump yet — scrape first")
+        return await _start_llm(request, collection_id, lambda j, c: j.start_llm_patterns(c))
+
+    @app.post("/api/collections/{collection_id}/suggest/metadata", status_code=202, response_model=None)
+    async def api_suggest_metadata(request: Request, collection_id: str, all: bool = False):
+        """LLM suggests title/division/doc type per pending URL → *_ai fields (never the effective values)."""
+        c = await must_get(request, collection_id)
+        if c.delta_count == 0:
+            raise HTTPException(409, "no pending deltas — recompute first")
+        todo = await db(request).deltas_for_llm(collection_id, only_missing=not all)
+        if not todo:
+            raise HTTPException(
+                409, "nothing to classify: every pending (non-excluded) URL already has suggestions"
+                     " — use ?all=true to redo them",
+            )
+        return await _start_llm(request, collection_id, lambda j, c: j.start_llm_metadata(c, only_missing=not all))
+
+    @app.get("/api/collections/{collection_id}/suggestions")
+    async def api_suggestions(request: Request, collection_id: str, state: str | None = "pending"):
+        await must_get(request, collection_id)
+        return await db(request).list_pattern_suggestions(collection_id, state or None)
+
+    @app.post("/api/collections/{collection_id}/suggestions/{sid}/{decision}")
+    async def api_decide_suggestion(request: Request, collection_id: str, sid: int, decision: str):
+        """accept → becomes a real pattern (recompute); reject → kept for the record, never applied."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        if decision not in ("accept", "reject"):
+            raise HTTPException(422, "decision must be accept or reject")
+        sug = await db(request).get_pattern_suggestion(collection_id, sid)
+        if sug is None:
+            raise HTTPException(404, "suggestion not found")
+        if sug["state"] != "pending":
+            raise HTTPException(409, f"suggestion already {sug['state']}")
+        if decision == "accept":
+            try:
+                _, ds = await curation(request).add_pattern(
+                    c, PatternCreate(type=sug["type"], match=sug["match"], value=sug["value"])
+                )
+            except sqlite3.IntegrityError:
+                ds = await curation(request).recompute(c)  # identical pattern already exists
+            await _after_curation_change(request, c, ds)
+        await db(request).set_pattern_suggestion_state(collection_id, sid, "accepted" if decision == "accept" else "rejected")
+        return htmx_done(request, {"id": sid, "state": decision + "ed"})
+
+    @app.post("/api/collections/{collection_id}/ai/{decision}")
+    async def api_decide_ai(request: Request, collection_id: str, decision: str, body: AiDecision):
+        """Per-URL AI suggestion: accept → exact-URL pattern with the suggested value; reject → clear it."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        if decision not in ("accept", "reject"):
+            raise HTTPException(422, "decision must be accept or reject")
+        rows, _ = await db(request).list_deltas(collection_id, q=body.url, limit=1000)
+        row = next((r for r in rows if r.url == body.url), None)
+        if row is None:
+            raise HTTPException(404, "URL not in deltas")
+        value = getattr(row, f"{body.field}_ai")
+        if value is None:
+            raise HTTPException(409, "no suggestion for that field")
+        if decision == "accept":
+            existing = [p for p in await db(request).list_patterns(collection_id)
+                        if p.match == body.url and p.type == body.field]
+            ds = await curation(request).replace_exact_pattern(
+                c, PatternCreate(type=PatternType(body.field), match=body.url, value=str(value)),
+                old_id=existing[0].id if existing else None,
+            )
+            await _after_curation_change(request, c, ds)
+        await db(request).clear_delta_ai(collection_id, body.url, body.field)
+        return htmx_done(request, {"url": body.url, "field": body.field, "state": decision + "ed"})
 
     # ── SSE ────────────────────────────────────────────────────────────
 

@@ -6,7 +6,7 @@
 {% macro btn(label, url, hint, primary=False, disabled=False, confirm=None, then=None, method='post') -%}
   <button class="{{ 'primary' if primary else 'secondary' }}" title="{{ hint }}"
           {% if disabled or running %}disabled{% endif %}
-          hx-{{ method }}="{{ url }}{% if then %}?then={{ then }}{% endif %}" hx-swap="none"
+          hx-{{ method }}="{{ url }}{% if then %}?then={{ then|urlencode }}{% endif %}" hx-swap="none"
           {% if confirm %}hx-confirm="{{ confirm }}"{% endif %}>{{ label }}</button>
 {%- endmacro %}
 <div class="step-head">
@@ -36,7 +36,7 @@
   {% else %}<p class="muted">Not scraped yet.</p>{% endif %}
   <div class="inline">
     {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Compute deltas vs. the curated set and open the curation page',
-           primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '/curate') }}
+           primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=urls&set=deltas') }}
     {{ btn('Re-scrape', '/api/collections/' ~ cid ~ '/scrape', 'Run the crawler again', confirm='Re-run the crawl? Existing dump is replaced.') }}
   </div>
 
@@ -45,9 +45,9 @@
       <dt>Patterns</dt><dd>{{ stats.pattern_count }}</dd></dl>
   <div class="inline">
     {% if info.state == 'todo' %}
-      {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Scrape first', primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '/curate') }}
+      {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Scrape first', primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=urls&set=deltas') }}
     {% else %}
-      <a class="button primary" href="/collections/{{ cid }}/curate">Open curation</a>
+      <a class="button primary" href="/collections/{{ cid }}?tab=urls&set=deltas">Open curation</a>
       {{ btn('Recompute deltas', '/api/collections/' ~ cid ~ '/recompute', 'Re-run the diff against the latest crawl (safe to repeat)', disabled=(c.dump_count == 0)) }}
       {{ btn('Promote → curated' if c.delta_count else 'Mark curated', '/api/collections/' ~ cid ~ '/promote',
              'Apply all pending deltas to the curated set' if c.delta_count else 'No pending deltas: mark the collection curated',
@@ -62,7 +62,7 @@
     {% if info.state == 'todo' %}<span class="muted">Promote the deltas in step 3 first.</span>
     {% else %}
       <button class="primary" disabled title="Phase 5 — export + test indexing not built yet">Index to test</button>
-      {{ btn('Review / re-curate', '/api/collections/' ~ cid ~ '/recompute', 'Recompute deltas against the current crawl and open the curation page (status changes only if something differs)', then='/collections/' ~ cid ~ '/curate') }}
+      {{ btn('Review / re-curate', '/api/collections/' ~ cid ~ '/recompute', 'Recompute deltas against the current crawl and open the curation page (status changes only if something differs)', then='/collections/' ~ cid ~ '?tab=urls&set=deltas') }}
     {% endif %}
   </div>
 

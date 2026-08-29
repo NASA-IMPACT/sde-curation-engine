@@ -59,9 +59,12 @@ async def test_full_flow(crawler_client):
     await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "exclude"})
     assert (await crawler_client.get("/api/collections/ex.org/deltas?excluded=true")).json()["total"] == 1
 
-    # curate page renders
-    page = await crawler_client.get("/collections/ex.org/curate?excluded=true")
-    assert page.status_code == 200 and "https://ex.org/p1" in page.text and "Promote" in page.text
+    # old curate URL redirects into the workbench (filters preserved); URLs tab renders the deltas
+    r = await crawler_client.get("/collections/ex.org/curate?excluded=true")
+    assert r.status_code == 302 and r.headers["location"] == "/collections/ex.org?tab=urls&set=deltas&excluded=true"
+    page = await crawler_client.get("/collections/ex.org?tab=urls&set=deltas&excluded=true")
+    assert page.status_code == 200 and "https://ex.org/p1" in page.text and "https://ex.org/p2" not in page.text
+    assert "Promote" in (await crawler_client.get("/collections/ex.org?tab=patterns")).text
 
     # promote
     r = await crawler_client.post("/api/collections/ex.org/promote")

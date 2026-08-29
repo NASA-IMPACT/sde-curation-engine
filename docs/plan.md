@@ -64,7 +64,7 @@ sde_curation/
   llm/
     base.py          LLMProvider protocol: complete(prompt, schema: type[BaseModel]) -> BaseModel
     openai.py        OpenAI structured outputs (response_format=json_schema) → pydantic validate
-    tasks.py         suggest_patterns, suggest_metadata (title/division/doc_type) — return *_ml fields
+    tasks.py         suggest_patterns, suggest_metadata (title/division/doc_type) — return *_ai fields
   jobs.py            in-process JobManager: asyncio tasks, per-collection lock, event bus (SSE)
   web/
     app.py           FastAPI app, lifespan starts pollers; routes (JSON + HTMX partials)
@@ -85,7 +85,7 @@ Key runtime rules
 
 ## Phases (each independently verifiable)
 
-### Phase 0 — Scaffold & config
+### Phase 0 — Scaffold & config — DONE 2026-08-29
 - `pyproject.toml` deps above; `sde_curation/config.py` (`Settings`: `CRAWLER_ROOT`, `CRAWLER_PYTHON`,
   `INDEXER_ROOT`, `INDEXER_PYTHON`, `SCRAPE_BACKEND=local|ssm`, `INDEX_BACKEND=local|ecs`, AWS
   region, `CRAWLER_S3_BUCKET`, `COSMOS_INDEX_BUCKET`, `INDEXING_*` (cluster, family, role ARN,
@@ -95,7 +95,7 @@ Key runtime rules
 - **Verify:** `uv run uvicorn sde_curation.web.app:app` → `curl /health`; `uv run pytest tests/test_models.py`
   (invalid status transition / bad seed URL rejected by Pydantic).
 
-### Phase 1 — Collections + dashboard skeleton (R1, R7)
+### Phase 1 — Collections + dashboard skeleton (R1, R7) — DONE 2026-08-29
 - `POST /collections` (seed URL, name, division, connector) → `collection_id` (slug from apex host,
   same rule as `sde_crawler/job.py::collection_id_from_seed`), status `Backlog`, writes `collection.yaml`.
 - `GET /` dashboard: table of collections (status, last job, counts, error badge); `GET /events` SSE;
@@ -104,7 +104,7 @@ Key runtime rules
 - **Verify:** create 2 collections via curl; open `/`; in a 2nd terminal `curl -N /events` while
   `POST /collections/{id}/status` → row updates in the browser without reload; `tests/test_api_collections.py`.
 
-### Phase 2 — Scrape (R2, R6) — local backend first
+### Phase 2 — Scrape (R2, R6) — DONE 2026-08-29 (SSM path tested with moto only)
 - `backends/scrape.py`: `ScrapeBackend.submit(collection) -> JobRun`, `.poll(job) -> JobStatus`.
   - `LocalSubprocessScraper`: write job JSON to `DATA_DIR/scrape_jobs/<id>.json`, spawn
     `CRAWLER_PYTHON run.py --job …` via `asyncio.create_subprocess_exec`; tail `logs/jobs/<stem>.log`
@@ -118,7 +118,7 @@ Key runtime rules
   Kill the subprocess mid-run → job shows `failed` with stderr tail. `tests/test_scrape_backend.py`
   uses a fake `run.py` fixture; SSM path tested with `moto` (command sent with expected inbox path).
 
-### Phase 3 — Curation engine (R3, R4, R9)
+### Phase 3 — Curation engine (R3, R4, R9) — DONE 2026-08-29 (+ fool-proofing review)
 - `engine/diff.py`: set-based diff on `(url)` with field compare `title, division, doc_type` →
   `delta_urls` (`new|modified|deleted`), bulk `executemany`.
 - `engine/patterns.py`: glob→regex; apply order exclude/include → title → division → doc_type;
@@ -131,16 +131,22 @@ Key runtime rules
   6-case unapply, idempotent re-apply); `tests/test_diff.py` (new/modified/deleted/tombstone);
   perf test: 100k synthetic URLs diff+apply < 5 s.
 
-### Phase 4 — LLM assist (open provider, OpenAI first)
+### Phase 4 — LLM assist (open provider, OpenAI first) — DONE 2026-08-29 (live OpenAI smoke passed with gpt-5.4-mini)
 - `llm/base.py` `LLMProvider` protocol; `llm/openai.py` using structured outputs with the Pydantic
   schema (`PatternSuggestions`, `MetadataSuggestion`); provider chosen by `LLM_PROVIDER` (registry
   dict — adding Anthropic/Ollama = one file). Retries + timeout; results validated by Pydantic
-  before touching the DB; stored as `*_ml`, never overwriting `*_manual`.
+  before touching the DB; stored as `*_ai`, never overwriting `*_manual`.
 - `POST /collections/{id}/suggest/patterns` (sample of N URLs → drafted exclude/title/division
   patterns, shown for accept/reject), `POST /suggest/metadata` (batched per-URL title/division/doc_type).
 - **Verify:** `tests/test_llm.py` with a `FakeProvider` returning canned JSON — malformed output raises
   `ValidationError` and job is marked failed, nothing written; one live smoke against OpenAI on
   ~20 URLs, suggestions appear in the UI with an "ml" badge.
+
+### UI: Collection workbench — DONE 2026-08-29
+COSMOS-inspired, simplified: one page per collection with a sticky header (status badge, ⚠, job chip,
+count chips Dump/Deltas/Curated/Patterns, Next action) and tabs Overview · URLs (Dump/Deltas/Curated
+sub-tabs, filters, paging, CSV, "why" tooltips from pattern_effects) · Patterns & AI · Activity.
+Old `/curate` redirects to URLs › Deltas. Verified by tests (67) and browser walkthrough.
 
 ### Phase 5 — Export + test indexing (R5, R6)
 - `engine/export.py`: curated non-excluded rows → `documents.jsonl` lines

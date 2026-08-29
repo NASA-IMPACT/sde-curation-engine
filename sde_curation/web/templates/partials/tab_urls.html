@@ -1,0 +1,15 @@
+{% set cid = c.collection_id %}
+<nav class="subtabs" role="tablist" aria-label="URL sets">
+  {% for s, label, n, hint in [('dump','Dump', c.dump_count, 'Everything the last crawl found (raw)'),
+                                ('deltas','Deltas', c.delta_count, 'Changes vs. the curated set — this is what you review'),
+                                ('curated','Curated', c.curated_count, 'The approved set that gets indexed')] %}
+  <a role="tab" aria-selected="{{ 'true' if set == s else 'false' }}" class="tab {% if set == s %}active{% endif %}" title="{{ hint }}"
+     href="/collections/{{ cid }}?tab=urls&set={{ s }}">{{ label }} <span class="count {% if not n %}zero{% endif %}">{{ n }}</span></a>
+  {% endfor %}
+  <span class="subtab-hint muted">
+    {% if set == 'dump' %}Raw crawl output. Curation happens in <b>Deltas</b>.
+    {% elif set == 'deltas' %}Edit here: click a title, pick division/type, ✗/✓ to exclude. Each edit is an exact-URL pattern.
+    {% else %}Read-only snapshot of what was promoted. Use <b>Curate ↗</b> on a row to change it.{% endif %}
+  </span>
+</nav>
+<div id="urls-table">{% include "partials/urls_table.html" %}</div>

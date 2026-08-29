@@ -1,0 +1,30 @@
+<div class="cols">
+<section class="card">
+  <h2>Jobs <span class="count">{{ jobs|length }}</span></h2>
+  {% if jobs %}
+  <table>
+    <thead><tr><th>#</th><th>Kind</th><th>State</th><th>Started</th><th>Took</th><th>Result</th></tr></thead>
+    <tbody>{% for j in jobs %}
+      <tr><td class="muted">{{ j.id }}</td><td>{{ j.kind }}</td><td><span class="job j-{{ j.state }}">{{ j.state }}</span></td>
+          <td class="nowrap">{{ j.started_at.strftime('%m-%d %H:%M:%S') }}</td>
+          <td class="num">{% if j.finished_at %}{{ (j.finished_at - j.started_at).seconds }}s{% elif j.state == 'running' %}<span class="spinner"></span>{% endif %}</td>
+          <td>{% if j.error %}<span class="err">{{ j.error }}</span>
+              {% elif j.progress.docs is defined %}{{ j.progress.docs }} docs{% if j.progress.failed %}, {{ j.progress.failed }} failed{% endif %}
+              {% elif j.progress.suggestions is defined %}{{ j.progress.suggestions }} suggestions
+              {% elif j.progress.classified is defined %}{{ j.progress.classified }} classified{% endif %}</td></tr>
+    {% endfor %}</tbody>
+  </table>
+  {% else %}<p class="empty">No jobs yet.</p>{% endif %}
+</section>
+<section class="card">
+  <h2>Status history <span class="count">{{ history|length }}</span></h2>
+  <table>
+    <thead><tr><th>At</th><th>Status</th><th>Note</th></tr></thead>
+    <tbody>{% for h in history|reverse %}
+      <tr><td class="nowrap">{{ h.at.strftime('%Y-%m-%d %H:%M:%S') }}Z</td>
+          <td>{% if h.old_status and h.old_status != h.new_status %}<span class="muted">{{ status_label(h.old_status) }} →</span> {% endif %}<span class="status s-{{ h.new_status }}">{{ status_icon(h.new_status) }} {{ status_label(h.new_status) }}</span></td>
+          <td>{{ h.note or '' }}</td></tr>
+    {% endfor %}</tbody>
+  </table>
+</section>
+</div>

@@ -11,15 +11,16 @@ It wraps two existing repos — `../sde-crawl4ai-scraper-v1` (crawling) and
 a clickable pipeline stepper, and a curation grid. Plan and phase status: `docs/plan.md`;
 workflow background: `docs/workflow.md`.
 
-**Status:** Phases 0–3 done (collections, scraping, curation, promotion). Phase 4 (LLM assist),
-5 (export + test indexing) and 6 (validation + prod) are next; steps 5–6 in the UI are placeholders.
+**Status:** Phases 0–4 done and verified end-to-end (collections, scraping, curation, promotion,
+LLM assist — live-tested with OpenAI `gpt-5.4-mini`). Phase 5 (S3 export + WEB_COSMOS test
+indexing) and 6 (validation + prod) are next; steps 5–6 in the UI are placeholders.
 
 ## Quick start
 ```bash
-cp .env.example .env      # paths to the sibling repos, AWS values, OpenAI key (Phase 4)
+cp .env.example .env      # sibling repo paths, AWS values, OPENAI_API_KEY (or LLM_PROVIDER=fake)
 uv sync
 make run                  # http://localhost:8080   (8000 is taken by sde-elastic-wrapper)
-make test                 # 57 tests, incl. a state-matrix that fires every action in every status
+make test                 # 66 tests, incl. a state-matrix that fires every action in every status
 make lint
 ```
 
@@ -35,8 +36,22 @@ Point `CRAWLER_PYTHON` in `.env` elsewhere if you use a different interpreter.
 ## Using it
 1. **Dashboard** (`/`): add a collection (seed URL, name, division, max pages). Each row shows
    status, counts (dump / pending deltas / curated), last job, and **one button — the next step**.
-2. **Collection page** (`/collections/{id}`): the six pipeline steps are clickable. Each step's
-   panel shows what it did, its primary action, and a redo where sensible:
+2. **Collection workbench** (`/collections/{id}`) — one page, four tabs, a sticky header:
+   - **Header**: name, seed link, status badge (icon + label), ⚠ *needs re-curation*, running-job
+     chip with **cancel**, and count chips that are links — **Dump · Deltas (new/mod/del/excl) ·
+     Curated · Patterns** — plus the one **Next** action for the current step.
+   - **Overview**: the clickable pipeline stepper (each step's panel shows what it did, its primary
+     action, and a redo where sensible), details, last job, *Advanced* (re-scrape, manual status, delete).
+   - **URLs**: sub-tabs **Dump** (raw crawl: title, type, depth, text size, state) · **Deltas**
+     (kind badge, scraped → effective title, division, type, exclude — all editable inline; AI badges)
+     · **Curated** (read-only approved set with a **Curate ↗** jump when a delta exists). Search,
+     kind / excluded / division / type filters, page size, paging, ⇩ CSV of the filtered rows.
+     Hover a field to see *which pattern* set it.
+   - **Patterns & AI**: add a pattern, the pattern table (match counts link to the matching deltas),
+     ✨ suggestions with Accept/Reject, Recompute and Promote.
+   - **Activity**: all jobs and the status history.
+   Old `/collections/{id}/curate` links redirect into URLs › Deltas.
+   Step panel actions:
 
    | Step | Panel actions |
    |---|---|
@@ -49,10 +64,30 @@ Point `CRAWLER_PYTHON` in `.env` elsewhere if you use a different interpreter.
 
    A running job shows a spinner, live doc counts and a **Cancel** button. *Advanced* (collapsed)
    holds Re-scrape, a manual status override and Delete.
-3. **Curation page** (`/collections/{id}/curate`): add patterns (`exclude`, `include`, `title`,
-   `division`, `document_type`; exact URL or `*` glob), see match counts, filter/search/paginate the
-   delta grid, edit a single URL inline (click the title, or pick division / doc type; ✗ / ✓ toggles
-   exclusion), then **Promote**.
+3. Typical loop: **Scrape → Start curating → (URLs › Deltas: fix rows; Patterns & AI: add rules /
+   accept suggestions) → Promote**. Every inline edit is an exact-URL pattern, so everything is
+   visible and reversible in Patterns & AI.
+
+### LLM assist
+Two buttons on the Patterns & AI tab, both background jobs that **never change effective values**.
+The page refreshes itself when the job finishes (SSE, with a 4 s poll while running), so results
+appear without a manual reload:
+- **✨ Suggest patterns** — the model sees a sample of crawled URLs (+ scraped titles) and drafts
+  `exclude` / `include` / `title` / `division` / `document_type` patterns with a rationale. They land
+  in a *Suggested patterns* table with match counts; **Accept** turns one into a real pattern
+  (recompute runs), **Reject** dismisses it. Suggestions that match no crawled URL are dropped before
+  you see them.
+- **✨ Suggest metadata** — per pending URL (title + first 1.5k chars of text, batched 20 per call)
+  the model proposes a clean title, division and document type. These show as purple `AI:` badges
+  next to each cell in URLs › Deltas; **✓** accepts (creates an exact-URL pattern, i.e. a manual
+  override), **✕** dismisses. Suggestions for URLs that weren't asked about are ignored.
+
+Provider is pluggable (`LLM_PROVIDER`): `openai` (default model `gpt-5.4-mini`; any
+OpenAI-compatible endpoint via `OPENAI_BASE_URL`; structured outputs parsed straight into Pydantic
+models — a malformed reply fails the job and writes nothing) or `fake` (deterministic heuristics,
+used in tests and demos; no key needed). Adding a provider = one module implementing
+`complete(system, user, schema)` + one line in `llm/base.py`. Prompts live in `llm/tasks.py`
+(they ask for host-agnostic globs like `*/login*` so http/https variants are covered together).
 
 ### Curation semantics
 Effective value per URL = the most specific matching pattern (smallest match set, tie → longest
@@ -83,7 +118,7 @@ unapply (next most specific → curated → NULL). Diff + apply run as one idemp
 | `SCRAPE_BACKEND` | `local` (subprocess) or `ssm` (drop job on the EC2 inbox via SSM, poll S3) |
 | `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET` | needed for `ssm` |
 | `INDEX_BACKEND`, `COSMOS_INDEX_BUCKET`, `INDEXING_*` | Phase 5 (local subprocess or `ecs:RunTask`) |
-| `LLM_PROVIDER`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` | Phase 4; any OpenAI-compatible endpoint |
+| `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.4-mini`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` | LLM assist; any OpenAI-compatible endpoint |
 | `NOTIFY_WEBHOOK_URL` | Phase 6 notifications |
 
 ## API
@@ -102,9 +137,27 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `POST …/recompute` | diff dump vs curated + apply patterns (idempotent) |
 | `GET/POST /…/patterns`, `DELETE …/patterns/{pid}` | pattern CRUD with match counts |
 | `POST …/urls` | per-URL edit `{url, type, value?}`; exclude/include toggles |
-| `GET …/deltas?kind&excluded&q&limit&offset` | paginated deltas |
+| `GET …/deltas?kind&excluded&division&document_type&q&limit&offset`, `…/dump?q`, `…/curated?q&excluded` | paginated URL sets |
+| `GET /collections/{id}/urls/{dump\|deltas\|curated}?format=csv&…` | CSV export of the filtered set |
 | `POST …/promote` | deltas → curated set; status `curated` |
+| `POST …/suggest/patterns`, `POST …/suggest/metadata?all=` | LLM jobs (202; 409 if busy / nothing to do) |
+| `GET …/suggestions?state=`, `POST …/suggestions/{sid}/accept\|reject` | pattern suggestions |
+| `POST …/ai/accept\|reject` `{url, field}` | per-URL metadata suggestion |
 | `GET /health` | `{ok, db, sse_clients}` |
+
+## Testing the workflow by hand
+1. Dashboard → add `https://aurorasaurus.org` (max pages 15) → **Scrape**; watch the spinner, then
+   status `scraped`, Dump 15. Bad seed / duplicate show a banner.
+2. **Start curating** → lands on URLs › Deltas. In Patterns & AI add `exclude */leaderboard*`,
+   `title * {title} — {collection}`; back in Deltas pick a division on one row (exact pattern beats
+   `*`), click a title to edit, ✗/✓ a row; delete a pattern (un-applies); use the filters and ⇩ CSV;
+   check Dump (state column) and Curated (read-only, Curate ↗).
+3. Patterns & AI tab: **✨ Suggest patterns** → Accept/Reject rows; **✨ Suggest metadata** → ✓/✕ the `AI:` badges in URLs › Deltas.
+4. **Promote** → `curated`; step 3 → Recompute stays `curated` when nothing changed.
+5. Step 1 → **Re-scrape** → `scraped` + ⚠; **Start curating** on an identical crawl → back to `curated`.
+6. Guard rails: start a bigger crawl, try Add pattern / Promote / Advanced status → 409; **Cancel**;
+   Advanced `curated` with pending deltas → 409; delete a collection in one tab → row gone in another.
+7. `curl localhost:8080/api/collections/aurorasaurus.org/history`, `data/collections/aurorasaurus.org/*.yaml`.
 
 ## Layout
 ```
@@ -115,6 +168,7 @@ sde_curation/
   engine/          pure: patterns.py (resolution), diff.py (deltas, promote)
   curation.py      engine ↔ DB glue, per-collection locking
   backends/        scrape.py (local subprocess | SSM), index.py (Phase 5)
+  llm/             base.py (provider protocol + registry), openai.py, fake.py, tasks.py (prompts, sanity filters)
   jobs.py          JobManager: background tasks, cancel, recovery, SSE events
   events.py        in-process event bus → SSE
   web/             FastAPI app, Jinja templates, vendored htmx (+sse, json-enc)

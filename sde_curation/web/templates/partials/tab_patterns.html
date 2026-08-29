@@ -1,0 +1,64 @@
+{% set cid = c.collection_id %}
+{% set running = job and job.state == 'running' %}
+<section class="next"><div class="next-inner">
+  <div>
+    <b>Patterns</b> are the curation rules: <code>exclude</code>/<code>include</code> decide what gets indexed;
+    <code>title</code>, <code>division</code>, <code>document_type</code> set fields. Exact URL or <code>*</code> glob.
+    The most specific pattern wins; <code>include</code> always beats <code>exclude</code>. Every edit in the Deltas grid is an exact-URL pattern here.
+  </div>
+  <div class="inline">
+    {% if running %}<span class="chip busy"><span class="spinner"></span> {{ job.kind }} running — locked</span>{% endif %}
+    <button class="secondary" title="Ask the LLM ({{ llm_name }}) to draft patterns from a sample of crawled URLs. Nothing is applied until you accept."
+            {% if running or c.dump_count == 0 %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggest/patterns" hx-swap="none">✨ Suggest patterns</button>
+    <button class="secondary" title="Ask the LLM ({{ llm_name }}) for a title / division / type per pending URL. Shown as AI badges in Deltas; accept per URL."
+            {% if running or not classifiable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggest/metadata" hx-swap="none">✨ Suggest metadata{% if classifiable %} ({{ classifiable }}){% endif %}</button>
+    <button class="secondary" title="Re-run the diff against the latest crawl (safe to repeat)" {% if running or not c.dump_count %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/recompute" hx-swap="none">Recompute deltas</button>
+    <button class="primary" hx-post="/api/collections/{{ cid }}/promote" hx-swap="none"
+            {% if c.status != 'curating' or running %}disabled title="requires status curating and no running job"{% endif %}
+            {% if c.delta_count %}hx-confirm="Promote {{ c.delta_count }} deltas to the curated set?"{% endif %}>{% if c.delta_count %}Promote {{ c.delta_count }} deltas → curated{% else %}Mark curated{% endif %}</button>
+  </div>
+</div></section>
+
+<section class="card">
+  <h2>Add a pattern</h2>
+  <form hx-post="/api/collections/{{ cid }}/patterns" hx-ext="json-enc" hx-swap="none" class="inline"
+        hx-vals='js:{type: document.getElementById("pt").value, match: document.getElementById("pm").value, value: document.getElementById("pv").value || null}'>
+    <select id="pt" aria-label="pattern type">{% for t in pattern_types %}<option>{{ t }}</option>{% endfor %}</select>
+    <input id="pm" placeholder="*/login* · https://site/path/* · exact URL" size="40" required aria-label="match">
+    <input id="pv" placeholder="value: title template / division / doc type" size="34" list="values" aria-label="value">
+    <datalist id="values">{% for d in divisions %}<option value="{{ d }}">{% endfor %}{% for d in doc_types %}<option value="{{ d }}">{% endfor %}</datalist>
+    <button {% if running %}disabled{% endif %}>Add pattern</button>
+    <small class="muted">title templates: <code>{title}</code> <code>{url}</code> <code>{collection}</code></small>
+  </form>
+</section>
+
+{% if suggestions %}
+<section class="suggestions card">
+  <h2>✨ Suggested patterns <span class="count">{{ suggestions|length }}</span> <small class="muted">nothing is applied until accepted</small></h2>
+  <table>
+    <thead><tr><th>Type</th><th>Match</th><th>Value</th><th>Matches</th><th>Why</th><th></th></tr></thead>
+    <tbody>{% for sg in suggestions %}
+      <tr><td><span class="ptype {{ sg.type }}">{{ sg.type }}</span></td><td><code>{{ sg.match }}</code></td><td>{{ sg.value or '' }}</td><td class="num">{{ sg.matches }}</td><td class="muted">{{ sg.rationale }}</td>
+          <td class="inline nowrap">
+            <button class="primary mini" title="Add as a real pattern" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/{{ sg.id }}/accept" hx-swap="none">Accept</button>
+            <button class="secondary mini" title="Dismiss" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/{{ sg.id }}/reject" hx-swap="none">Reject</button>
+          </td></tr>
+    {% endfor %}</tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Patterns <span class="count">{{ patterns|length }}</span></h2>
+  {% if patterns %}
+  <table>
+    <thead><tr><th>Type</th><th>Match</th><th>Value</th><th title="URLs in the current crawl this pattern matches">Matches</th><th>Added</th><th></th></tr></thead>
+    <tbody>{% for p in patterns %}
+      <tr><td><span class="ptype {{ p.type }}">{{ p.type }}</span></td><td><code>{{ p.match }}</code></td><td>{{ p.value or '' }}</td>
+          <td class="num"><a href="/collections/{{ cid }}?tab=urls&set=deltas&q={{ p.match|replace('*','')|urlencode }}" title="show matching deltas">{{ p.matches }}</a></td>
+          <td class="muted small">{{ p.created_at[:16]|replace('T',' ') }}</td>
+          <td><button class="danger" aria-label="delete pattern" {% if running %}disabled{% endif %} hx-delete="/api/collections/{{ cid }}/patterns/{{ p.id }}" hx-swap="none" hx-confirm="Delete pattern? Its effects are unapplied (next most specific pattern → curated value → empty).">×</button></td></tr>
+    {% endfor %}</tbody>
+  </table>
+  {% else %}<p class="empty">No patterns yet. Add one above, or let ✨ Suggest patterns draft some from the crawl.</p>{% endif %}
+</section>

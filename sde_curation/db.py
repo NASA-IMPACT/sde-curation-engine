@@ -72,9 +72,9 @@ CREATE TABLE IF NOT EXISTS delta_urls (
   division TEXT,
   document_type TEXT,
   excluded INTEGER NOT NULL DEFAULT 0,
-  title_ml TEXT,
-  division_ml TEXT,
-  document_type_ml TEXT,
+  title_ai TEXT,
+  division_ai TEXT,
+  document_type_ai TEXT,
   PRIMARY KEY (collection_id, url)
 );
 
@@ -105,6 +105,19 @@ CREATE TABLE IF NOT EXISTS pattern_effects (
   url TEXT NOT NULL,
   field TEXT NOT NULL,
   PRIMARY KEY (pattern_id, url, field)
+);
+
+CREATE TABLE IF NOT EXISTS pattern_suggestions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  collection_id TEXT NOT NULL REFERENCES collections(collection_id) ON DELETE CASCADE,
+  type TEXT NOT NULL,
+  match TEXT NOT NULL,
+  value TEXT,
+  rationale TEXT,
+  matches INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  UNIQUE (collection_id, type, match)
 );
 
 CREATE TABLE IF NOT EXISTS job_runs (
@@ -144,8 +157,17 @@ class Database:
         self._conn = await aiosqlite.connect(self.path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
         await self._conn.commit()
         return self
+
+    async def _migrate(self) -> None:
+        """Rename legacy *_ml columns to *_ai on databases created before the rename."""
+        cur = await self._conn.execute("PRAGMA table_info(delta_urls)")
+        cols = {r[1] for r in await cur.fetchall()}
+        for f in ("title", "division", "document_type"):
+            if f"{f}_ml" in cols:
+                await self._conn.execute(f"ALTER TABLE delta_urls RENAME COLUMN {f}_ml TO {f}_ai")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -264,12 +286,67 @@ class Database:
         await self.conn.commit()
         return n
 
-    async def list_dump(self, collection_id: str, limit: int = 100, offset: int = 0) -> list[DumpUrl]:
+    async def list_dump(
+        self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Dump rows (no full_text) plus `text_len` and `in_curated` / `in_deltas` flags."""
+        where, args = ["d.collection_id=?"], [collection_id]
+        if q:
+            where.append("(d.url LIKE ? OR d.scraped_title LIKE ?)"); args += [f"%{q}%"] * 2
+        w = " AND ".join(where)
+        cur = await self.conn.execute(f"SELECT COUNT(*) FROM dump_urls d WHERE {w}", args)
+        total = (await cur.fetchone())[0]
         cur = await self.conn.execute(
-            "SELECT * FROM dump_urls WHERE collection_id=? ORDER BY url LIMIT ? OFFSET ?",
-            (collection_id, limit, offset),
+            f"""SELECT d.collection_id, d.url, d.scraped_title, d.content_type, d.depth,
+                       length(d.full_text) AS text_len,
+                       (c.url IS NOT NULL) AS in_curated, (x.url IS NOT NULL) AS in_deltas
+                FROM dump_urls d
+                LEFT JOIN curated_urls c ON c.collection_id=d.collection_id AND c.url=d.url
+                LEFT JOIN delta_urls x ON x.collection_id=d.collection_id AND x.url=d.url
+                WHERE {w} ORDER BY d.url LIMIT ? OFFSET ?""", [*args, limit, offset],
         )
-        return [DumpUrl(**dict(r)) for r in await cur.fetchall()]
+        return [dict(r) for r in await cur.fetchall()], total
+
+    async def urls_with_deltas(self, collection_id: str, urls: list[str]) -> set[str]:
+        if not urls:
+            return set()
+        marks = ",".join("?" * len(urls))
+        cur = await self.conn.execute(
+            f"SELECT url FROM delta_urls WHERE collection_id=? AND url IN ({marks})", [collection_id, *urls]
+        )
+        return {r[0] for r in await cur.fetchall()}
+
+    async def effects_for(self, collection_id: str, urls: list[str]) -> dict[str, dict[str, str]]:
+        """{url: {field: 'type match → value'}} — which pattern produced each effective field."""
+        if not urls:
+            return {}
+        marks = ",".join("?" * len(urls))
+        cur = await self.conn.execute(
+            f"""SELECT e.url, e.field, p.type, p.match, p.value FROM pattern_effects e
+                JOIN patterns p ON p.id=e.pattern_id
+                WHERE e.collection_id=? AND e.url IN ({marks})""", [collection_id, *urls],
+        )
+        out: dict[str, dict[str, str]] = {}
+        for url, field, ptype, match, value in await cur.fetchall():
+            out.setdefault(url, {})[field] = f"{ptype} {match}" + (f" → {value}" if value else "")
+        return out
+
+    async def list_curated(
+        self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None,
+        excluded: bool | None = None,
+    ) -> tuple[list[CuratedUrl], int]:
+        where, args = ["collection_id=?"], [collection_id]
+        if q:
+            where.append("(url LIKE ? OR title LIKE ? OR scraped_title LIKE ?)"); args += [f"%{q}%"] * 3
+        if excluded is not None:
+            where.append("excluded=?"); args.append(int(excluded))
+        w = " AND ".join(where)
+        cur = await self.conn.execute(f"SELECT COUNT(*) FROM curated_urls WHERE {w}", args)
+        total = (await cur.fetchone())[0]
+        cur = await self.conn.execute(
+            f"SELECT * FROM curated_urls WHERE {w} ORDER BY url LIMIT ? OFFSET ?", [*args, limit, offset]
+        )
+        return [CuratedUrl(**dict(r)) for r in await cur.fetchall()], total
 
     async def load_dump(self, collection_id: str) -> list[DumpUrl]:
         cur = await self.conn.execute(
@@ -300,13 +377,18 @@ class Database:
 
     async def list_deltas(
         self, collection_id: str, *, kind: str | None = None, excluded: bool | None = None,
-        q: str | None = None, limit: int = 100, offset: int = 0,
+        q: str | None = None, division: str | None = None, document_type: str | None = None,
+        limit: int = 100, offset: int = 0,
     ) -> tuple[list[DeltaUrl], int]:
         where, args = ["collection_id=?"], [collection_id]
         if kind:
             where.append("kind=?"); args.append(kind)
         if excluded is not None:
             where.append("excluded=?"); args.append(int(excluded))
+        if division:
+            where.append("division=?"); args.append(division)
+        if document_type:
+            where.append("document_type=?"); args.append(document_type)
         if q:
             where.append("(url LIKE ? OR title LIKE ? OR scraped_title LIKE ?)")
             args += [f"%{q}%"] * 3
@@ -325,9 +407,9 @@ class Database:
         await self.conn.execute("DELETE FROM delta_urls WHERE collection_id=?", (collection_id,))
         await self.conn.executemany(
             """INSERT INTO delta_urls (collection_id,url,kind,scraped_title,title,division,document_type,
-               excluded,title_ml,division_ml,document_type_ml) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               excluded,title_ai,division_ai,document_type_ai) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             [(d.collection_id, d.url, d.kind, d.scraped_title, d.title, d.division, d.document_type,
-              int(d.excluded), d.title_ml, d.division_ml, d.document_type_ml) for d in deltas],
+              int(d.excluded), d.title_ai, d.division_ai, d.document_type_ai) for d in deltas],
         )
         await self.conn.execute(
             "DELETE FROM pattern_effects WHERE collection_id=?", (collection_id,)
@@ -342,11 +424,11 @@ class Database:
         )
         await self.conn.commit()
 
-    async def set_delta_ml(self, collection_id: str, items: list[dict[str, Any]]) -> int:
-        """Bulk-write ML suggestions (never touches the effective fields)."""
+    async def set_delta_ai(self, collection_id: str, items: list[dict[str, Any]]) -> int:
+        """Bulk-write AI suggestions (never touches the effective fields)."""
         await self.conn.executemany(
-            """UPDATE delta_urls SET title_ml=COALESCE(?, title_ml), division_ml=COALESCE(?, division_ml),
-               document_type_ml=COALESCE(?, document_type_ml) WHERE collection_id=? AND url=?""",
+            """UPDATE delta_urls SET title_ai=COALESCE(?, title_ai), division_ai=COALESCE(?, division_ai),
+               document_type_ai=COALESCE(?, document_type_ai) WHERE collection_id=? AND url=?""",
             [(i.get("title"), i.get("division"), i.get("document_type"), collection_id, i["url"])
              for i in items],
         )
@@ -373,6 +455,59 @@ class Database:
         )
         await self.conn.commit()
         return len(rows)
+
+    # ── LLM suggestions ────────────────────────────────────────────────
+
+    async def replace_pattern_suggestions(self, collection_id: str, rows: list[dict[str, Any]]) -> int:
+        await self.conn.execute(
+            "DELETE FROM pattern_suggestions WHERE collection_id=? AND state='pending'", (collection_id,)
+        )
+        await self.conn.executemany(
+            """INSERT OR IGNORE INTO pattern_suggestions (collection_id,type,match,value,rationale,matches,state,created_at)
+               VALUES (?,?,?,?,?,?,'pending',?)""",
+            [(collection_id, r["type"], r["match"], r.get("value"), r.get("rationale"), r.get("matches", 0),
+              _iso(utcnow())) for r in rows],
+        )
+        await self.conn.commit()
+        return len(rows)
+
+    async def list_pattern_suggestions(self, collection_id: str, state: str | None = "pending") -> list[dict[str, Any]]:
+        q = "SELECT * FROM pattern_suggestions WHERE collection_id=?"
+        args: list[Any] = [collection_id]
+        if state:
+            q += " AND state=?"; args.append(state)
+        cur = await self.conn.execute(q + " ORDER BY id", args)
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def get_pattern_suggestion(self, collection_id: str, sid: int) -> dict[str, Any] | None:
+        cur = await self.conn.execute(
+            "SELECT * FROM pattern_suggestions WHERE id=? AND collection_id=?", (sid, collection_id)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def set_pattern_suggestion_state(self, collection_id: str, sid: int, state: str) -> None:
+        await self.conn.execute(
+            "UPDATE pattern_suggestions SET state=? WHERE id=? AND collection_id=?", (state, sid, collection_id)
+        )
+        await self.conn.commit()
+
+    async def deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> list[dict[str, Any]]:
+        """Non-deleted, non-excluded delta URLs joined with dump text for classification."""
+        q = """SELECT d.url, d.scraped_title AS title, substr(u.full_text, 1, 1500) AS text
+               FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id AND u.url=d.url
+               WHERE d.collection_id=? AND d.kind!='deleted' AND d.excluded=0"""
+        if only_missing:
+            q += " AND d.title_ai IS NULL AND d.division_ai IS NULL AND d.document_type_ai IS NULL"
+        cur = await self.conn.execute(q + " ORDER BY d.url", (collection_id,))
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def clear_delta_ai(self, collection_id: str, url: str, field: str) -> None:
+        assert field in ("title", "division", "document_type")
+        await self.conn.execute(
+            f"UPDATE delta_urls SET {field}_ai=NULL WHERE collection_id=? AND url=?", (collection_id, url)
+        )
+        await self.conn.commit()
 
     # ── patterns ───────────────────────────────────────────────────────
 

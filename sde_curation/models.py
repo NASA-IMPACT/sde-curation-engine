@@ -199,10 +199,10 @@ class DeltaUrl(BaseModel):
     division: Division | None = None
     document_type: DocumentType | None = None
     excluded: bool = False
-    # ML suggestions never overwrite manual values
-    title_ml: str | None = None
-    division_ml: Division | None = None
-    document_type_ml: DocumentType | None = None
+    # AI suggestions never overwrite manual values
+    title_ai: str | None = None
+    division_ai: Division | None = None
+    document_type_ai: DocumentType | None = None
 
 
 class CuratedUrl(BaseModel):
@@ -323,9 +323,14 @@ class ValidationReport(BaseModel):
 
 class PatternSuggestion(BaseModel):
     type: PatternType
-    match: str
+    match: str = Field(min_length=1)
     value: str | None = None
     rationale: str
+
+    @model_validator(mode="after")
+    def _same_rules_as_patterns(self) -> PatternSuggestion:
+        PatternCreate(type=self.type, match=self.match, value=self.value)
+        return self
 
 
 class PatternSuggestions(BaseModel):

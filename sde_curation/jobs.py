@@ -5,13 +5,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+from collections.abc import Callable
 from typing import Any
 
 from .backends.scrape import ScrapeBackend, ScrapeError, parse_documents
 from .config import Settings
 from .db import Database
+from .engine.patterns import match_counts
 from .events import EventBus
-from .models import Collection, DumpUrl, JobKind, JobRun, JobState, Status, utcnow
+from .llm.base import LLMError, LLMProvider
+from .llm.tasks import suggest_metadata, suggest_patterns
+from .models import Collection, DumpUrl, JobKind, JobRun, JobState, Pattern, Status, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -21,11 +26,15 @@ class JobConflict(Exception):
 
 
 class JobManager:
-    def __init__(self, settings: Settings, db: Database, bus: EventBus, *, scraper: ScrapeBackend):
+    def __init__(
+        self, settings: Settings, db: Database, bus: EventBus, *, scraper: ScrapeBackend,
+        llm: LLMProvider | Callable[[], LLMProvider] | None = None,
+    ):
         self.s = settings
         self.db = db
         self.bus = bus
         self.scraper = scraper
+        self._llm = llm
         self._tasks: dict[int, asyncio.Task] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._starting: set[str] = set()  # collections with a job being created (TOCTOU guard)
@@ -135,6 +144,86 @@ class JobManager:
                 log.exception("scrape %s crashed", c.collection_id)
                 await self.db.finish_job(job, JobState.FAILED, error=f"{type(e).__name__}: {e}"[:2000])
                 self._emit(c, job)
+
+    # ── LLM assist ─────────────────────────────────────────────────────
+
+    def llm(self) -> LLMProvider:
+        if self._llm is None:
+            raise LLMError("no LLM provider configured")
+        return self._llm() if callable(self._llm) and not hasattr(self._llm, "complete") else self._llm  # type: ignore[return-value]
+
+    async def _start(self, c: Collection, kind: JobKind, coro_factory) -> JobRun:
+        cid = c.collection_id
+        if cid in self._starting or self.active_for(cid) or self.lock(cid).locked():
+            raise JobConflict(f"a job is already running for {cid}")
+        self._starting.add(cid)
+        try:
+            job = await self.db.insert_job(JobRun(collection_id=cid, kind=kind, state=JobState.RUNNING))
+            self._emit(c, job)
+            return await self._spawn(job, coro_factory(job))
+        finally:
+            self._starting.discard(cid)
+
+    async def start_llm_patterns(self, c: Collection, *, sample_size: int = 60) -> JobRun:
+        return await self._start(c, JobKind.LLM_PATTERNS, lambda job: self._run_llm_patterns(c, job, sample_size))
+
+    async def start_llm_metadata(self, c: Collection, *, only_missing: bool = True) -> JobRun:
+        return await self._start(c, JobKind.LLM_METADATA, lambda job: self._run_llm_metadata(c, job, only_missing))
+
+    async def _guarded(self, c: Collection, job: JobRun, body) -> None:
+        async with self._lock(c.collection_id):
+            try:
+                await body()
+                await self.db.finish_job(job, JobState.SUCCEEDED)
+                self._emit(await self.db.get_collection(c.collection_id) or c, job)
+            except asyncio.CancelledError:
+                await self.db.finish_job(job, JobState.FAILED, error="cancelled by user or shutdown")
+                self._emit(c, job)
+                raise
+            except (LLMError, ScrapeError, OSError, ValueError) as e:
+                log.error("%s %s failed: %s", job.kind, c.collection_id, e)
+                await self.db.finish_job(job, JobState.FAILED, error=str(e)[:2000])
+                self._emit(c, job)
+            except Exception as e:
+                log.exception("%s %s crashed", job.kind, c.collection_id)
+                await self.db.finish_job(job, JobState.FAILED, error=f"{type(e).__name__}: {e}"[:2000])
+                self._emit(c, job)
+
+    async def _run_llm_patterns(self, c: Collection, job: JobRun, sample_size: int) -> None:
+        async def body():
+            dump = await self.db.load_dump(c.collection_id)
+            if not dump:
+                raise LLMError("no crawl dump to sample — scrape first")
+            rng = random.Random(42)
+            sample = [d.model_dump() for d in (rng.sample(dump, sample_size) if len(dump) > sample_size else dump)]
+            all_urls = [d.url for d in dump]
+            job.progress = {"sample": len(sample), "urls": len(all_urls)}
+            await self.db.update_job(job)
+            kept = await suggest_patterns(self.llm(), c, sample, all_urls)
+            counts = match_counts(
+                [Pattern(id=i, collection_id=c.collection_id, type=s.type, match=s.match, value=s.value)
+                 for i, s in enumerate(kept)], all_urls)
+            rows = [{"type": s.type, "match": s.match, "value": s.value, "rationale": s.rationale,
+                     "matches": counts.get(i, 0)} for i, s in enumerate(kept)]
+            n = await self.db.replace_pattern_suggestions(c.collection_id, rows)
+            job.progress = {**job.progress, "suggestions": n}
+        await self._guarded(c, job, body)
+
+    async def _run_llm_metadata(self, c: Collection, job: JobRun, only_missing: bool) -> None:
+        async def body():
+            docs = await self.db.deltas_for_llm(c.collection_id, only_missing=only_missing)
+            if not docs:
+                raise LLMError("no pending URLs to classify — recompute deltas first (or all already have suggestions)")
+
+            async def on_progress(p: dict[str, Any]) -> None:
+                job.progress = {**job.progress, **p}
+                await self.db.update_job(job)
+                self._emit(c, job)
+
+            rows = await suggest_metadata(self.llm(), docs, on_progress=on_progress)
+            n = await self.db.set_delta_ai(c.collection_id, rows)
+            job.progress = {**job.progress, "classified": n}
+        await self._guarded(c, job, body)
 
     async def ingest_dump(self, collection_id: str, docs: list[dict[str, Any]]) -> int:
         rows = [

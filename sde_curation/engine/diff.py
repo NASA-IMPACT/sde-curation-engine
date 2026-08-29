@@ -81,9 +81,9 @@ def recompute(
                 division=r.division,
                 document_type=r.document_type,
                 excluded=r.excluded,
-                title_ml=prev.title_ml if prev else None,
-                division_ml=prev.division_ml if prev else None,
-                document_type_ml=prev.document_type_ml if prev else None,
+                title_ai=prev.title_ai if prev else None,
+                division_ai=prev.division_ai if prev else None,
+                document_type_ai=prev.document_type_ai if prev else None,
             )
         )
     for u, c in cur_by.items():

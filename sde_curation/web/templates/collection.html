@@ -1,65 +1,19 @@
 {% extends "base.html" %}
 {% block title %}{{ c.name }} · SDE Curation Engine{% endblock %}
 {% block content %}
-{% set job = jobs[0] if jobs else None %}
-<h1>{{ c.name }} <small class="muted">{{ c.collection_id }}</small></h1>
+{# Background jobs (scrape / LLM) end after this page rendered: reload the active tab when one ends.
+   SSE first; polling while a job is running as the safety net. #}
+<div id="job-watch" hx-get="{{ request.url.path }}?{{ request.url.query }}" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="this:replace"
+     hx-trigger="sse:collection[detail.data.includes('\"{{ c.collection_id }}\"') && (detail.data.includes('\"state\": \"succeeded\"') || detail.data.includes('\"state\": \"failed\"'))]{% if job and job.state == 'running' %}, every 4s{% endif %}"></div>
 
-{% include "partials/pipeline.html" %}
-
-<div class="cols">
-  <section>
-    <h2>Details</h2>
-    <dl class="meta">
-      <dt>Seed</dt><dd><a href="{{ c.seed_url }}" target="_blank" rel="noopener">{{ c.seed_url }}</a></dd>
-      <dt>Division</dt><dd>{{ c.division }}</dd>
-      <dt>Max pages</dt><dd>{{ c.max_pages }}</dd>
-      <dt>Crawl</dt><dd>{{ c.dump_count }} URLs</dd>
-      <dt>Pending</dt><dd><a href="/collections/{{ c.collection_id }}/curate">{{ c.delta_count }} deltas</a></dd>
-      <dt>Curated</dt><dd>{{ c.curated_count }} URLs</dd>
-    </dl>
-  </section>
-  <section>
-    <h2>Jobs</h2>
-    {% if jobs %}
-    <table>
-      <thead><tr><th>Kind</th><th>State</th><th>Started</th><th>Took</th><th>Result</th></tr></thead>
-      <tbody>{% for j in jobs %}
-        <tr><td>{{ j.kind }}</td><td><span class="job j-{{ j.state }}">{{ j.state }}</span></td>
-            <td>{{ j.started_at.strftime('%m-%d %H:%M:%S') }}</td>
-            <td>{% if j.finished_at %}{{ (j.finished_at - j.started_at).seconds }}s{% endif %}</td>
-            <td>{% if j.error %}<span class="err">{{ j.error }}</span>{% elif j.progress.docs is defined %}{{ j.progress.docs }} docs{% if j.progress.failed %}, {{ j.progress.failed }} failed{% endif %}{% endif %}</td></tr>
-      {% endfor %}</tbody>
-    </table>
-    {% else %}<p class="muted">No jobs yet.</p>{% endif %}
-  </section>
+<div id="wb-header" hx-get="/collections/{{ c.collection_id }}/header"
+     hx-trigger="sse:collection[detail.data.includes('\"{{ c.collection_id }}\"')], every 10s" hx-sync="this:replace" hx-swap="innerHTML">
+  {% include "partials/header.html" %}
 </div>
 
-<section>
-  <h2>History</h2>
-  <table>
-    <thead><tr><th>At</th><th>Status</th><th>Note</th></tr></thead>
-    <tbody>{% for h in history|reverse %}
-      <tr><td>{{ h.at.strftime('%Y-%m-%d %H:%M:%S') }}Z</td><td>{% if h.old_status and h.old_status != h.new_status %}<span class="muted">{{ h.old_status }} →</span> {% endif %}{{ h.new_status }}</td><td>{{ h.note or '' }}</td></tr>
-    {% endfor %}</tbody>
-  </table>
-</section>
+{% include "partials/tabs.html" %}
 
-<details class="advanced">
-  <summary>Advanced</summary>
-  <div class="inline">
-    <form hx-post="/api/collections/{{ c.collection_id }}/scrape" hx-swap="none" hx-confirm="Re-run the crawl? The existing dump and pending deltas are replaced." class="inline">
-      <button class="secondary" {% if job and job.state == 'running' %}disabled{% endif %}>Re-scrape</button>
-    </form>
-    <form hx-post="/api/collections/{{ c.collection_id }}/status" hx-ext="json-enc" hx-swap="none" class="inline"
-          hx-confirm="Override the workflow status? Data-consistency rules still apply." hx-vals='js:{status: document.getElementById("st").value, note: document.getElementById("note").value || "manual override", force: true}'>
-      <label class="muted" title="Bypasses the normal step order, but never the data rules (e.g. cannot be curated with nothing promoted)">Set status manually</label>
-      <select id="st">{% for s in statuses %}<option {% if s == c.status %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
-      <input id="note" placeholder="note" size="24">
-      <button class="secondary">Apply</button>
-    </form>
-    <form hx-delete="/api/collections/{{ c.collection_id }}" hx-confirm="Delete this collection and all its data?"  class="inline">
-      <button class="danger">Delete collection</button>
-    </form>
-  </div>
-</details>
+<div id="tab-body" data-tab="{{ tab }}">
+  {% include "partials/tab_" ~ tab ~ ".html" %}
+</div>
 {% endblock %}

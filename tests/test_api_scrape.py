@@ -15,7 +15,8 @@ async def test_scrape_success_ingests_dump_and_sets_status(crawler_client):
     c = (await crawler_client.get("/api/collections/ex.org")).json()
     assert c["status"] == "scraped" and c["dump_count"] == 8
     dump = (await crawler_client.get("/api/collections/ex.org/dump?limit=3")).json()
-    assert len(dump) == 3 and "full_text" not in dump[0] and dump[0]["scraped_title"].startswith("Page")
+    assert dump["total"] == 8 and len(dump["items"]) == 3 and "full_text" not in dump["items"][0]
+    assert (await crawler_client.get("/api/collections/ex.org/dump?q=p7")).json()["total"] == 1
     hist = (await crawler_client.get("/api/collections/ex.org/history")).json()
     assert hist[-1]["new_status"] == "scraped" and "8 documents" in hist[-1]["note"]
 

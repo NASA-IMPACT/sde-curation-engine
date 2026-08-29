@@ -1,0 +1,11 @@
+{% set cid = c.collection_id %}
+<nav class="tabs" role="tablist" aria-label="collection sections">
+  {% for t, label in [('overview','Overview'), ('urls','URLs'), ('patterns','Patterns & AI'), ('activity','Activity')] %}
+  <a role="tab" aria-selected="{{ 'true' if tab == t else 'false' }}" class="tab {% if tab == t %}active{% endif %}"
+     href="/collections/{{ cid }}?tab={{ t }}{% if t == 'urls' %}&set={{ 'deltas' if c.delta_count else 'curated' if c.curated_count else 'dump' }}{% endif %}">
+    {{ label }}
+    {% if t == 'urls' %}<span class="count">{{ c.dump_count + c.delta_count + c.curated_count }}</span>
+    {% elif t == 'patterns' and stats and stats.pattern_count %}<span class="count">{{ stats.pattern_count }}</span>{% endif %}
+  </a>
+  {% endfor %}
+</nav>

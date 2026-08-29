@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # ── LLM ────────────────────────────────────────────────────────────
     llm_provider: Literal["openai", "fake"] = "openai"
     openai_api_key: str | None = None
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-5.4-mini"
     openai_base_url: str | None = None  # any OpenAI-compatible endpoint
     llm_timeout_s: float = 60.0
 

@@ -1,0 +1,30 @@
+{# Sticky workbench header: identity · status badges · count chips (links) · next action. Re-rendered on SSE. #}
+{% set cid = c.collection_id %}
+{% set a = next_action(c, job) %}
+{% set running = job and job.state == 'running' %}
+<div class="wb-head">
+  <div class="wb-ident">
+    <a class="crumb" href="/">← Collections</a>
+    <h1 class="wb-name">{{ c.name }}
+      <a class="wb-id" href="{{ c.seed_url }}" target="_blank" rel="noopener" title="open seed URL {{ c.seed_url }}">{{ cid }} ↗</a>
+    </h1>
+    <div class="badges">
+      <span class="status s-{{ c.status }}" title="workflow status">{{ status_icon(c.status) }} {{ status_label(c.status) }}</span>
+      {% if c.needs_recuration %}<span class="chip warn" title="A newer crawl exists — review deltas and re-index">⚠ needs re-curation</span>{% endif %}
+      {% if running %}<span class="chip busy"><span class="spinner"></span> {{ job.kind }}{% if job.progress.docs is defined %} · {{ job.progress.docs }} docs{% elif job.progress.total %} · {{ job.progress.done or 0 }}/{{ job.progress.total }}{% endif %}</span>
+      {% elif job and job.state == 'failed' %}<span class="chip fail" title="{{ job.error }}">✗ last {{ job.kind }} failed</span>{% endif %}
+    </div>
+  </div>
+  <div class="wb-chips">
+    <a class="chip {% if not c.dump_count %}zero{% endif %}" href="/collections/{{ cid }}?tab=urls&set=dump" title="URLs found by the last crawl">Dump <b>{{ c.dump_count }}</b></a>
+    <a class="chip {% if not c.delta_count %}zero{% endif %}" href="/collections/{{ cid }}?tab=urls&set=deltas" title="Pending changes to review">Deltas <b>{{ c.delta_count }}</b>
+      {% if c.delta_count %}<small>{{ stats.delta_counts.new }} new · {{ stats.delta_counts.modified }} mod · {{ stats.delta_counts.deleted }} del{% if stats.delta_counts.excluded %} · {{ stats.delta_counts.excluded }} excl{% endif %}</small>{% endif %}</a>
+    <a class="chip {% if not c.curated_count %}zero{% endif %}" href="/collections/{{ cid }}?tab=urls&set=curated" title="Approved set">Curated <b>{{ c.curated_count }}</b>
+      {% if stats.curated_excluded %}<small>{{ stats.curated_excluded }} excl</small>{% endif %}</a>
+    <a class="chip {% if not stats.pattern_count %}zero{% endif %}" href="/collections/{{ cid }}?tab=patterns" title="Curation rules">Patterns <b>{{ stats.pattern_count }}</b></a>
+  </div>
+  <div class="wb-next">
+    <span class="muted small">Next:</span> {% include "partials/action.html" %}
+    {% if running %}<button class="mini" title="Cancel the running job" hx-post="/api/collections/{{ cid }}/jobs/cancel" hx-confirm="Cancel the running job?" hx-swap="none">✕ cancel</button>{% endif %}
+  </div>
+</div>

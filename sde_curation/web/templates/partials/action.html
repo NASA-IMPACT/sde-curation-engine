@@ -1,7 +1,7 @@
 {# one contextual button: the next step in the pipeline for this collection #}
 {% set a = next_action(c, job) %}
 {% if a.kind == 'post' %}
-  <button class="primary" title="{{ a.hint }}" hx-post="{{ a.url }}{% if a.then %}?then={{ a.then }}{% endif %}"
+  <button class="primary" title="{{ a.hint }}" hx-post="{{ a.url }}{% if a.then %}?then={{ a.then|urlencode }}{% endif %}"
           {% if a.then %}hx-swap="none"{% else %}hx-target="closest tr" hx-swap="outerHTML"{% endif %}>{{ a.label }}</button>
 {% elif a.kind == 'link' %}
   <a class="button primary" href="{{ a.url }}" title="{{ a.hint }}">{{ a.label }}</a>
