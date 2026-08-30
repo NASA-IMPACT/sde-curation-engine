@@ -6,17 +6,40 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import tempfile
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
+from .backends.index import Dispatch, IndexBackend, IndexError_, wait_for_status
+from .backends.s3 import S3
 from .backends.scrape import ScrapeBackend, ScrapeError, parse_documents
+from .backends.validate import NoIndexAccess, validate_direct
 from .config import Settings
 from .db import Database
+from .engine.export import (
+    build_manifest,
+    export_lines,
+    export_prefix,
+    mint_run_id,
+    status_prefix,
+    write_jsonl,
+)
 from .engine.patterns import match_counts
 from .events import EventBus
 from .llm.base import LLMError, LLMProvider
 from .llm.tasks import suggest_metadata, suggest_patterns
-from .models import Collection, DumpUrl, JobKind, JobRun, JobState, Pattern, Status, utcnow
+from .models import (
+    Collection,
+    DumpUrl,
+    IndexRun,
+    JobKind,
+    JobRun,
+    JobState,
+    Pattern,
+    Status,
+    utcnow,
+)
 
 log = logging.getLogger(__name__)
 
@@ -29,12 +52,14 @@ class JobManager:
     def __init__(
         self, settings: Settings, db: Database, bus: EventBus, *, scraper: ScrapeBackend,
         llm: LLMProvider | Callable[[], LLMProvider] | None = None,
+        indexer: IndexBackend | Callable[[], IndexBackend] | None = None,
     ):
         self.s = settings
         self.db = db
         self.bus = bus
         self.scraper = scraper
         self._llm = llm
+        self._indexer = indexer
         self._tasks: dict[int, asyncio.Task] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._starting: set[str] = set()  # collections with a job being created (TOCTOU guard)
@@ -180,7 +205,7 @@ class JobManager:
                 await self.db.finish_job(job, JobState.FAILED, error="cancelled by user or shutdown")
                 self._emit(c, job)
                 raise
-            except (LLMError, ScrapeError, OSError, ValueError) as e:
+            except (LLMError, ScrapeError, IndexError_, OSError, ValueError) as e:
                 log.error("%s %s failed: %s", job.kind, c.collection_id, e)
                 await self.db.finish_job(job, JobState.FAILED, error=str(e)[:2000])
                 self._emit(c, job)
@@ -223,6 +248,161 @@ class JobManager:
             rows = await suggest_metadata(self.llm(), docs, on_progress=on_progress)
             n = await self.db.set_delta_ai(c.collection_id, rows)
             job.progress = {**job.progress, "classified": n}
+        await self._guarded(c, job, body)
+
+    # ── index (export → S3 → WEB_COSMOS → status.json) ─────────────────
+
+    def indexer(self) -> IndexBackend:
+        if self._indexer is None:
+            raise IndexError_("no index backend configured")
+        return self._indexer() if callable(self._indexer) and not hasattr(self._indexer, "complete") and not hasattr(self._indexer, "dispatch") else self._indexer  # type: ignore[return-value]
+
+    async def start_index(self, c: Collection, target: str) -> tuple[JobRun, IndexRun]:
+        if not self.s.cosmos_index_bucket:
+            raise IndexError_("COSMOS_INDEX_BUCKET is not set")
+        run = IndexRun(run_id=mint_run_id(), collection_id=c.collection_id, target=target)
+        kind = JobKind.INDEX_PROD if target == "prod" else JobKind.INDEX_TEST
+        job = await self._start(c, kind, lambda job: self._run_index(c, job, run))
+        job.run_id = run.run_id
+        await self.db.update_job(job)
+        return job, run
+
+    async def _run_index(self, c: Collection, job: JobRun, run: IndexRun) -> None:
+        async def body():
+            s3 = S3(self.s.cosmos_index_bucket, region=self.s.aws_region)
+            await self.db.insert_index_run(run)
+            backend = self.indexer()
+
+            async def progress(p: dict[str, Any]) -> None:
+                job.progress = {**job.progress, **p}
+                await self.db.update_job(job)
+                self._emit(c, job)
+
+            # 1. export: stream curated (non-excluded) rows to a temp jsonl, upload, THEN the manifest
+            curated = await self.db.load_curated(c.collection_id)
+            full_text = await self.db.dump_full_text(c.collection_id)
+            with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as fh:
+                n = write_jsonl(export_lines(curated, full_text), fh)
+                tmp = Path(fh.name)
+            try:
+                if n == 0:
+                    raise IndexError_("nothing to export: every curated URL is excluded")
+                prefix = export_prefix(c.collection_id, run.run_id)
+                await s3.upload_file(tmp, f"{prefix}/documents.jsonl", "application/x-ndjson")
+                manifest = build_manifest(c, run.run_id, n, run.target)
+                await s3.put_json(f"{prefix}/manifest.json", manifest.model_dump(mode="json"))
+            finally:
+                tmp.unlink(missing_ok=True)
+            run.exported = n
+            await self.db.update_index_run(run)
+            await progress({"exported": n, "export": s3.url(prefix), "phase": "dispatch"})
+
+            # 2. dispatch
+            d: Dispatch = await backend.dispatch(c, run.run_id, run.target)
+            run.external_ref = d.external_ref
+            job.external_ref = d.external_ref
+            await self.db.update_index_run(run)
+            await progress({"external_ref": d.external_ref, "phase": "indexing", **{k: v for k, v in d.detail.items() if k != "log"}})
+
+            # 3. wait for status.json (+ validation.json on test)
+            try:
+                status, validation = await wait_for_status(
+                    s3, self.s, c, run.run_id, backend, d, progress, target=run.target
+                )
+            except asyncio.CancelledError:
+                if hasattr(backend, "kill"):
+                    await backend.kill(d)
+                raise
+            run.status = status.model_dump()
+            run.validation = validation.model_dump() if validation else None
+            run.validated_by = "indexer" if validation else None
+            job.progress = {**job.progress, "phase": "done", "status": run.status, "validation": run.validation}
+            if status.state != "succeeded":
+                run.state, run.error, run.finished_at = "failed", status.error or "indexer reported failure", utcnow()
+                await self.db.update_index_run(run)
+                raise IndexError_(f"indexer failed: {status.error}{(' — ' + status.error_detail) if status.error_detail else ''}")
+            run.state, run.finished_at = "succeeded", utcnow()
+            await self.db.update_index_run(run)
+
+            if run.target == "prod":
+                await self.db.set_status(
+                    c.collection_id, Status.LIVE, force=True,
+                    note=f"prod index run {run.run_id}: {status.indexed} indexed, {status.deleted} deleted",
+                )
+                await self.db.set_flag(c.collection_id, False)
+                return
+
+            await self.db.set_status(
+                c.collection_id, Status.CONFIG_GENERATED, force=True,
+                note=f"test index run {run.run_id}: {status.indexed} indexed, {status.deleted} deleted",
+            )
+            # 4. validation gate — the indexer's own validation.json is pre-refresh; re-check after a delay
+            await self._validate(c, job, run, s3, backend, progress)
+
+        await self._guarded(c, job, body)
+
+    async def _validate(self, c: Collection, job: JobRun, run: IndexRun, s3: S3, backend: IndexBackend, progress) -> None:
+        """Wait for the index to refresh, then validate directly (fast); on 403 fall back to a
+        second pass of the same export (changed: 0) purely to get a fresh validation.json."""
+        await progress({"phase": "validating", "validation_delay_s": int(self.s.validation_delay_s)})
+        await asyncio.sleep(self.s.validation_delay_s)
+        expected = await self._expected_titles(c.collection_id)
+        try:
+            report = await validate_direct(
+                self.s, collection_key=c.collection_id, run_id=run.run_id, target=run.target, expected_titles=expected
+            )
+            run.validated_by = "direct"
+        except NoIndexAccess as e:
+            log.warning("direct validation unavailable (%s) — falling back to a second indexer pass", e)
+            await progress({"phase": "validating", "fallback": "second_pass", "reason": str(e)[:200]})
+            # the first pass left status.json/validation.json behind — remove them or the poller
+            # would return the stale (pre-refresh) validation immediately
+            prefix = status_prefix(c.collection_id, run.run_id)
+            await s3.delete(f"{prefix}/status.json", f"{prefix}/validation.json")
+            d = await backend.dispatch(c, run.run_id, run.target)
+            status, validation = await wait_for_status(s3, self.s, c, run.run_id, backend, d, progress, target=run.target)
+            if status.state != "succeeded" or validation is None:
+                raise IndexError_(f"second-pass validation failed: {status.error or 'no validation.json'}")
+            report = validation.model_dump()
+            run.validated_by = "second_pass"
+        run.validation = report
+        await self.db.update_index_run(run)
+        ok = run.validation_passes(self.s.validation_title_match_threshold)
+        job.progress = {**job.progress, "phase": "done", "validation": report, "validated_by": run.validated_by, "validation_ok": ok}
+        if ok:
+            await self.db.set_flag(c.collection_id, False)
+            await self.db.set_status(
+                c.collection_id, Status.CONFIG_GENERATED, force=True,
+                note=f"validated ({run.validated_by}): {report['indexed_count']}/{report['expected_count']}, titles {report['title_match_rate']:.1%}",
+            )
+        else:
+            await self.db.set_flag(c.collection_id, True)
+            await self.db.set_status(
+                c.collection_id, Status.CURATING, force=True,
+                note=f"validation FAILED ({run.validated_by}): {report['indexed_count']}/{report['expected_count']} indexed, titles {report['title_match_rate']:.1%} — needs re-curation",
+            )
+
+    async def _expected_titles(self, collection_id: str) -> dict[str, str]:
+        curated = await self.db.load_curated(collection_id)
+        return {r.url: (r.title or r.scraped_title or "").strip() for r in curated if not r.excluded}
+
+    async def start_revalidate(self, c: Collection, run: IndexRun) -> JobRun:
+        """Manual re-check of an existing test run (no new export)."""
+        return await self._start(c, JobKind.VALIDATE, lambda job: self._run_revalidate(c, job, run))
+
+    async def _run_revalidate(self, c: Collection, job: JobRun, run: IndexRun) -> None:
+        async def body():
+            s3 = S3(self.s.cosmos_index_bucket, region=self.s.aws_region)
+
+            async def progress(p: dict[str, Any]) -> None:
+                job.progress = {**job.progress, **p}
+                await self.db.update_job(job)
+                self._emit(c, job)
+
+            job.run_id = run.run_id
+            await self.db.update_job(job)
+            await self._validate(c, job, run, s3, self.indexer(), progress)
+
         await self._guarded(c, job, body)
 
     async def ingest_dump(self, collection_id: str, docs: list[dict[str, Any]]) -> int:

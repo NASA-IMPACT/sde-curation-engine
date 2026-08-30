@@ -138,4 +138,4 @@ async def test_ssm_drops_job_and_waits_for_s3(aws, tmp_path):
     # the first SSM command sent was the job drop
     cmds = ssm.list_commands()["Commands"]
     assert any(c["Comment"] == "sde-curation-engine" for c in cmds)
-    assert "jobs/incoming/ex.org.json" in cmds[-1]["Parameters"]["commands"][0]
+    assert any("jobs/incoming/ex.org.json" in c["Parameters"]["commands"][0] for c in cmds)

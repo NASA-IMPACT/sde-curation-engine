@@ -11,9 +11,8 @@ It wraps two existing repos — `../sde-crawl4ai-scraper-v1` (crawling) and
 a clickable pipeline stepper, and a curation grid. Plan and phase status: `docs/plan.md`;
 workflow background: `docs/workflow.md`.
 
-**Status:** Phases 0–4 done and verified end-to-end (collections, scraping, curation, promotion,
-LLM assist — live-tested with OpenAI `gpt-5.4-mini`). Phase 5 (S3 export + WEB_COSMOS test
-indexing) and 6 (validation + prod) are next; steps 5–6 in the UI are placeholders.
+**Status:** all six phases built — collections, scraping, curation, promotion, LLM assist, S3 export +
+WEB_COSMOS test indexing, validation gate, prod indexing, notifications.
 
 ## Quick start
 ```bash
@@ -58,9 +57,9 @@ Point `CRAWLER_PYTHON` in `.env` elsewhere if you use a different interpreter.
    | 1 Backlog | Scrape / Re-scrape |
    | 2 Scraped | Start curating (computes deltas → curation page), Re-scrape |
    | 3 Curating | Open curation, Recompute deltas, Promote → curated (or *Mark curated* when nothing is pending) |
-   | 4 Curated | Review / re-curate; Index to test *(Phase 5)* |
-   | 5 Test index | *(Phase 5)* |
-   | 6 Live | *(Phase 6)* |
+   | 4 Curated | **Index to test** (export + dispatch), Review / re-curate |
+   | 5 Test index | run summary (exported, indexed/changed/deleted, validation pass/fail + how it was validated), Re-index, **Re-validate** |
+   | 6 Live | **Index to prod** (only after a validated test run), prod run summary |
 
    A running job shows a spinner, live doc counts and a **Cancel** button. *Advanced* (collapsed)
    holds Re-scrape, a manual status override and Delete.
@@ -88,6 +87,45 @@ models — a malformed reply fails the job and writes nothing) or `fake` (determ
 used in tests and demos; no key needed). Adding a provider = one module implementing
 `complete(system, user, schema)` + one line in `llm/base.py`. Prompts live in `llm/tasks.py`
 (they ask for host-agnostic globs like `*/login*` so http/https variants are covered together).
+
+### Indexing (Phase 5)
+**Index to test** exports the curated, non-excluded URLs as the indexer's contract —
+`s3://$COSMOS_INDEX_BUCKET/curated_collections/{key}/{run_id}/documents.jsonl` then
+`manifest.json` (written last = "export complete") — and dispatches
+`api_scraper.py --source WEB_COSMOS --collection {key} --run-id {run_id} --target test` from
+`../sde-api-scrapers`, either as a **local subprocess** (`INDEX_BACKEND=local`, needs the
+OpenSearch/SageMaker env in `.env`) or as an **ECS Fargate task** (`INDEX_BACKEND=ecs`,
+`ecs:RunTask` on `web_cosmos-scraper-{env}` with the command override; assumes
+`INDEXING_DISPATCH_ROLE_ARN` when set, else ambient credentials). Completion is always read from
+`index_runs/{key}/{run_id}/status.json` (+ `validation.json` for test) that the indexer writes last;
+a stopped task with no status, or `INDEX_STALL_TIMEOUT_S`, fails the run explicitly. Success moves
+the collection to `config_generated`; every run is kept in `index_runs` (see the step-5 panel).
+### Validation gate and prod (Phase 6)
+The indexer validates in-process right after its bulk upsert — before OpenSearch Serverless has
+refreshed — so on any run that wrote something its `validation.json` reads `0/N` (reproduced: the
+same export re-run a minute later reads `13/13`). The engine therefore does **not** trust that file.
+After a test run succeeds it waits `VALIDATION_DELAY_S` (30 s) and validates itself:
+1. **Direct** (fast): a SigV4 query of the target index for `collection_key`, comparing counts and
+   titles exactly like the indexer's `web/validate.py`. Needs `OPENSEARCH_ENDPOINT_TEST/PROD` and
+   AOSS **data access** for the engine's principal — or `VALIDATION_ASSUME_ROLE_ARN` naming a role
+   that already has it (e.g. `indexing-helper-role`).
+2. **Fallback** on 403 / no endpoint: logs "no AOSS data access", deletes the stale
+   `status.json`/`validation.json`, and dispatches a **second pass** of the same export
+   (`changed: 0`, nothing re-vectorised) purely to get a fresh `validation.json` from the indexer.
+
+Pass (`count_matches` and titles ≥ `VALIDATION_TITLE_MATCH_THRESHOLD`, default 0.99) → status
+`config_generated` with **Index to prod** enabled. Fail → back to `curating` with ⚠ *needs
+re-curation* and the mismatches listed. **Re-validate** re-runs the check on demand. A prod run
+(`?target=prod`) is refused until the latest test run passed; success → `live` and the ⚠ flag clears.
+Every status transition posts to `NOTIFY_WEBHOOK_URL` (Slack-compatible `{"text": …}` with a link
+built from `PUBLIC_BASE_URL`); failures to notify never block a transition.
+
+**Deploying the engine externally**: it uses only the default boto3 credential chain. The role it
+runs as needs: `s3:GetObject/PutObject/DeleteObject/ListBucket` on `$COSMOS_INDEX_BUCKET`;
+`ecs:RunTask`, `ecs:DescribeTasks`, `iam:PassRole` for the task roles (or `sts:AssumeRole` on
+`INDEXING_DISPATCH_ROLE_ARN`); optionally `aoss:APIAccessAll` + a data-access policy entry on the
+web index (or `sts:AssumeRole` on `VALIDATION_ASSUME_ROLE_ARN`); and, for SSM scraping,
+`ssm:SendCommand`/`GetCommandInvocation` on the crawler instance plus read on `CRAWLER_S3_BUCKET`.
 
 ### Curation semantics
 Effective value per URL = the most specific matching pattern (smallest match set, tie → longest
@@ -117,9 +155,13 @@ unapply (next most specific → curated → NULL). Diff + apply run as one idemp
 | `INDEXER_ROOT`, `INDEXER_PYTHON` | sde-api-scrapers repo (Phase 5) |
 | `SCRAPE_BACKEND` | `local` (subprocess) or `ssm` (drop job on the EC2 inbox via SSM, poll S3) |
 | `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET` | needed for `ssm` |
-| `INDEX_BACKEND`, `COSMOS_INDEX_BUCKET`, `INDEXING_*` | Phase 5 (local subprocess or `ecs:RunTask`) |
+| `INDEX_BACKEND` (`local`\|`ecs`), `COSMOS_INDEX_BUCKET`, `WEB_INDEX_NAME` | indexing target bucket / index |
+| `INDEXING_ECS_CLUSTER`, `INDEXING_TASK_FAMILY`, `INDEXING_CONTAINER_NAME`, `INDEXING_SUBNETS`, `INDEXING_SECURITY_GROUPS`, `INDEXING_DISPATCH_ROLE_ARN` | `ecs` backend |
+| `OPENSEARCH_ENDPOINT_TEST`, `OPENSEARCH_ENDPOINT_PROD`, `SAGEMAKER_ENDPOINT_NAME` | `local` backend (the ECS task def already carries these) |
+| `INDEX_POLL_INTERVAL_S`, `INDEX_STALL_TIMEOUT_S` | status.json polling |
+| `VALIDATION_DELAY_S`, `VALIDATION_TITLE_MATCH_THRESHOLD`, `VALIDATION_ASSUME_ROLE_ARN` | validation gate |
+| `NOTIFY_WEBHOOK_URL`, `PUBLIC_BASE_URL` | Slack-compatible notifications on every status change |
 | `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.4-mini`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` | LLM assist; any OpenAI-compatible endpoint |
-| `NOTIFY_WEBHOOK_URL` | Phase 6 notifications |
 
 ## API
 Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers get
@@ -140,6 +182,9 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `GET …/deltas?kind&excluded&division&document_type&q&limit&offset`, `…/dump?q`, `…/curated?q&excluded` | paginated URL sets |
 | `GET /collections/{id}/urls/{dump\|deltas\|curated}?format=csv&…` | CSV export of the filtered set |
 | `POST …/promote` | deltas → curated set; status `curated` |
+| `POST …/index?target=test\|prod` | export to S3 + dispatch WEB_COSMOS → job (202; 409 unless curated, no pending deltas, something to export; prod needs a validated test run) |
+| `POST …/index/revalidate` | re-check the latest test run against the index (direct, or second pass) |
+| `GET …/index_runs` | run history: indexer status, validation report, `validated_by` (indexer\|direct\|second_pass) |
 | `POST …/suggest/patterns`, `POST …/suggest/metadata?all=` | LLM jobs (202; 409 if busy / nothing to do) |
 | `GET …/suggestions?state=`, `POST …/suggestions/{sid}/accept\|reject` | pattern suggestions |
 | `POST …/ai/accept\|reject` `{url, field}` | per-URL metadata suggestion |
@@ -165,9 +210,10 @@ sde_curation/
   config.py        pydantic-settings
   models.py        every boundary model (API, DB rows, indexer contracts, LLM schemas)
   db.py            SQLite (aiosqlite), bulk ops
-  engine/          pure: patterns.py (resolution), diff.py (deltas, promote)
+  engine/          pure: patterns.py (resolution), diff.py (deltas, promote), export.py (indexer contract)
   curation.py      engine ↔ DB glue, per-collection locking
-  backends/        scrape.py (local subprocess | SSM), index.py (Phase 5)
+  backends/        scrape.py (local subprocess | SSM), index.py (local subprocess | ECS), validate.py (direct AOSS check), s3.py
+  notify.py        Slack-compatible webhook on status transitions
   llm/             base.py (provider protocol + registry), openai.py, fake.py, tasks.py (prompts, sanity filters)
   jobs.py          JobManager: background tasks, cancel, recovery, SSE events
   events.py        in-process event bus → SSE

@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 
 def utcnow() -> datetime:
@@ -71,6 +71,7 @@ class JobKind(StrEnum):
     SCRAPE = "scrape"
     INDEX_TEST = "index_test"
     INDEX_PROD = "index_prod"
+    VALIDATE = "validate"
     LLM_PATTERNS = "llm_patterns"
     LLM_METADATA = "llm_metadata"
 
@@ -152,6 +153,8 @@ class CollectionCreate(BaseModel):
 class Collection(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    _validated: bool = PrivateAttr(default=False)  # computed for the UI: latest test run validated
+
     collection_id: str
     name: str
     seed_url: str
@@ -163,6 +166,7 @@ class Collection(BaseModel):
     needs_recuration: bool = False
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+    last_run_id: str | None = None  # most recent index run (test or prod)
     # counters kept on the row for a cheap dashboard
     dump_count: int = 0
     delta_count: int = 0
@@ -316,6 +320,33 @@ class ValidationReport(BaseModel):
     titles_missing_in_index: list[str] = Field(default_factory=list)
     titles_only_in_index: list[str] = Field(default_factory=list)
     titles_mismatched: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class IndexRun(BaseModel):
+    """One export + WEB_COSMOS dispatch. status/validation are the indexer's own JSON files."""
+
+    run_id: str
+    collection_id: str
+    target: str  # test | prod
+    state: str = "running"  # running | succeeded | failed
+    exported: int = 0
+    external_ref: str | None = None
+    status: dict[str, Any] | None = None
+    validation: dict[str, Any] | None = None
+    validated_by: str | None = None  # indexer | direct | second_pass
+    error: str | None = None
+    started_at: datetime = Field(default_factory=utcnow)
+    finished_at: datetime | None = None
+
+    def validation_passes(self, threshold: float = 0.99) -> bool | None:
+        v = self.validation
+        if not v:
+            return None
+        return bool(v.get("count_matches")) and float(v.get("title_match_rate", 0)) >= threshold
+
+    @property
+    def validation_ok(self) -> bool | None:
+        return self.validation_passes()
 
 
 # ── LLM suggestion schemas ─────────────────────────────────────────────

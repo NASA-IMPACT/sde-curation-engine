@@ -61,19 +61,59 @@
   <div class="inline">
     {% if info.state == 'todo' %}<span class="muted">Promote the deltas in step 3 first.</span>
     {% else %}
-      <button class="primary" disabled title="Phase 5 — export + test indexing not built yet">Index to test</button>
+      {{ btn('Index to test', '/api/collections/' ~ cid ~ '/index?target=test',
+             'Export ' ~ stats.exportable ~ ' curated URLs to S3 and run the WEB_COSMOS indexer against the test index',
+             primary=True, disabled=(not stats.exportable or c.delta_count > 0),
+             confirm='Export ' ~ stats.exportable ~ ' URLs and index them into the TEST index?') }}
       {{ btn('Review / re-curate', '/api/collections/' ~ cid ~ '/recompute', 'Recompute deltas against the current crawl and open the curation page (status changes only if something differs)', then='/collections/' ~ cid ~ '?tab=urls&set=deltas') }}
+      {% if c.delta_count %}<span class="muted small">{{ c.delta_count }} deltas pending — promote before indexing.</span>{% endif %}
     {% endif %}
   </div>
 
 {% elif step == 'config_generated' %}
-  <p class="muted">Export the curated set to S3 and dispatch the WEB_COSMOS indexer against the test index. <em>Not built yet (Phase 5).</em></p>
-  <div class="inline"><button class="primary" disabled title="Phase 5">Index to test</button>
-    {% if info.state != 'todo' %}<button class="secondary" disabled title="Phase 5">Re-index</button>{% endif %}</div>
+  {% set r = stats.last_test_run %}
+  {% if r %}
+  <dl class="meta">
+    <dt>Run</dt><dd><code>{{ r.run_id }}</code> · <span class="job j-{{ r.state }}">{{ r.state }}</span> · {{ r.started_at.strftime('%Y-%m-%d %H:%M') }}Z{% if r.external_ref %} · <small class="muted">{{ r.external_ref[-40:] }}</small>{% endif %}</dd>
+    <dt>Exported</dt><dd>{{ r.exported }} URLs → <code>s3://{{ settings.cosmos_index_bucket }}/curated_collections/{{ cid }}/{{ r.run_id }}/</code></dd>
+    {% if r.status %}<dt>Indexer</dt><dd>{{ r.status.indexed }} indexed · {{ r.status.changed }} changed · {{ r.status.deleted }} deleted{% if r.status.failed %} · <span class="err">{{ r.status.failed }} failed</span>{% endif %} · index <code>{{ r.status.index }}</code>{% if r.status.duration_seconds %} · {{ r.status.duration_seconds|round|int }}s{% endif %}</dd>{% endif %}
+    {% if r.error %}<dt>Error</dt><dd class="err">{{ r.error }}</dd>{% endif %}
+    {% if r.validation %}<dt>Validation</dt><dd>
+      {% if r.validation_passes(settings.validation_title_match_threshold) %}<span class="kind k-new">pass</span>{% else %}<span class="kind k-deleted">fail</span>{% endif %}
+      <small class="muted">via {{ r.validated_by or 'indexer' }}{% if r.validated_by == 'indexer' %} (pre-refresh — re-validate){% endif %}</small>
+      {{ r.validation.indexed_count }} / {{ r.validation.expected_count }} — {{ 'counts match' if r.validation.count_matches else 'COUNT MISMATCH' }} · titles {{ (r.validation.title_match_rate * 100)|round(1) }}%
+      {% if r.validation.titles_mismatched %}<br><small class="muted">{{ r.validation.titles_mismatched|length }} title mismatches, {{ r.validation.titles_missing_in_index|length }} missing in index</small>{% endif %}</dd>{% endif %}
+  </dl>
+  {% else %}<p class="muted">Export the curated set to S3 and run the WEB_COSMOS indexer against the test index (<code>{{ settings.web_index_name }}</code>). The indexer reports back through <code>status.json</code> / <code>validation.json</code>.</p>{% endif %}
+  <div class="inline">
+    {{ btn('Re-index to test' if r else 'Index to test', '/api/collections/' ~ cid ~ '/index?target=test',
+           'Export the curated set and run the test indexer', primary=(info.state != 'done'),
+           disabled=(c.status not in ('curated','config_generated','live') or not stats.exportable or c.delta_count > 0),
+           confirm='Export ' ~ stats.exportable ~ ' URLs and index them into the TEST index?') }}
+    {% if r and r.state == 'succeeded' %}{{ btn('Re-validate', '/api/collections/' ~ cid ~ '/index/revalidate', 'Check the test index against the curated set now (direct query, or a second indexer pass)') }}{% endif %}
+    {% if info.state == 'todo' and c.status not in ('curated','config_generated','live') %}<span class="muted">Promote the deltas in step 3 first.</span>{% endif %}
+  </div>
 
 {% elif step == 'live' %}
-  <p class="muted">Validate test-index counts/titles against the curated set, then index to production. <em>Not built yet (Phase 6).</em></p>
-  <div class="inline"><button class="primary" disabled title="Phase 6">Validate &amp; go live</button></div>
+  {% set t = stats.last_test_run %}{% set pr = stats.last_prod_run %}
+  {% if pr %}
+  <dl class="meta">
+    <dt>Prod run</dt><dd><code>{{ pr.run_id }}</code> · <span class="job j-{{ pr.state }}">{{ pr.state }}</span> · {{ pr.started_at.strftime('%Y-%m-%d %H:%M') }}Z</dd>
+    {% if pr.status %}<dt>Indexer</dt><dd>{{ pr.status.indexed }} indexed · {{ pr.status.changed }} changed · {{ pr.status.deleted }} deleted · index <code>{{ pr.status.index }}</code></dd>{% endif %}
+    {% if pr.error %}<dt>Error</dt><dd class="err">{{ pr.error }}</dd>{% endif %}
+  </dl>
+  {% else %}
+  <p class="muted">Publishes the validated curated set to the production index. Requires a test run whose validation passed
+    (≥ {{ (settings.validation_title_match_threshold * 100)|round|int }}% titles, counts equal).</p>
+  {% endif %}
+  {% set gate = t and t.state == 'succeeded' and t.validation_passes(settings.validation_title_match_threshold) %}
+  <div class="inline">
+    {{ btn('Re-index to prod' if pr else 'Index to prod', '/api/collections/' ~ cid ~ '/index?target=prod',
+           'Export the curated set and run the PRODUCTION indexer', primary=True,
+           disabled=(not gate or c.status not in ('config_generated','live') or c.delta_count > 0),
+           confirm='Index ' ~ stats.exportable ~ ' URLs into the PRODUCTION index?') }}
+    {% if not gate %}<span class="muted small">{% if not t %}Run "Index to test" first.{% elif t.validation %}Test validation did not pass — fix the deltas, re-index to test, or Re-validate.{% else %}Test run not validated yet — Re-validate.{% endif %}</span>{% endif %}
+  </div>
 {% endif %}
 
 {% if job and job.state == 'failed' and step == c.status %}<div class="err">Last {{ job.kind }} failed: {{ job.error }}</div>{% endif %}

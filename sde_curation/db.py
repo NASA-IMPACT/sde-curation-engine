@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from .models import (
     CuratedUrl,
     DeltaUrl,
     DumpUrl,
+    IndexRun,
     JobRun,
     JobState,
     Pattern,
@@ -120,6 +122,22 @@ CREATE TABLE IF NOT EXISTS pattern_suggestions (
   UNIQUE (collection_id, type, match)
 );
 
+CREATE TABLE IF NOT EXISTS index_runs (
+  run_id TEXT PRIMARY KEY,
+  collection_id TEXT NOT NULL REFERENCES collections(collection_id) ON DELETE CASCADE,
+  target TEXT NOT NULL,
+  state TEXT NOT NULL,
+  exported INTEGER NOT NULL DEFAULT 0,
+  external_ref TEXT,
+  status TEXT,
+  validation TEXT,
+  validated_by TEXT,
+  error TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS index_runs_coll ON index_runs(collection_id, started_at DESC);
+
 CREATE TABLE IF NOT EXISTS job_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   collection_id TEXT NOT NULL REFERENCES collections(collection_id) ON DELETE CASCADE,
@@ -144,6 +162,8 @@ class Database:
     def __init__(self, path: Path | str):
         self.path = str(path)
         self._conn: aiosqlite.Connection | None = None
+        # optional async hook(collection_id, old_status, new_status, note) after every transition
+        self.on_status_change = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -168,6 +188,12 @@ class Database:
         for f in ("title", "division", "document_type"):
             if f"{f}_ml" in cols:
                 await self._conn.execute(f"ALTER TABLE delta_urls RENAME COLUMN {f}_ml TO {f}_ai")
+        cur = await self._conn.execute("PRAGMA table_info(collections)")
+        if "last_run_id" not in {r[1] for r in await cur.fetchall()}:
+            await self._conn.execute("ALTER TABLE collections ADD COLUMN last_run_id TEXT")
+        cur = await self._conn.execute("PRAGMA table_info(index_runs)")
+        if "validated_by" not in {r[1] for r in await cur.fetchall()}:
+            await self._conn.execute("ALTER TABLE index_runs ADD COLUMN validated_by TEXT")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -234,6 +260,11 @@ class Database:
             (collection_id, c.status, new, note, _iso(now)),
         )
         await self.conn.commit()
+        if self.on_status_change and new != c.status:
+            try:
+                await self.on_status_change(collection_id, c.status, new, note)
+            except Exception as e:  # noqa: BLE001 - notifications must never break a transition
+                logging.getLogger(__name__).warning("status hook failed: %s", e)
         c.status, c.updated_at = new, now
         return c
 
@@ -455,6 +486,65 @@ class Database:
         )
         await self.conn.commit()
         return len(rows)
+
+    # ── index runs ─────────────────────────────────────────────────────
+
+    async def insert_index_run(self, r: IndexRun) -> IndexRun:
+        await self.conn.execute(
+            """INSERT INTO index_runs (run_id,collection_id,target,state,exported,external_ref,status,validation,
+               validated_by,error,started_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (r.run_id, r.collection_id, r.target, r.state, r.exported, r.external_ref,
+             json.dumps(r.status) if r.status else None, json.dumps(r.validation) if r.validation else None,
+             r.validated_by, r.error, _iso(r.started_at), _iso(r.finished_at)),
+        )
+        await self.conn.execute(
+            "UPDATE collections SET last_run_id=?, updated_at=? WHERE collection_id=?",
+            (r.run_id, _iso(utcnow()), r.collection_id),
+        )
+        await self.conn.commit()
+        return r
+
+    async def update_index_run(self, r: IndexRun) -> None:
+        await self.conn.execute(
+            """UPDATE index_runs SET state=?, exported=?, external_ref=?, status=?, validation=?, validated_by=?,
+               error=?, finished_at=? WHERE run_id=?""",
+            (r.state, r.exported, r.external_ref, json.dumps(r.status) if r.status else None,
+             json.dumps(r.validation) if r.validation else None, r.validated_by, r.error, _iso(r.finished_at),
+             r.run_id),
+        )
+        await self.conn.commit()
+
+    @staticmethod
+    def _index_run(row: Any) -> IndexRun:
+        d = dict(row)
+        d["status"] = json.loads(d["status"]) if d["status"] else None
+        d["validation"] = json.loads(d["validation"]) if d["validation"] else None
+        return IndexRun(**d)
+
+    async def list_index_runs(self, collection_id: str, limit: int = 20) -> list[IndexRun]:
+        cur = await self.conn.execute(
+            "SELECT * FROM index_runs WHERE collection_id=? ORDER BY started_at DESC LIMIT ?", (collection_id, limit)
+        )
+        return [self._index_run(r) for r in await cur.fetchall()]
+
+    async def get_index_run(self, run_id: str) -> IndexRun | None:
+        cur = await self.conn.execute("SELECT * FROM index_runs WHERE run_id=?", (run_id,))
+        row = await cur.fetchone()
+        return self._index_run(row) if row else None
+
+    async def last_index_run(self, collection_id: str, target: str | None = None) -> IndexRun | None:
+        q, args = "SELECT * FROM index_runs WHERE collection_id=?", [collection_id]
+        if target:
+            q += " AND target=?"; args.append(target)
+        cur = await self.conn.execute(q + " ORDER BY started_at DESC LIMIT 1", args)
+        row = await cur.fetchone()
+        return self._index_run(row) if row else None
+
+    async def curated_export_count(self, collection_id: str) -> int:
+        cur = await self.conn.execute(
+            "SELECT COUNT(*) FROM curated_urls WHERE collection_id=? AND excluded=0", (collection_id,)
+        )
+        return (await cur.fetchone())[0]
 
     # ── LLM suggestions ────────────────────────────────────────────────
 

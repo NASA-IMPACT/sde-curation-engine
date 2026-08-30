@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, model_validator
 from sse_starlette.sse import EventSourceResponse
 
+from ..backends.index import IndexError_, make_index_backend
 from ..backends.scrape import make_scrape_backend
 from ..config import Settings, get_settings
 from ..curation import CurationService
@@ -33,6 +34,7 @@ from ..models import (
     PatternType,
     Status,
 )
+from ..notify import Notifier
 from ..store import remove_collection_files, write_collection_yaml, write_patterns_yaml
 
 _HERE = Path(__file__).parent
@@ -72,9 +74,14 @@ def next_action(c: Collection, job) -> dict:
         return {"label": "Open curation", "kind": "link", "url": f"/collections/{cid}?tab=urls&set=deltas",
                 "hint": "Review deltas, add patterns, then promote"}
     if c.status is Status.CURATED:
-        return {"label": "Index to test", "kind": "disabled", "hint": "Phase 5 — not built yet"}
+        return {"label": "Index to test", "kind": "post", "url": f"/api/collections/{cid}/index?target=test",
+                "hint": "Export the curated set to S3 and run the WEB_COSMOS indexer against the test index"}
     if c.status is Status.CONFIG_GENERATED:
-        return {"label": "Validate", "kind": "disabled", "hint": "Phase 6 — not built yet"}
+        if getattr(c, "_validated", None):
+            return {"label": "Index to prod", "kind": "post", "url": f"/api/collections/{cid}/index?target=prod",
+                    "confirm": "Index this collection into PRODUCTION?", "hint": "Test run validated — publish to the production index"}
+        return {"label": "Re-validate", "kind": "post", "url": f"/api/collections/{cid}/index/revalidate",
+                "hint": "Check the test index against the curated set (count + titles)"}
     return {"label": "Live ✓", "kind": "done", "hint": "Re-scrape to start a new cycle"}
 
 
@@ -171,10 +178,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db = await Database(settings.resolved_db_path).connect()
         app.state.settings = settings
         app.state.db = db
+        app.state.notifier = Notifier(settings.notify_webhook_url, base_url=settings.public_base_url)
+        db.on_status_change = app.state.notifier.status_changed
         app.state.bus = EventBus()
         jobs = JobManager(
             settings, db, app.state.bus, scraper=make_scrape_backend(settings),
             llm=lambda: make_llm(settings),  # lazy: a missing API key only fails the LLM job
+            indexer=lambda: make_index_backend(settings),
         )
         app.state.jobs = jobs
         app.state.curation = CurationService(db, lock_for=jobs.lock)
@@ -186,6 +196,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await db.close()
 
     app = FastAPI(title="SDE Curation Engine", version="0.1.0", lifespan=lifespan)
+    templates.env.globals["settings"] = settings
     app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
 
     # ── helpers ────────────────────────────────────────────────────────
@@ -208,8 +219,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if j:
             raise HTTPException(409, f"{j.kind} job #{j.id} is running — wait for it or cancel it")
 
+    async def with_validation(request: Request, c: Collection) -> Collection:
+        if c.status is Status.CONFIG_GENERATED:
+            last = await db(request).last_index_run(c.collection_id, "test")
+            c._validated = bool(last and last.state == "succeeded" and last.validation_passes(settings.validation_title_match_threshold))
+        return c
+
     async def row_context(request: Request, c: Collection) -> dict:
-        return {"c": c, "job": await db(request).latest_job(c.collection_id)}
+        return {"c": await with_validation(request, c), "job": await db(request).latest_job(c.collection_id)}
 
     def emit_collection(request: Request, c: Collection) -> None:
         bus(request).publish(
@@ -391,12 +408,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 counts[k] = (await d.list_deltas(c.collection_id, kind=k, limit=1))[1]
             counts["excluded"] = (await d.list_deltas(c.collection_id, excluded=True, limit=1))[1]
         curated = await d.load_curated(c.collection_id) if c.curated_count else []
+        runs = await d.list_index_runs(c.collection_id, limit=5)
         stats = {
             "last_scrape": next((j for j in jobs if j.kind == "scrape"), None),
+            "index_runs": runs,
+            "last_test_run": next((r for r in runs if r.target == "test"), None),
+            "last_prod_run": next((r for r in runs if r.target == "prod"), None),
+            "exportable": await d.curated_export_count(c.collection_id) if c.curated_count else 0,
             "delta_counts": counts,
             "pattern_count": len(await d.list_patterns(c.collection_id)),
             "curated_excluded": sum(1 for r in curated if r.excluded),
         }
+        await with_validation(request, c)
         return {"c": c, "job": jobs[0] if jobs else None, "step": step,
                 "steps": pipeline_steps(c), "stats": stats}
 
@@ -679,6 +702,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return RedirectResponse(
             f"/collections/{collection_id}?tab=urls&set=deltas" + (f"&{qs}" if qs else ""), status_code=302
         )
+
+    # ── indexing ───────────────────────────────────────────────────────
+
+    @app.post("/api/collections/{collection_id}/index", status_code=202, response_model=None)
+    async def api_index(request: Request, collection_id: str, target: Literal["test", "prod"] = "test"):
+        """Export curated (non-excluded) URLs to S3 and dispatch the WEB_COSMOS indexer."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        if c.status not in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE):
+            raise HTTPException(409, f"indexing requires a promoted (curated) set — status is '{c.status}'")
+        if c.delta_count:
+            raise HTTPException(409, f"{c.delta_count} deltas are pending — promote them first")
+        if await db(request).curated_export_count(collection_id) == 0:
+            raise HTTPException(409, "nothing to export: every curated URL is excluded")
+        if target == "prod":
+            last = await db(request).last_index_run(collection_id, "test")
+            if not last or last.state != "succeeded" or not last.validation_passes(settings.validation_title_match_threshold):
+                raise HTTPException(409, "prod indexing requires a successful, validated test run first")
+        jobs: JobManager = request.app.state.jobs
+        try:
+            job, run = await jobs.start_index(c, target)
+        except (JobConflict, IndexError_) as e:
+            raise HTTPException(409, str(e)) from e
+        return htmx_done(request, {**job.model_dump(mode="json"), "run_id": run.run_id})
+
+    @app.post("/api/collections/{collection_id}/index/revalidate", status_code=202, response_model=None)
+    async def api_revalidate(request: Request, collection_id: str):
+        """Re-check the latest test run against the index (direct query, or second pass on 403)."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        last = await db(request).last_index_run(collection_id, "test")
+        if not last or last.state != "succeeded":
+            raise HTTPException(409, "no successful test index run to validate")
+        jobs: JobManager = request.app.state.jobs
+        try:
+            job = await jobs.start_revalidate(c, last)
+        except (JobConflict, IndexError_) as e:
+            raise HTTPException(409, str(e)) from e
+        return htmx_done(request, job)
+
+    @app.get("/api/collections/{collection_id}/index_runs")
+    async def api_index_runs(request: Request, collection_id: str):
+        await must_get(request, collection_id)
+        return await db(request).list_index_runs(collection_id)
 
     # ── LLM assist ─────────────────────────────────────────────────────
 

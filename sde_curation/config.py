@@ -42,12 +42,23 @@ class Settings(BaseSettings):
     indexing_subnets: list[str] = Field(default_factory=list)
     indexing_security_groups: list[str] = Field(default_factory=list)
     indexing_assign_public_ip: bool = True
+    web_index_name: str = "sde-web-subset"  # the indexer's working index; live sde-web only at cutover
+    opensearch_endpoint_test: str | None = None  # local index backend only (ECS task def carries these)
+    opensearch_endpoint_prod: str | None = None
+    sagemaker_endpoint_name: str | None = None
     index_poll_interval_s: float = 30.0
     index_stall_timeout_s: float = 4 * 3600
     scrape_poll_interval_s: float = 15.0
 
     # ── validation gate ────────────────────────────────────────────────
     validation_title_match_threshold: float = 0.99
+    # The indexer validates right after its bulk upsert, before OpenSearch Serverless has refreshed,
+    # so a run that wrote anything reports 0/N in validation.json. We wait, then validate ourselves:
+    # a direct SigV4 query of the index (needs AOSS data access for the engine's principal or
+    # VALIDATION_ASSUME_ROLE_ARN); if that is refused (403) we fall back to re-running the same
+    # export (changed: 0) just to get a fresh validation.json from the indexer.
+    validation_delay_s: float = 30.0
+    validation_assume_role_arn: str | None = None
 
     # ── LLM ────────────────────────────────────────────────────────────
     llm_provider: Literal["openai", "fake"] = "openai"
@@ -58,6 +69,7 @@ class Settings(BaseSettings):
 
     # ── notifications ──────────────────────────────────────────────────
     notify_webhook_url: str | None = None
+    public_base_url: str = "http://localhost:8080"  # used in notification links
 
     @field_validator("data_dir", "db_path", "crawler_root", "crawler_python", "indexer_root",
                      "indexer_python", mode="after")

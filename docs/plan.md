@@ -148,7 +148,7 @@ count chips Dump/Deltas/Curated/Patterns, Next action) and tabs Overview · URLs
 sub-tabs, filters, paging, CSV, "why" tooltips from pattern_effects) · Patterns & AI · Activity.
 Old `/curate` redirects to URLs › Deltas. Verified by tests (67) and browser walkthrough.
 
-### Phase 5 — Export + test indexing (R5, R6)
+### Phase 5 — Export + test indexing (R5, R6) — DONE 2026-08-29 (moto-verified + live ECS run: 13 docs indexed into sde-web-subset in 27 s)
 - `engine/export.py`: curated non-excluded rows → `documents.jsonl` lines
   `{url, title, full_text, document_type, division}`; manifest per contract; `full_text` joined
   from `dump_urls`. Writer streams to a temp file then `put_object` docs **then** manifest.
@@ -164,7 +164,7 @@ Old `/curate` redirects to URLs › Deltas. Verified by tests (67) and browser w
   `moto` ECS: `run_task` called with the correct family/container/command. Live: one small
   collection dispatched to dev, `status.json.state == "succeeded"` shown on dashboard.
 
-### Phase 6 — Validation + prod (R7, R10)
+### Phase 6 — Validation + prod (R7, R10) — DONE 2026-08-30 (direct AOSS validation with second-pass fallback; live fallback verified)
 - Read `validation.json`; store `ValidationReport`; pass rule: `count_matches and title_match_rate >= threshold`
   (setting, default 0.99). Pass → button enables `POST /index?target=prod` → `Live`.
   Fail → `needs_recuration=True`, status back to `Curating`, mismatches listed on the page.
