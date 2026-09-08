@@ -144,8 +144,8 @@ show `CurationEngine-Bootstrap-dev.GitHubActionsRoleArn = arn:aws:iam::…:role/
 ```bash
 ROLE_ARN=$(aws cloudformation describe-stacks --stack-name CurationEngine-Bootstrap-dev --profile sde-dev \
   --query "Stacks[0].Outputs[?OutputKey=='GitHubActionsRoleArn'].OutputValue" --output text)
-echo "$ROLE_ARN"
-gh secret set AWS_ROLE_DEV --repo NASA-IMPACT/sde-curation-engine --body "$ROLE_ARN"
+echo "$ROLE_ARN"          # must print arn:aws:iam::…:role/GitHubActions-CurationEngine-DEV; empty = step 2 has not run
+[ -n "$ROLE_ARN" ] && gh secret set AWS_ROLE_DEV --repo NASA-IMPACT/sde-curation-engine --body "$ROLE_ARN"
 ```
 Or in the browser: repository → Settings → Secrets and variables → Actions → New repository secret,
 name `AWS_ROLE_DEV`, value the ARN.
@@ -167,12 +167,12 @@ drop it in place, and skip to step 4. Otherwise discover the values yourself:
 
 **Step 1 — start from the template**
 ```bash
-cp infra/envs/example.json infra/envs/dev.json
+cp -n infra/envs/example.json infra/envs/dev.json   # -n: never overwrite a dev.json you already have
 aws sso login --profile sde-dev
 export AWS_PROFILE=sde-dev            # so the commands below need no --profile
 ```
 
-**Step 2 — look up each value.** Every command prints exactly what goes into the file.
+**Step 2 (route A: by hand) — look up each value.** Every command prints exactly what goes into the file. Do either step 2 or step 3, not both.
 
 | Key in `dev.json` | Where it comes from | Command |
 |---|---|---|
@@ -192,7 +192,7 @@ Console equivalents, if you prefer clicking: CloudFormation → Stacks → `SdeC
 ECS → Clusters; ECS → Task definitions → `web_cosmos-scraper-dev` → latest revision → JSON (roles
 and the container environment); OpenSearch Service → Serverless → Collections.
 
-**Step 3 — or let the CLI write the file for you.** Same lookups, one block:
+**Step 3 (route B: automatic) — let the CLI write the file for you.** Same lookups as step 2, one block; skip step 2 if you use this:
 ```bash
 TD=web_cosmos-scraper-dev
 envval() { aws ecs describe-task-definition --task-definition "$TD" \
@@ -216,7 +216,7 @@ print(json.dumps({
   "opensearch_endpoint_prod":   "$(envval OPENSEARCH_ENDPOINT_PROD)",
 }, indent=2))
 PY
-cat infra/envs/dev.json                        # every value filled, none empty, no "<env>" left
+cat infra/envs/dev.json                        # every value filled, none empty, no "<env>" or "xxxx" placeholder left, both endpoints start with https://
 ```
 
 **Step 4 — check the file and push it to SSM**
