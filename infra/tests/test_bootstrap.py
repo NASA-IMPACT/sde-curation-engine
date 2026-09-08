@@ -28,7 +28,10 @@ def test_role_is_scoped_to_this_repo_and_branch():
             "Action": "sts:AssumeRoleWithWebIdentity",
             "Condition": {
                 "StringEquals": {"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"},
-                "StringLike": {"token.actions.githubusercontent.com:sub": "repo:NASA-IMPACT/sde-curation-engine:ref:refs/heads/dev"},
+                "StringLike": {"token.actions.githubusercontent.com:sub": [
+                    "repo:NASA-IMPACT/sde-curation-engine:ref:refs/heads/dev",
+                    "repo:NASA-IMPACT@22798984/sde-curation-engine@1349822651:ref:refs/heads/dev",
+                ]},
             },
         })]},
     })
