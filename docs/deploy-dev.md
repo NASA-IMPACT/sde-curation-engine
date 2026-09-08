@@ -135,8 +135,9 @@ make bootstrap-github ENV=dev PROFILE=sde-dev
 # account without the OIDC provider (not dev):
 # cd infra && . .venv/bin/activate && AWS_PROFILE=sde-dev cdk --app "python bootstrap/app.py" deploy CurationEngine-Bootstrap-dev -c environment=dev -c create_oidc_provider=true
 ```
-This creates `GitHubActions-CurationEngine-DEV`, trusted only by
-`repo:NASA-IMPACT/sde-curation-engine:ref:refs/heads/dev`, allowed only to assume the CDK toolkit
+This creates `GitHubActions-CurationEngine-DEV`, trusted only by this repository's `dev` branch
+(both subject formats GitHub uses: `repo:NASA-IMPACT/sde-curation-engine:ref:refs/heads/dev` and the
+immutable `repo:NASA-IMPACT@<org id>/sde-curation-engine@<repo id>:ref:refs/heads/dev`), allowed only to assume the CDK toolkit
 roles (`cdk-sde-*`) and read the stack/service for the verify step. The last lines of the output
 show `CurationEngine-Bootstrap-dev.GitHubActionsRoleArn = arn:aws:iam::…:role/GitHubActions-CurationEngine-DEV`.
 
@@ -413,6 +414,7 @@ Where to look first, by job:
 | Symptom | Cause / fix |
 |---|---|
 | Deploy job: `Not authorized to perform sts:AssumeRoleWithWebIdentity` | the repository secret is missing/wrong, or the push was not to the branch the role trusts → check `gh secret list` and section 2.3 |
+| same error with a correct secret and branch | the token's subject does not match the trust policy — compare `gh api repos/NASA-IMPACT/sde-curation-engine/actions/oidc/customization/sub` (`sub_claim_prefix`) with the role's `StringLike` condition (`aws iam get-role`), then fix `infra/bootstrap/bootstrap_stack.py` and re-run `make bootstrap-github` |
 | Deploy job: `Unable to fetch parameters [/sde-curation-engine/dev/…]` | section 2.4 was skipped or run against another account → `make infra-seed ENV=dev`, re-run the workflow |
 | Deploy job: `SSM parameter /cdk-bootstrap/sde/version not found` or cannot assume `cdk-sde-*` | account not bootstrapped with `--qualifier sde` (section 2.2) |
 | Deploy rolls back with "circuit breaker" / verify: 0 running tasks | the task never became healthy; the stopped-task reason above tells you why (bad SSM value, secret missing, EFS mount denied) |

@@ -16,6 +16,12 @@ from config import APP_NAME, EnvConfig
 
 GITHUB_ORG = "NASA-IMPACT"
 GITHUB_REPO = "sde-curation-engine"
+# GitHub issues this repository's OIDC tokens with the *immutable* subject format, which embeds the
+# org and repo ids (`repo:NASA-IMPACT@<org id>/sde-curation-engine@<repo id>:ref:…`). Older repos
+# in the org still get the plain `repo:NASA-IMPACT/<repo>:ref:…` form. The role trusts both, each
+# spelled out exactly — no wildcard on the org or repo name. Ids: `gh api repos/NASA-IMPACT/sde-curation-engine --jq '[.owner.id,.id]'`.
+GITHUB_ORG_ID = 22798984
+GITHUB_REPO_ID = 1349822651
 OIDC_PROVIDER_URL = "token.actions.githubusercontent.com"
 BOOTSTRAP_QUALIFIER = "sde"
 BRANCH_FOR_ENV = {"dev": "dev", "test": "test", "prod": "prod"}
@@ -43,7 +49,10 @@ class BootstrapStack(Stack):
                 federated=provider_arn,
                 conditions={
                     "StringEquals": {f"{OIDC_PROVIDER_URL}:aud": "sts.amazonaws.com"},
-                    "StringLike": {f"{OIDC_PROVIDER_URL}:sub": f"repo:{GITHUB_ORG}/{GITHUB_REPO}:ref:refs/heads/{branch}"},
+                    "StringLike": {f"{OIDC_PROVIDER_URL}:sub": [
+                        f"repo:{GITHUB_ORG}/{GITHUB_REPO}:ref:refs/heads/{branch}",
+                        f"repo:{GITHUB_ORG}@{GITHUB_ORG_ID}/{GITHUB_REPO}@{GITHUB_REPO_ID}:ref:refs/heads/{branch}",
+                    ]},
                 },
                 assume_role_action="sts:AssumeRoleWithWebIdentity",
             ),
