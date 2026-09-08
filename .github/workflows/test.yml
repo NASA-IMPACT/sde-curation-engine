@@ -1,0 +1,42 @@
+name: Tests
+
+# Pull requests and pushes to non-deploy branches: tests only, no AWS credentials involved.
+on:
+  pull_request:
+  push:
+    branches-ignore: [dev, test, prod]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            infra/requirements-dev.txt
+      - name: Install
+        run: |
+          pip install -r requirements-dev.txt -e .
+          pip install -r infra/requirements-dev.txt
+      - name: requirements*.txt match uv.lock
+        run: |
+          pip install -q uv
+          make requirements-check
+      - name: App tests + lint
+        run: |
+          python -m pytest -q
+          python -m ruff check sde_curation tests
+      - name: Infra synth assertions
+        working-directory: infra
+        run: |
+          python -m ruff check .
+          python -m pytest -q
+        env:
+          JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION: '1'

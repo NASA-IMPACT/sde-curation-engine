@@ -1,0 +1,29 @@
+# Source of truth for the CDK dependencies (uv.lock pins them). requirements*.txt are exported
+# from the lock (`make requirements`) so pip-only developers and CI install the same versions.
+[project]
+name = "sde-curation-engine-infra"
+version = "0.1.0"
+description = "AWS CDK app deploying sde-curation-engine (ECS Fargate + EFS + ALB + CloudFront)"
+requires-python = ">=3.12"
+dependencies = [
+    "aws-cdk-lib==2.267.0",
+    "constructs>=10.0.0,<11.0.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["config", "stacks"]

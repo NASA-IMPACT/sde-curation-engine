@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ c.name }} · SDE Curation Engine{% endblock %}
+{% block content %}
+{# Background jobs (scrape / LLM) end after this page rendered: reload the active tab when one ends.
+   SSE first; polling while a job is running as the safety net. #}
+<div id="job-watch" hx-get="{{ request.url.path }}?{{ request.url.query }}" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="this:replace"
+     hx-trigger="sse:collection[detail.data.includes('\"{{ c.collection_id }}\"') && (detail.data.includes('\"state\": \"succeeded\"') || detail.data.includes('\"state\": \"failed\"'))]{% if job and job.state == 'running' %}, every 4s{% endif %}"></div>
+
+<div id="wb-header" hx-get="/collections/{{ c.collection_id }}/header"
+     hx-trigger="sse:collection[detail.data.includes('\"{{ c.collection_id }}\"')], every 10s" hx-sync="this:replace" hx-swap="innerHTML">
+  {% include "partials/header.html" %}
+</div>
+
+{% include "partials/tabs.html" %}
+
+<div id="tab-body" data-tab="{{ tab }}">
+  {% include "partials/tab_" ~ tab ~ ".html" %}
+</div>
+{% endblock %}

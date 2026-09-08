@@ -1,0 +1,2 @@
+{% for r in rows %}{% with c=r.c, job=r.job %}{% include "partials/row.html" %}{% endwith %}{% endfor %}
+{% if not rows %}<tr><td colspan="8" class="muted">No collections yet.</td></tr>{% endif %}

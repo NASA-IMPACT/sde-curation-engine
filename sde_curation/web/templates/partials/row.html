@@ -1,0 +1,6 @@
+<tr id="row-{{ c.collection_id|dom_id }}"
+    hx-get="/collections/{{ c.collection_id }}/row"
+    hx-trigger="sse:collection[detail.data.includes('\"{{ c.collection_id }}\"')], every 10s"
+    hx-sync="this:replace" hx-swap="innerHTML">
+{% include "partials/row_cells.html" %}
+</tr>

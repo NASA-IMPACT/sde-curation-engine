@@ -1,0 +1,49 @@
+{# Overview: the clickable pipeline with its step panel, details, last job, advanced. #}
+{% include "partials/pipeline.html" %}
+
+<div class="cols">
+  <section class="card">
+    <h2>Details</h2>
+    <dl class="meta">
+      <dt>Seed</dt><dd><a href="{{ c.seed_url }}" target="_blank" rel="noopener">{{ c.seed_url }}</a></dd>
+      <dt>Division</dt><dd>{{ c.division }}</dd>
+      <dt>Connector</dt><dd>{{ c.connector }}</dd>
+      <dt>Max pages</dt><dd>{{ c.max_pages }}</dd>
+      <dt>Created</dt><dd>{{ c.created_at.strftime('%Y-%m-%d %H:%M') }}Z</dd>
+      <dt>Updated</dt><dd>{{ c.updated_at.strftime('%Y-%m-%d %H:%M') }}Z</dd>
+    </dl>
+  </section>
+  <section class="card">
+    <h2>Last job</h2>
+    {% if job %}
+    <dl class="meta">
+      <dt>Kind</dt><dd>{{ job.kind }}</dd>
+      <dt>State</dt><dd><span class="job j-{{ job.state }}">{{ job.state }}</span></dd>
+      <dt>Started</dt><dd>{{ job.started_at.strftime('%Y-%m-%d %H:%M:%S') }}Z</dd>
+      {% if job.finished_at %}<dt>Took</dt><dd>{{ (job.finished_at - job.started_at).seconds }}s</dd>{% endif %}
+      {% if job.error %}<dt>Error</dt><dd class="err">{{ job.error }}</dd>{% endif %}
+      {% if job.progress.docs is defined %}<dt>Result</dt><dd>{{ job.progress.docs }} docs{% if job.progress.failed %}, {{ job.progress.failed }} failed{% endif %}</dd>{% endif %}
+    </dl>
+    <p><a href="/collections/{{ c.collection_id }}?tab=activity">All jobs & history →</a></p>
+    {% else %}<p class="muted">No jobs yet — start with <b>Scrape</b>.</p>{% endif %}
+  </section>
+</div>
+
+<details class="advanced">
+  <summary>Advanced</summary>
+  <div class="inline">
+    <form hx-post="/api/collections/{{ c.collection_id }}/scrape" hx-swap="none" hx-confirm="Re-run the crawl? The existing dump and pending deltas are replaced." class="inline">
+      <button class="secondary" {% if job and job.state == 'running' %}disabled{% endif %}>Re-scrape</button>
+    </form>
+    <form hx-post="/api/collections/{{ c.collection_id }}/status" hx-ext="json-enc" hx-swap="none" class="inline"
+          hx-confirm="Override the workflow status? Data-consistency rules still apply." hx-vals='js:{status: document.getElementById("st").value, note: document.getElementById("note").value || "manual override", force: true}'>
+      <label class="muted" title="Bypasses the normal step order, but never the data rules (e.g. cannot be curated with nothing promoted)">Set status manually</label>
+      <select id="st">{% for s in statuses %}<option {% if s == c.status %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+      <input id="note" placeholder="note" size="24">
+      <button class="secondary">Apply</button>
+    </form>
+    <form hx-delete="/api/collections/{{ c.collection_id }}" hx-confirm="Delete this collection and all its data?" class="inline">
+      <button class="danger">Delete collection</button>
+    </form>
+  </div>
+</details>

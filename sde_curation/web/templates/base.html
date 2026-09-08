@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}SDE Curation Engine{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/sse.js"></script>
+  <script src="/static/json-enc.js"></script>
+</head>
+<body {% block body_attrs %}hx-ext="sse" sse-connect="/events"{% endblock %}>
+  <header>
+    <a href="/" class="brand">SDE Curation Engine</a>
+    <span id="conn" class="dot" title="SSE connection"></span>
+    {% if settings.app_password %}
+    <form method="post" action="/logout" class="signout"><button type="submit" class="link">Sign out</button></form>
+    {% endif %}
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+  <script>
+    // Per-URL edits = exact-URL patterns (used by the Deltas grid).
+    async function editField(cid, url, type, value) {
+      const r = await fetch(`/api/collections/${encodeURIComponent(cid)}/urls`, {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(value ? {url, type, value} : {url, type, value: null})});
+      if (!r.ok) { let m = await r.text(); try { m = JSON.parse(m).detail || m; } catch (_) {} alert(m); return; }
+      location.reload();
+    }
+    function editTitle(cid, url, current) {
+      const v = prompt("Title for\n" + url + "\n\nTip: {title} = scraped title, {collection} = collection name", current);
+      if (v === null) return;
+      if (!v.trim()) { alert("Title cannot be empty. To fall back to the pattern/curated value, delete the exact-URL title pattern in Patterns & AI."); return; }
+      editField(cid, url, "title", v);
+    }
+    // Connection indicator: green when the SSE stream is open.
+    document.body.addEventListener('htmx:sseOpen', () => document.getElementById('conn').classList.add('on'));
+    document.body.addEventListener('htmx:sseError', () => document.getElementById('conn').classList.remove('on'));
+    // One place for server-side refusals (4xx/5xx). Aborted/replaced requests never alert.
+    document.body.addEventListener('htmx:responseError', (e) => {
+      let msg = e.detail.xhr.responseText || e.detail.xhr.statusText;
+      try { msg = JSON.parse(msg).detail || msg; } catch (_) {}
+      alert(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    });
+
+  </script>
+</body>
+</html>

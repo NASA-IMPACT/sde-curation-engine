@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="toolbar">
+  {% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+  <form method="post" action="/collections" class="inline">
+    <input name="seed_url" placeholder="https://science.nasa.gov/" required size="34" value="{{ form.seed_url if form else '' }}">
+    <input name="name" placeholder="Display name" required size="22" value="{{ form.name if form else '' }}">
+    <select name="division">
+      {% for d in ["General","Astrophysics","Biological and Physical Sciences","Earth Science","Heliophysics","Planetary Science"] %}
+      <option>{{ d }}</option>{% endfor %}
+    </select>
+    <input name="max_pages" type="number" value="100000" min="1" max="100000" size="7" title="max pages">
+    <button>Add collection</button>
+  </form>
+</section>
+
+<table id="collections">
+  <thead>
+    <tr><th>Collection</th><th>Status</th><th>Dump</th><th>Delta</th><th>Curated</th><th>Last job</th><th>Updated</th><th></th></tr>
+  </thead>
+  <tbody id="rows" hx-get="/rows" hx-trigger="sse:collection_deleted, sse:collection_created" hx-swap="innerHTML" hx-sync="this:replace">
+    {% include "partials/rows.html" %}
+  </tbody>
+</table>
+{% endblock %}
