@@ -159,8 +159,9 @@ def _iso(dt: datetime | None) -> str | None:
 
 
 class Database:
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, *, exclusive: bool = False):
         self.path = str(path)
+        self.exclusive = exclusive
         self._conn: aiosqlite.Connection | None = None
         # optional async hook(collection_id, old_status, new_status, note) after every transition
         self.on_status_change = None
@@ -176,6 +177,10 @@ class Database:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self.path)
         self._conn.row_factory = aiosqlite.Row
+        if self.exclusive:
+            # WAL over NFS (EFS) is unsupported because the wal-index is a shared mmap; with
+            # EXCLUSIVE locking SQLite keeps it in heap memory instead. Must precede journal_mode.
+            await self._conn.execute("PRAGMA locking_mode=EXCLUSIVE")
         await self._conn.executescript(SCHEMA)
         await self._migrate()
         await self._conn.commit()

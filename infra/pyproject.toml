@@ -1,0 +1,27 @@
+[project]
+name = "sde-curation-engine-infra"
+version = "0.1.0"
+description = "AWS CDK app deploying sde-curation-engine (ECS Fargate + EFS + ALB + CloudFront)"
+requires-python = ">=3.12"
+dependencies = [
+    "aws-cdk-lib==2.267.0",
+    "constructs>=10.0.0,<11.0.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["config", "stacks"]

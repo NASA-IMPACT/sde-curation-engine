@@ -118,3 +118,11 @@ tr.row-deleted td.url a { color: #dc2626; text-decoration: line-through; }
 @media (prefers-color-scheme: dark) { .ptype.exclude { background: #7f1d1d; color: #fecaca; } .ptype.include { background: #14532d; color: #bbf7d0; } .ptype.title { background: #78350f; color: #fde68a; } .ptype.division { background: #4c1d95; color: #ddd6fe; } .ptype.document_type { background: #1e3a8a; color: #bfdbfe; } }
 .empty { color: var(--muted); padding: 1.2rem; text-align: center; }
 .banner.info { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--fg); display: flex; gap: .5rem; align-items: center; }
+
+/* login */
+.login { max-width: 22rem; margin: 4rem auto; }
+.login label { display: block; margin: 1rem 0; }
+.login input[type=password] { width: 100%; padding: .5rem; margin-top: .25rem; }
+.login .error { color: #b00020; }
+.signout { margin-left: auto; }
+button.link { background: none; border: 0; color: inherit; text-decoration: underline; cursor: pointer; }

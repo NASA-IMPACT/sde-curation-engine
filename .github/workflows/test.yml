@@ -1,0 +1,32 @@
+name: Tests
+
+# Pull requests and pushes to non-deploy branches: tests only, no AWS credentials involved.
+on:
+  pull_request:
+  push:
+    branches-ignore: [dev, test, prod]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: App tests + lint
+        run: |
+          uv sync --frozen
+          uv run pytest -q
+          uv run ruff check sde_curation tests
+      - name: Infra synth assertions
+        working-directory: infra
+        run: |
+          uv sync --frozen
+          uv run ruff check .
+          uv run pytest -q
+        env:
+          JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION: '1'

@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # ── local state ────────────────────────────────────────────────────
     data_dir: Path = _REPO_ROOT / "data"
     db_path: Path | None = None  # defaults to data_dir / "engine.db"
+    # "exclusive" when engine.db lives on a network file system (EFS): SQLite's WAL index cannot
+    # be shared over NFS, so the single engine process holds the file exclusively instead.
+    db_locking_mode: Literal["normal", "exclusive"] = "normal"
 
     # ── sibling repos ──────────────────────────────────────────────────
     crawler_root: Path = _PROJECTS / "sde-crawl4ai-scraper-v1"
@@ -70,6 +73,17 @@ class Settings(BaseSettings):
     # ── notifications ──────────────────────────────────────────────────
     notify_webhook_url: str | None = None
     public_base_url: str = "http://localhost:8080"  # used in notification links
+
+    # ── access control (deployed only) ─────────────────────────────────
+    # One shared password gates every page and API route except /health, /login and /static.
+    # Unset = no auth (local dev, tests). SESSION_SECRET signs the cookie; when unset a random
+    # per-process secret is used, so a restart logs everyone out.
+    app_password: str | None = None
+    session_secret: str | None = None
+    session_ttl_s: int = 12 * 3600
+    # Force the Secure flag on the login cookie. Behind CloudFront→ALB(HTTP) the proxy headers say
+    # "http", so the deployment sets this explicitly instead of sniffing the scheme.
+    auth_cookie_secure: bool = False
 
     @field_validator("data_dir", "db_path", "crawler_root", "crawler_python", "indexer_root",
                      "indexer_python", mode="after")

@@ -9,10 +9,13 @@
   <script src="/static/sse.js"></script>
   <script src="/static/json-enc.js"></script>
 </head>
-<body hx-ext="sse" sse-connect="/events">
+<body {% block body_attrs %}hx-ext="sse" sse-connect="/events"{% endblock %}>
   <header>
     <a href="/" class="brand">SDE Curation Engine</a>
     <span id="conn" class="dot" title="SSE connection"></span>
+    {% if settings.app_password %}
+    <form method="post" action="/logout" class="signout"><button type="submit" class="link">Sign out</button></form>
+    {% endif %}
   </header>
   <main>{% block content %}{% endblock %}</main>
   <script>

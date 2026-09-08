@@ -220,3 +220,11 @@ __marimo__/
 .streamlit/secrets.toml
 data/
 .env
+
+# infra (CDK): build output, venv, cached VPC lookup, and the per-env values seeded into SSM
+infra/cdk.out/
+infra/.venv/
+infra/cdk.context.json
+infra/envs/*.json
+!infra/envs/example.json
+.docker-data/

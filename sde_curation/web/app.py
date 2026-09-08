@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import re
+import secrets
 import sqlite3
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -36,6 +38,7 @@ from ..models import (
 )
 from ..notify import Notifier
 from ..store import remove_collection_files, write_collection_yaml, write_patterns_yaml
+from . import auth
 
 _HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=_HERE / "templates")
@@ -175,7 +178,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        db = await Database(settings.resolved_db_path).connect()
+        db = await Database(
+            settings.resolved_db_path, exclusive=settings.db_locking_mode == "exclusive"
+        ).connect()
         app.state.settings = settings
         app.state.db = db
         app.state.notifier = Notifier(settings.notify_webhook_url, base_url=settings.public_base_url)
@@ -834,6 +839,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await _after_curation_change(request, c, ds)
         await db(request).clear_delta_ai(collection_id, body.url, body.field)
         return htmx_done(request, {"url": body.url, "field": body.field, "state": decision + "ed"})
+
+    # ── login (only mounted when APP_PASSWORD is set) ──────────────────
+
+    if settings.app_password:
+        # When SESSION_SECRET is unset every restart invalidates all cookies, which is fine.
+        session_secret = settings.session_secret or secrets.token_hex(32)
+        app.add_middleware(auth.AuthMiddleware, secret=session_secret)
+
+        @app.get("/login", response_class=HTMLResponse)
+        async def login_form(request: Request, next: str = "/"):
+            if auth.verify(session_secret, request.cookies.get(auth.COOKIE)):
+                return RedirectResponse(auth.safe_next(next), status_code=302)
+            return templates.TemplateResponse(
+                request, "login.html", {"next": auth.safe_next(next), "error": None}
+            )
+
+        @app.post("/login", response_class=HTMLResponse)
+        async def login_submit(request: Request, password: str = Form(...), next: str = Form("/")):
+            if not auth.password_ok(settings.app_password, password):
+                return templates.TemplateResponse(
+                    request, "login.html",
+                    {"next": auth.safe_next(next), "error": "Wrong password."}, status_code=401,
+                )
+            resp = RedirectResponse(auth.safe_next(next), status_code=303)
+            resp.set_cookie(
+                auth.COOKIE, auth.sign(session_secret, int(time.time()) + settings.session_ttl_s),
+                max_age=settings.session_ttl_s, httponly=True, samesite="lax",
+                secure=settings.auth_cookie_secure, path="/",
+            )
+            return resp
+
+        @app.post("/logout")
+        async def logout(request: Request):
+            resp = RedirectResponse("/login", status_code=303)
+            resp.delete_cookie(auth.COOKIE, path="/")
+            return resp
 
     # ── SSE ────────────────────────────────────────────────────────────
 

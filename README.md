@@ -120,12 +120,18 @@ re-curation* and the mismatches listed. **Re-validate** re-runs the check on dem
 Every status transition posts to `NOTIFY_WEBHOOK_URL` (Slack-compatible `{"text": …}` with a link
 built from `PUBLIC_BASE_URL`); failures to notify never block a transition.
 
-**Deploying the engine externally**: it uses only the default boto3 credential chain. The role it
-runs as needs: `s3:GetObject/PutObject/DeleteObject/ListBucket` on `$COSMOS_INDEX_BUCKET`;
-`ecs:RunTask`, `ecs:DescribeTasks`, `iam:PassRole` for the task roles (or `sts:AssumeRole` on
-`INDEXING_DISPATCH_ROLE_ARN`); optionally `aoss:APIAccessAll` + a data-access policy entry on the
-web index (or `sts:AssumeRole` on `VALIDATION_ASSUME_ROLE_ARN`); and, for SSM scraping,
-`ssm:SendCommand`/`GetCommandInvocation` on the crawler instance plus read on `CRAWLER_S3_BUCKET`.
+**Deploying (AWS CDK + GitHub Actions)**: `infra/` holds a Python CDK app that runs the engine as
+one ECS Fargate task (SQLite on EFS) behind an ALB and CloudFront (HTTPS + WAF), wired to the
+crawler over SSM and the WEB_COSMOS indexer over `ecs:RunTask`, with its own read-only AOSS
+data-access policy for direct validation. Pushing to `dev` / `test` / `prod` deploys that
+environment via `.github/workflows/deploy.yml` (branch = environment = AWS account, OIDC role per
+account, same model as `sde-api-scrapers`); pull requests only run tests. Account-specific values
+(instance ids, buckets, endpoints, role ARNs) are not in git — they live in SSM Parameter Store per
+environment and are resolved at deploy time; API keys and the login password are Secrets Manager
+secrets set once per environment. Step-by-step runbook (one-time account setup, first deploy,
+verification): `docs/deploy-dev.md`; stack reference and the exact IAM the task role gets:
+`infra/README.md`. Set `APP_PASSWORD` to require a login (the deployment does; locally it is off so
+the UI and tests run unauthenticated).
 
 ### Curation semantics
 Effective value per URL = the most specific matching pattern (smallest match set, tie → longest
@@ -162,6 +168,8 @@ unapply (next most specific → curated → NULL). Diff + apply run as one idemp
 | `VALIDATION_DELAY_S`, `VALIDATION_TITLE_MATCH_THRESHOLD`, `VALIDATION_ASSUME_ROLE_ARN` | validation gate |
 | `NOTIFY_WEBHOOK_URL`, `PUBLIC_BASE_URL` | Slack-compatible notifications on every status change |
 | `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.4-mini`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` | LLM assist; any OpenAI-compatible endpoint |
+| `APP_PASSWORD`, `SESSION_SECRET`, `SESSION_TTL_S`, `AUTH_COOKIE_SECURE` | shared-password login (off when `APP_PASSWORD` is empty); `/health` stays open |
+| `DB_LOCKING_MODE` (`normal`\|`exclusive`) | `exclusive` when `engine.db` lives on EFS/NFS |
 
 ## API
 Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers get
@@ -217,6 +225,9 @@ sde_curation/
   llm/             base.py (provider protocol + registry), openai.py, fake.py, tasks.py (prompts, sanity filters)
   jobs.py          JobManager: background tasks, cancel, recovery, SSE events
   events.py        in-process event bus → SSE
-  web/             FastAPI app, Jinja templates, vendored htmx (+sse, json-enc)
+  web/             FastAPI app, auth.py (shared-password login), Jinja templates, vendored htmx (+sse, json-enc)
 tests/             pytest; fake crawler fixture, moto for AWS, state-matrix
+infra/             AWS CDK (Python): Fargate + EFS + ALB + CloudFront/WAF; bootstrap/ = GitHub deploy role
+.github/workflows/ deploy.yml (push to dev|test|prod → cdk deploy), test.yml (PRs)
+Dockerfile         python:3.13-slim + uv, non-root, uvicorn on 8080
 ```

@@ -14,7 +14,8 @@ Poster = Callable[[str, dict], Awaitable[None]]
 
 class Notifier:
     def __init__(self, webhook_url: str | None, *, post: Poster | None = None, base_url: str = ""):
-        self.url = webhook_url
+        # Anything that is not an http(s) URL (empty, "disabled", a placeholder secret) = off.
+        self.url = webhook_url if webhook_url and webhook_url.startswith(("http://", "https://")) else None
         self.base_url = base_url.rstrip("/")
         self.sent: list[dict] = []
         self._post = post or self._http_post

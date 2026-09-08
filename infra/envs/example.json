@@ -1,0 +1,13 @@
+{
+  "crawler_instance_id": "i-0123456789abcdef0",
+  "crawler_bucket": "sdecrawlerstack-crawlbucket-xxxxxxxx",
+  "indexing_cluster_name": "api-scrapers-cluster-<env>",
+  "indexing_task_family": "web_cosmos-scraper-<env>",
+  "indexing_task_role_arn": "arn:aws:iam::<account>:role/ApiScraperTaskRole-<env>",
+  "indexing_execution_role_arn": "arn:aws:iam::<account>:role/ApiScraperTaskExecutionRole-<env>",
+  "cosmos_index_bucket": "sde-cosmos-indexing-<env>",
+  "aoss_collection_name": "sde-binary",
+  "aoss_collection_id": "xxxxxxxxxxxxxxxxxxxx",
+  "opensearch_endpoint_test": "https://xxxxxxxxxxxxxxxxxxxx.us-east-1.aoss.amazonaws.com",
+  "opensearch_endpoint_prod": "https://xxxxxxxxxxxxxxxxxxxx.us-east-1.aoss.amazonaws.com"
+}

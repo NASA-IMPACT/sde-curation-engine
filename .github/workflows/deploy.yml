@@ -1,0 +1,158 @@
+name: Deploy
+
+# Branch → environment → AWS account (same model as sde-api-scrapers / sde-elastic-wrapper):
+#   dev  → dev  (SMCE Dev)   role from secret AWS_ROLE_DEV
+#   test → test (SMCE Test)  role from secret AWS_ROLE_TEST
+#   prod → prod (SMCE Prod)  role from secret AWS_ROLE_PROD
+# The role is created once per account by `make bootstrap-github` (infra/bootstrap/). It trusts
+# only this repository's matching branch, so pull requests and forks can never deploy.
+# A deploy replaces the single ECS task, so in-flight scrape/index jobs are marked failed.
+
+on:
+  push:
+    branches: [dev, test, prod]
+    paths:
+      - 'sde_curation/**'
+      - 'tests/**'
+      - 'infra/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to (must match the branch you run it from)'
+        required: true
+        default: dev
+        type: choice
+        options: [dev, test, prod]
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/prod' && 'prod' || (github.ref == 'refs/heads/test' && 'test' || 'dev')) }}
+  AWS_ROLE: ${{ github.ref == 'refs/heads/prod' && secrets.AWS_ROLE_PROD || (github.ref == 'refs/heads/test' && secrets.AWS_ROLE_TEST || secrets.AWS_ROLE_DEV) }}
+
+permissions:
+  id-token: write  # OIDC token for aws-actions/configure-aws-credentials
+  contents: read
+
+# one deploy per branch at a time; a second push waits instead of racing the first
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: App tests + lint
+        run: |
+          uv sync --frozen
+          uv run pytest -q
+          uv run ruff check sde_curation tests
+      - name: Infra synth assertions
+        working-directory: infra
+        run: |
+          uv sync --frozen
+          uv run ruff check .
+          uv run pytest -q
+        env:
+          JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION: '1'
+
+  deploy:
+    name: Deploy ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    needs: test
+    defaults:
+      run:
+        working-directory: infra
+    outputs:
+      cloudfront_url: ${{ steps.outputs.outputs.cloudfront_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Install CDK CLI
+        run: npm install -g aws-cdk
+      - name: Install infra dependencies
+        run: uv sync --frozen
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: CDK diff
+        run: uv run cdk diff CurationEngine-${{ env.ENVIRONMENT }} -c environment=${{ env.ENVIRONMENT }}
+        env:
+          JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION: '1'
+      - name: CDK deploy
+        run: |
+          uv run cdk deploy CurationEngine-${{ env.ENVIRONMENT }} \
+            -c environment=${{ env.ENVIRONMENT }} \
+            --require-approval never \
+            --outputs-file outputs.json
+        env:
+          JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION: '1'
+      - name: Read outputs
+        id: outputs
+        run: |
+          url=$(python3 -c "import json; print(json.load(open('outputs.json'))['CurationEngine-${{ env.ENVIRONMENT }}']['CloudFrontUrl'])")
+          echo "cloudfront_url=$url" >> "$GITHUB_OUTPUT"
+          echo "### Deployed ${{ env.ENVIRONMENT }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **URL**: $url" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Commit**: ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deployment-outputs-${{ env.ENVIRONMENT }}
+          path: infra/outputs.json
+          retention-days: 30
+
+  verify:
+    name: Verify Deployment
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Service is steady with one running task
+        run: |
+          aws ecs describe-services \
+            --cluster sde-curation-engine-${{ env.ENVIRONMENT }} \
+            --services sde-curation-engine-${{ env.ENVIRONMENT }} \
+            --query 'services[0].[status,runningCount,deployments[0].rolloutState]' --output text | tee /dev/stderr \
+            | grep -q 'ACTIVE.1.COMPLETED'
+      - name: /health answers through CloudFront
+        run: |
+          for i in $(seq 1 12); do
+            if curl -fsS "${{ needs.deploy.outputs.cloudfront_url }}/health"; then exit 0; fi
+            sleep 10
+          done
+          echo "health check did not pass in 2 min" >&2; exit 1
+
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [test, deploy, verify]
+    if: failure()
+    steps:
+      - name: Write failure summary
+        env:
+          JOB_RESULTS: ${{ join(needs.*.result, ', ') }}
+        run: |
+          echo "## Deployment to **${{ env.ENVIRONMENT }}** failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Branch**: ${{ github.ref_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Commit**: ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Job results**: ${JOB_RESULTS}" >> "$GITHUB_STEP_SUMMARY"
