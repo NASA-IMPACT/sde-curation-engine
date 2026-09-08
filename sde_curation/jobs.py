@@ -153,13 +153,15 @@ class JobManager:
                 await self.db.replace_deltas(c.collection_id, [], [])
                 job.progress = {**job.progress, "docs": n, "summary": _brief(result.summary)}
                 job.external_ref = result.external_ref or job.external_ref
-                await self.db.finish_job(job, JobState.SUCCEEDED)
+                # Collection state first, job record last: "succeeded" must mean every effect of
+                # the job is already visible to whoever polls the job list.
                 updated = await self.db.set_status(
                     c.collection_id, Status.SCRAPED, note=f"scrape ok: {n} documents", force=True
                 )
                 if c.curated_count:  # anything already promoted must be re-reviewed
                     await self.db.set_flag(c.collection_id, True)
                     updated.needs_recuration = True
+                await self.db.finish_job(job, JobState.SUCCEEDED)
                 self._emit(updated, job)
             except asyncio.CancelledError:
                 await self.db.finish_job(job, JobState.FAILED, error="cancelled by user or shutdown")
