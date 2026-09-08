@@ -179,3 +179,20 @@ async def test_dashboard_form_errors_render_banner(client):
     await client.post("/collections", data={"seed_url": "https://a.org", "name": "A"})
     r = await client.post("/collections", data={"seed_url": "https://a.org", "name": "A"})
     assert r.status_code == 422 and "already exists" in r.text
+
+
+def test_active_for_ends_when_job_state_is_final():
+    """Regression: a job whose final state is recorded must not count as running just because its
+    asyncio task has not exited yet (the window in which CI saw 409s after wait_job returned)."""
+    from types import SimpleNamespace
+
+    from sde_curation.jobs import JobManager
+    from sde_curation.models import JobKind, JobRun, JobState
+
+    jm = JobManager.__new__(JobManager)
+    jm._tasks = {}
+    job = JobRun(collection_id="ex.org", kind=JobKind.SCRAPE, state=JobState.RUNNING)
+    jm._tasks[1] = SimpleNamespace(job=job, done=lambda: False)  # task still alive
+    assert jm.active_for("ex.org") is job
+    job.state = JobState.SUCCEEDED  # what finish_job does, before the task unwinds
+    assert jm.active_for("ex.org") is None

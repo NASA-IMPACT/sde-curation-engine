@@ -73,9 +73,13 @@ class JobManager:
     _lock = lock
 
     def active_for(self, collection_id: str) -> JobRun | None:
+        # A job counts as active until its final state is recorded (finish_job), not until the
+        # asyncio task exits: the task still emits events after that, and a caller that saw
+        # "succeeded" in the DB must not be told the job is running.
         for t in self._tasks.values():
             j: JobRun | None = getattr(t, "job", None)
-            if j and j.collection_id == collection_id and not t.done():
+            if j and j.collection_id == collection_id and not t.done() \
+                    and j.state in (JobState.QUEUED, JobState.RUNNING):
                 return j
         return None
 
