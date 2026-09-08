@@ -14,7 +14,12 @@
     <a href="/" class="brand">SDE Curation Engine</a>
     <span id="conn" class="dot" title="SSE connection"></span>
     {% if settings.app_password %}
-    <form method="post" action="/logout" class="signout"><button type="submit" class="link">Sign out</button></form>
+    {% set me = current_user(request) %}
+    <span class="whoami">
+      {% if me %}<span class="muted">signed in as</span> <b>{{ me.username }}</b>
+      · <a href="/account">Account</a>{% if is_admin(request) %} · <a href="/users">Users</a>{% endif %} ·{% endif %}
+      <form method="post" action="/logout" class="inline"><button type="submit" class="link">Sign out</button></form>
+    </span>
     {% endif %}
   </header>
   <main>{% block content %}{% endblock %}</main>

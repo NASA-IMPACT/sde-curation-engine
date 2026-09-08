@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Account — SDE Curation Engine{% endblock %}
+{% block body_attrs %}{% endblock %}
+{% block content %}
+<section class="login">
+  <h1>Account</h1>
+  <p class="muted">Signed in as <b>{{ user.username }}</b> ({{ user.role }}).</p>
+  {% if ok %}<p class="banner info" role="status">Password changed.</p>{% endif %}
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  <form method="post" action="/account/password">
+    <label>Current password <input type="password" name="current" autocomplete="current-password" required></label>
+    <label>New password <input type="password" name="new" autocomplete="new-password" minlength="8" required></label>
+    <label>Repeat new password <input type="password" name="confirm" autocomplete="new-password" minlength="8" required></label>
+    <button type="submit">Change password</button>
+  </form>
+</section>
+{% endblock %}

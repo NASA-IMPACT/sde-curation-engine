@@ -282,7 +282,7 @@ The stack **creates** four secrets in Secrets Manager but only knows the value o
 
 | Secret | Created with | You do |
 |---|---|---|
-| `/sde-curation-engine/dev/app_password` | random 24 chars | read it out to sign in (step 4) |
+| `/sde-curation-engine/dev/app_password` | random 24 chars | the **bootstrap `admin` password**: read it out to sign in the first time (step 4) |
 | `/sde-curation-engine/dev/session_secret` | random 64 chars | nothing |
 | `/sde-curation-engine/dev/openai_api_key` | placeholder `REPLACE_ME` | **set it once** (step 1) |
 | `/sde-curation-engine/dev/notify_webhook_url` | placeholder `disabled` | set it if you want Slack notifications (step 1) |
@@ -308,22 +308,37 @@ make redeploy ENV=dev PROFILE=sde-dev
 aws ecs wait services-stable --cluster sde-curation-engine-dev --services sde-curation-engine-dev --profile sde-dev
 ```
 `make redeploy` prints the deployments (`PRIMARY IN_PROGRESS`, then the old one `ACTIVE`); the
-`wait` returns when the new task is healthy, usually within 2–3 minutes.
+`wait` returns when the new task is running, usually within 2–3 minutes. **Expect the URL to answer
+503 for about 90 seconds** in the middle: the single task is stopped before its replacement starts
+(one SQLite writer), and the load balancer needs one more health-check cycle after the new task is
+up. `curl -s <CloudFrontUrl>/health` until it returns `"ok":true`.
 
 **Step 3 — confirm the app came back**: `curl -s <CloudFrontUrl>/health` → `"ok":true`.
 
-**Step 4 — get the login password**:
+**Step 4 — first sign-in and user accounts**. The engine creates one account, `admin`, on its
+first start, with the `app_password` secret as its password:
 ```bash
 aws secretsmanager get-secret-value --profile sde-dev \
   --secret-id /sde-curation-engine/dev/app_password --query SecretString --output text
 ```
-Share it with the team through a password manager, not chat. To change it: `put-secret-value` on
-that secret with your own value, then `make redeploy`.
+Sign in at the CloudFront URL as `admin` with that value, then:
+1. **Users** (header link, admins only) → create one account per teammate (username = what the
+   provenance records will show, so use something recognisable; role `curator`, or `admin` for
+   people who may manage accounts and delete collections). Hand each person their initial password
+   through a password manager; they change it at **Account**.
+2. **Account** → change the admin password. From now on the secret is only a bootstrap value:
+   rotating it does nothing unless the users table is empty again.
+
+Nobody shares a password: every status change, pattern, job and accept/reject is recorded with the
+username that did it (Activity tab → status history "By", patterns "By", and the audit trail).
 
 The secrets are `RETAIN`ed: later deploys, and even `make destroy`, leave their values alone.
 Rotating the OpenAI key is the same `put-secret-value` + `make redeploy`.
 
 ## 5. Verify the deployment
+
+This is the smoke test that the wiring works. The full manual test of every feature is
+`docs/e2e-test.md`.
 
 Keep `make logs ENV=dev PROFILE=sde-dev` running in a second terminal for all of this. The
 commands below read the account values from your local `infra/envs/dev.json` with `jq`.
@@ -345,8 +360,9 @@ ALB=$(aws cloudformation describe-stacks --stack-name CurationEngine-dev --query
 curl -s -m 5 http://$ALB/health || echo "ALB refused/timed out: correct, only CloudFront may reach it"
 ```
 
-**2. Sign in**: open `$CF` in a browser → login page → the password from section 4. You land on
-the collection list; the header shows a **Sign out** button and a green SSE dot.
+**2. Sign in**: open `$CF` in a browser → login page → `admin` and the password from section 4.
+You land on the collection list; the header shows **signed in as admin**, the Account and Users
+links, **Sign out**, and a green SSE dot.
 
 **3. Crawler (SSM)**: on the dashboard fill in **Seed URL** `https://aurorasaurus.org`, a name,
 **Max pages** 15, click **Add collection**, then open it and click **Scrape**. Within a few seconds the engine log shows a line with the SSM command id. Then:
@@ -422,6 +438,7 @@ Where to look first, by job:
 | the UI loads but Scrape/Index fails with AccessDenied | the SSM values are wrong for this account, or the task role lacks a permission — the engine log has the AccessDenied message with the exact action |
 | LLM actions fail with 401 | the OpenAI key is still `REPLACE_ME` or wrong → section 4 |
 | validation fails with 403 | the AOSS data-access policy did not apply, or the collection name in SSM is wrong → `aws opensearchserverless list-access-policies --type data --profile sde-dev` should list `sde-curation-engine-dev` |
+| 503 from the CloudFront URL for a minute or two right after `make redeploy` or a Deploy run | the restart window (old task stopped, new one not yet healthy) — wait for `/health` to return 200; if it lasts more than ~5 min, check the stopped-task reason above |
 | the browser loops on `/login` | you are hitting the ALB over plain HTTP; use the CloudFront URL (the cookie is `Secure`) |
 | `no AWS credentials: set AWS_PROFILE` (local) | SSO session expired → `aws sso login --profile sde-dev` |
 | `You must specify a region` (local) | the profile has no region → `aws configure set region us-east-1 --profile sde-dev` |

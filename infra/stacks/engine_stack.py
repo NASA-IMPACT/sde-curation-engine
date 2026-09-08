@@ -256,7 +256,7 @@ class CurationEngineStack(Stack):
         out: dict[str, sm.Secret] = {}
         out["app_password"] = sm.Secret(
             self, "AppPassword", secret_name=cfg.secret_name("app_password"),
-            description="Shared login password for the curation engine UI/API",
+            description="Bootstrap admin password for the curation engine (seeds the first admin user)",
             generate_secret_string=sm.SecretStringGenerator(password_length=24, exclude_punctuation=True),
             removal_policy=RemovalPolicy.RETAIN,
         )

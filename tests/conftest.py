@@ -9,10 +9,38 @@ from httpx import ASGITransport, AsyncClient
 from sde_curation.config import Settings
 from sde_curation.web.app import create_app
 
+# Login enabled: APP_PASSWORD seeds the bootstrap "admin" account with that password.
+SECURED = {"app_password": "s3cret", "session_secret": "unit-test-secret"}
+
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     return Settings(data_dir=tmp_path, llm_provider="fake")
+
+
+async def login(client, username: str, password: str) -> None:
+    r = await client.post("/login", data={"username": username, "password": password, "next": "/"})
+    assert r.status_code == 303, r.text
+
+
+async def add_user(client, username: str, password: str, role: str = "curator"):
+    from sde_curation.models import Role
+    from sde_curation.web import auth
+
+    return await client.app.state.db.create_user(username, auth.hash_password(password), Role(role))
+
+
+@pytest.fixture
+async def authed_client(tmp_path):
+    """Login enabled, signed in as the bootstrap admin."""
+    app = create_app(Settings(data_dir=tmp_path, llm_provider="fake", **SECURED))
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+    ):
+        c.app = app
+        await login(c, "admin", "s3cret")
+        yield c
 
 
 @pytest.fixture
@@ -66,23 +94,39 @@ FAKE_RUN_PY = textwrap.dedent(
 )
 
 
+def _crawler_app(tmp_path, **extra):
+    root = tmp_path / "crawler"
+    root.mkdir()
+    (root / "run.py").write_text(FAKE_RUN_PY)
+    return create_app(Settings(
+        data_dir=tmp_path / "data", crawler_root=root, crawler_python=Path(sys.executable),
+        scrape_poll_interval_s=0.05, llm_provider="fake", **extra,
+    ))
+
+
 @pytest.fixture
 async def crawler_client(tmp_path):
     """App wired to a fake crawl4ai `run.py` (see FAKE_RUN_PY): max_pages=13 simulates a crash,
     every 5th page fails, the rest succeed."""
-    root = tmp_path / "crawler"
-    root.mkdir()
-    (root / "run.py").write_text(FAKE_RUN_PY)
-    settings = Settings(
-        data_dir=tmp_path / "data", crawler_root=root, crawler_python=Path(sys.executable),
-        scrape_poll_interval_s=0.05, llm_provider="fake",
-    )
-    app = create_app(settings)
+    app = _crawler_app(tmp_path)
     async with (
         app.router.lifespan_context(app),
         AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
     ):
         c.app = app
+        yield c
+
+
+@pytest.fixture
+async def authed_crawler_client(tmp_path):
+    """crawler_client with login enabled, signed in as the bootstrap admin."""
+    app = _crawler_app(tmp_path, **SECURED)
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+    ):
+        c.app = app
+        await login(c, "admin", "s3cret")
         yield c
 
 

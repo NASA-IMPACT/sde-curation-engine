@@ -30,6 +30,7 @@ from .events import EventBus
 from .llm.base import LLMError, LLMProvider
 from .llm.tasks import suggest_metadata, suggest_patterns
 from .models import (
+    SYSTEM_ACTOR,
     Collection,
     DumpUrl,
     IndexRun,
@@ -63,6 +64,7 @@ class JobManager:
         self._tasks: dict[int, asyncio.Task] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._starting: set[str] = set()  # collections with a job being created (TOCTOU guard)
+        self._cancel_actor: dict[int, str] = {}  # job id → who asked for the cancel
 
     # ── infrastructure ─────────────────────────────────────────────────
 
@@ -99,11 +101,13 @@ class JobManager:
         task.add_done_callback(lambda t: self._tasks.pop(job.id, None))
         return job
 
-    async def cancel(self, collection_id: str) -> JobRun | None:
+    async def cancel(self, collection_id: str, *, actor: str | None = None) -> JobRun | None:
         """Cancel the running job for a collection; waits until it has recorded 'failed'."""
         for jid, t in list(self._tasks.items()):
             j: JobRun | None = getattr(t, "job", None)
             if j and j.collection_id == collection_id and not t.done():
+                if actor:
+                    self._cancel_actor[jid] = actor
                 t.cancel()
                 await asyncio.gather(t, return_exceptions=True)
                 return await self.db.get_job(jid)
@@ -122,14 +126,14 @@ class JobManager:
 
     # ── scrape ─────────────────────────────────────────────────────────
 
-    async def start_scrape(self, c: Collection) -> JobRun:
+    async def start_scrape(self, c: Collection, *, actor: str | None = None) -> JobRun:
         cid = c.collection_id
         if cid in self._starting or self.active_for(cid) or self.lock(cid).locked():
             raise JobConflict(f"a job is already running for {cid}")
         self._starting.add(cid)
         try:
             job = await self.db.insert_job(
-                JobRun(collection_id=cid, kind=JobKind.SCRAPE, state=JobState.RUNNING)
+                JobRun(collection_id=cid, kind=JobKind.SCRAPE, state=JobState.RUNNING, started_by=actor)
             )
             self._emit(c, job)
             return await self._spawn(job, self._run_scrape(c, job))
@@ -156,7 +160,8 @@ class JobManager:
                 # Collection state first, job record last: "succeeded" must mean every effect of
                 # the job is already visible to whoever polls the job list.
                 updated = await self.db.set_status(
-                    c.collection_id, Status.SCRAPED, note=f"scrape ok: {n} documents", force=True
+                    c.collection_id, Status.SCRAPED, note=f"scrape ok: {n} documents", force=True,
+                    actor=SYSTEM_ACTOR,
                 )
                 if c.curated_count:  # anything already promoted must be re-reviewed
                     await self.db.set_flag(c.collection_id, True)
@@ -164,7 +169,7 @@ class JobManager:
                 await self.db.finish_job(job, JobState.SUCCEEDED)
                 self._emit(updated, job)
             except asyncio.CancelledError:
-                await self.db.finish_job(job, JobState.FAILED, error="cancelled by user or shutdown")
+                await self.db.finish_job(job, JobState.FAILED, error=f"cancelled by {self._cancel_actor.pop(job.id, None) or 'shutdown'}")
                 self._emit(c, job)
                 raise
             except (ScrapeError, OSError, ValueError) as e:
@@ -183,23 +188,33 @@ class JobManager:
             raise LLMError("no LLM provider configured")
         return self._llm() if callable(self._llm) and not hasattr(self._llm, "complete") else self._llm  # type: ignore[return-value]
 
-    async def _start(self, c: Collection, kind: JobKind, coro_factory) -> JobRun:
+    async def _start(self, c: Collection, kind: JobKind, coro_factory, *, actor: str | None = None) -> JobRun:
         cid = c.collection_id
         if cid in self._starting or self.active_for(cid) or self.lock(cid).locked():
             raise JobConflict(f"a job is already running for {cid}")
         self._starting.add(cid)
         try:
-            job = await self.db.insert_job(JobRun(collection_id=cid, kind=kind, state=JobState.RUNNING))
+            job = await self.db.insert_job(
+                JobRun(collection_id=cid, kind=kind, state=JobState.RUNNING, started_by=actor)
+            )
             self._emit(c, job)
             return await self._spawn(job, coro_factory(job))
         finally:
             self._starting.discard(cid)
 
-    async def start_llm_patterns(self, c: Collection, *, sample_size: int = 60) -> JobRun:
-        return await self._start(c, JobKind.LLM_PATTERNS, lambda job: self._run_llm_patterns(c, job, sample_size))
+    async def start_llm_patterns(
+        self, c: Collection, *, sample_size: int = 60, actor: str | None = None
+    ) -> JobRun:
+        return await self._start(
+            c, JobKind.LLM_PATTERNS, lambda job: self._run_llm_patterns(c, job, sample_size), actor=actor
+        )
 
-    async def start_llm_metadata(self, c: Collection, *, only_missing: bool = True) -> JobRun:
-        return await self._start(c, JobKind.LLM_METADATA, lambda job: self._run_llm_metadata(c, job, only_missing))
+    async def start_llm_metadata(
+        self, c: Collection, *, only_missing: bool = True, actor: str | None = None
+    ) -> JobRun:
+        return await self._start(
+            c, JobKind.LLM_METADATA, lambda job: self._run_llm_metadata(c, job, only_missing), actor=actor
+        )
 
     async def _guarded(self, c: Collection, job: JobRun, body) -> None:
         async with self._lock(c.collection_id):
@@ -208,7 +223,7 @@ class JobManager:
                 await self.db.finish_job(job, JobState.SUCCEEDED)
                 self._emit(await self.db.get_collection(c.collection_id) or c, job)
             except asyncio.CancelledError:
-                await self.db.finish_job(job, JobState.FAILED, error="cancelled by user or shutdown")
+                await self.db.finish_job(job, JobState.FAILED, error=f"cancelled by {self._cancel_actor.pop(job.id, None) or 'shutdown'}")
                 self._emit(c, job)
                 raise
             except (LLMError, ScrapeError, IndexError_, OSError, ValueError) as e:
@@ -263,12 +278,14 @@ class JobManager:
             raise IndexError_("no index backend configured")
         return self._indexer() if callable(self._indexer) and not hasattr(self._indexer, "complete") and not hasattr(self._indexer, "dispatch") else self._indexer  # type: ignore[return-value]
 
-    async def start_index(self, c: Collection, target: str) -> tuple[JobRun, IndexRun]:
+    async def start_index(
+        self, c: Collection, target: str, *, actor: str | None = None
+    ) -> tuple[JobRun, IndexRun]:
         if not self.s.cosmos_index_bucket:
             raise IndexError_("COSMOS_INDEX_BUCKET is not set")
-        run = IndexRun(run_id=mint_run_id(), collection_id=c.collection_id, target=target)
+        run = IndexRun(run_id=mint_run_id(), collection_id=c.collection_id, target=target, started_by=actor)
         kind = JobKind.INDEX_PROD if target == "prod" else JobKind.INDEX_TEST
-        job = await self._start(c, kind, lambda job: self._run_index(c, job, run))
+        job = await self._start(c, kind, lambda job: self._run_index(c, job, run), actor=actor)
         job.run_id = run.run_id
         await self.db.update_job(job)
         return job, run
@@ -332,14 +349,14 @@ class JobManager:
 
             if run.target == "prod":
                 await self.db.set_status(
-                    c.collection_id, Status.LIVE, force=True,
+                    c.collection_id, Status.LIVE, force=True, actor=SYSTEM_ACTOR,
                     note=f"prod index run {run.run_id}: {status.indexed} indexed, {status.deleted} deleted",
                 )
                 await self.db.set_flag(c.collection_id, False)
                 return
 
             await self.db.set_status(
-                c.collection_id, Status.CONFIG_GENERATED, force=True,
+                c.collection_id, Status.CONFIG_GENERATED, force=True, actor=SYSTEM_ACTOR,
                 note=f"test index run {run.run_id}: {status.indexed} indexed, {status.deleted} deleted",
             )
             # 4. validation gate — the indexer's own validation.json is pre-refresh; re-check after a delay
@@ -378,13 +395,13 @@ class JobManager:
         if ok:
             await self.db.set_flag(c.collection_id, False)
             await self.db.set_status(
-                c.collection_id, Status.CONFIG_GENERATED, force=True,
+                c.collection_id, Status.CONFIG_GENERATED, force=True, actor=SYSTEM_ACTOR,
                 note=f"validated ({run.validated_by}): {report['indexed_count']}/{report['expected_count']}, titles {report['title_match_rate']:.1%}",
             )
         else:
             await self.db.set_flag(c.collection_id, True)
             await self.db.set_status(
-                c.collection_id, Status.CURATING, force=True,
+                c.collection_id, Status.CURATING, force=True, actor=SYSTEM_ACTOR,
                 note=f"validation FAILED ({run.validated_by}): {report['indexed_count']}/{report['expected_count']} indexed, titles {report['title_match_rate']:.1%} — needs re-curation",
             )
 
@@ -392,9 +409,11 @@ class JobManager:
         curated = await self.db.load_curated(collection_id)
         return {r.url: (r.title or r.scraped_title or "").strip() for r in curated if not r.excluded}
 
-    async def start_revalidate(self, c: Collection, run: IndexRun) -> JobRun:
+    async def start_revalidate(self, c: Collection, run: IndexRun, *, actor: str | None = None) -> JobRun:
         """Manual re-check of an existing test run (no new export)."""
-        return await self._start(c, JobKind.VALIDATE, lambda job: self._run_revalidate(c, job, run))
+        return await self._start(
+            c, JobKind.VALIDATE, lambda job: self._run_revalidate(c, job, run), actor=actor
+        )
 
     async def _run_revalidate(self, c: Collection, job: JobRun, run: IndexRun) -> None:
         async def body():

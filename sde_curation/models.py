@@ -15,6 +15,11 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+# Provenance actors that are not people: job-driven transitions, and "auth is off" (local dev).
+SYSTEM_ACTOR = "system"
+ANONYMOUS_ACTOR = "anonymous"
+
+
 # ── enums ──────────────────────────────────────────────────────────────
 
 
@@ -43,6 +48,11 @@ def check_transition(current: Status, new: Status) -> None:
         return
     if new not in ALLOWED_TRANSITIONS[current]:
         raise ValueError(f"illegal status transition {current} -> {new}")
+
+
+class Role(StrEnum):
+    ADMIN = "admin"  # manages users, may delete collections
+    CURATOR = "curator"
 
 
 class Division(StrEnum):
@@ -167,6 +177,7 @@ class Collection(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     last_run_id: str | None = None  # most recent index run (test or prod)
+    created_by: str | None = None  # username; None on rows that predate provenance
     # counters kept on the row for a cheap dashboard
     dump_count: int = 0
     delta_count: int = 0
@@ -179,7 +190,19 @@ class StatusHistory(BaseModel):
     old_status: Status | None
     new_status: Status
     note: str | None = None
+    actor: str | None = None  # username, SYSTEM_ACTOR, or None (pre-provenance rows)
     at: datetime = Field(default_factory=utcnow)
+
+
+class User(BaseModel):
+    id: int | None = None
+    username: str
+    password_hash: str
+    role: Role = Role.CURATOR
+    active: bool = True
+    session_version: int = 1  # bumped on password change → existing cookies stop working
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 # ── URLs ───────────────────────────────────────────────────────────────
@@ -243,6 +266,7 @@ class Pattern(PatternCreate):
     id: int | None = None
     collection_id: str
     created_at: datetime = Field(default_factory=utcnow)
+    created_by: str | None = None
 
 
 # ── jobs ───────────────────────────────────────────────────────────────
@@ -259,6 +283,7 @@ class JobRun(BaseModel):
     error: str | None = None
     started_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = None
+    started_by: str | None = None
 
 
 # ── indexer contracts (sde-api-scrapers/web) ───────────────────────────
@@ -337,6 +362,7 @@ class IndexRun(BaseModel):
     error: str | None = None
     started_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = None
+    started_by: str | None = None
 
     def validation_passes(self, threshold: float = 0.99) -> bool | None:
         v = self.validation

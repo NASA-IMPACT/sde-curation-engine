@@ -40,12 +40,16 @@ class CurationService:
         await self.db.replace_deltas(c.collection_id, ds.deltas, ds.effects)
         return ds
 
-    async def add_pattern(self, c: Collection, body: PatternCreate) -> tuple[Pattern, DeltaSet]:
-        p = await self.db.insert_pattern(Pattern(collection_id=c.collection_id, **body.model_dump()))
+    async def add_pattern(
+        self, c: Collection, body: PatternCreate, *, actor: str | None = None
+    ) -> tuple[Pattern, DeltaSet]:
+        p = await self.db.insert_pattern(
+            Pattern(collection_id=c.collection_id, created_by=actor, **body.model_dump())
+        )
         return p, await self.recompute(c)
 
     async def replace_exact_pattern(
-        self, c: Collection, body: PatternCreate, *, old_id: int | None
+        self, c: Collection, body: PatternCreate, *, old_id: int | None, actor: str | None = None
     ) -> DeltaSet:
         """Per-URL edit: insert the new value first, then drop the previous one, so a failed
         insert never loses the curator's earlier edit."""
@@ -53,7 +57,7 @@ class CurationService:
             if old_id is not None:
                 await self.db.delete_pattern(c.collection_id, old_id)
             await self.db.insert_pattern(
-                Pattern(collection_id=c.collection_id, **body.model_dump())
+                Pattern(collection_id=c.collection_id, created_by=actor, **body.model_dump())
             )
             return await self._recompute(c)
 
@@ -68,16 +72,16 @@ class CurationService:
         counts = match_counts(patterns, urls)
         return [{**p.model_dump(mode="json"), "matches": counts.get(p.id, 0)} for p in patterns]
 
-    async def promote(self, c: Collection) -> int:
+    async def promote(self, c: Collection, *, actor: str | None = None) -> int:
         async with self._lock_for(c.collection_id):
-            return await self._promote(c)
+            return await self._promote(c, actor)
 
-    async def _promote(self, c: Collection) -> int:
+    async def _promote(self, c: Collection, actor: str | None = None) -> int:
         deltas = await self.db.load_deltas(c.collection_id)
         curated = promote(await self.db.load_curated(c.collection_id), deltas)
         n = await self.db.replace_curated(c.collection_id, curated)
         await self.db.replace_deltas(c.collection_id, [], [])
         await self.db.set_flag(c.collection_id, False)
         note = f"promoted {len(deltas)} deltas → {n} curated" if deltas else "nothing pending → curated"
-        await self.db.set_status(c.collection_id, Status.CURATED, note=note, force=True)
+        await self.db.set_status(c.collection_id, Status.CURATED, note=note, force=True, actor=actor)
         return n

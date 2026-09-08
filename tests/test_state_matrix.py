@@ -50,6 +50,10 @@ async def invariants(client, cid):
     jobs = (await client.get(f"/api/collections/{cid}/jobs")).json()
     for j in jobs:
         assert j["state"] != "queued"
+    # provenance: every row written by the code carries an actor ("anonymous"/"system" here)
+    for table, col in (("status_history", "actor"), ("patterns", "created_by"), ("job_runs", "started_by")):
+        cur = await db.conn.execute(f"SELECT COUNT(*) FROM {table} WHERE collection_id=? AND {col} IS NULL", (cid,))
+        assert (await cur.fetchone())[0] == 0, f"{table}.{col} missing actor"
     return c
 
 
@@ -179,7 +183,7 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     # deltas tab: filters (kind / excluded / division), effects tooltip, paging
     t = (await c.get("/collections/ex.org?tab=urls&set=deltas&division=Earth+Science")).text
     assert "https://ex.org/p2" in t and "https://ex.org/p3" not in t
-    assert 'title="division */p2 → Earth Science"' in t  # "why" tooltip from pattern_effects
+    assert 'title="division */p2 → Earth Science (by anonymous)"' in t  # "why" tooltip from pattern_effects
     assert "https://ex.org/p1" in (await c.get("/collections/ex.org?tab=urls&set=deltas&excluded=true")).text
     t = (await c.get("/collections/ex.org?tab=urls&set=deltas&per=25&page=2")).text
     assert "No deltas match" in t
