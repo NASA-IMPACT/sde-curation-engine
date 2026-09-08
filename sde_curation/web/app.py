@@ -9,7 +9,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
@@ -28,13 +28,16 @@ from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
 from ..llm.base import LLMError, make_llm
 from ..models import (
+    ANONYMOUS_ACTOR,
     Collection,
     CollectionCreate,
     Division,
     DocumentType,
     PatternCreate,
     PatternType,
+    Role,
     Status,
+    User,
 )
 from ..notify import Notifier
 from ..store import remove_collection_files, write_collection_yaml, write_patterns_yaml
@@ -162,6 +165,10 @@ def _is_htmx(request: Request) -> bool:
     return request.headers.get("HX-Request") == "true"
 
 
+def _pattern_detail(p) -> str:
+    return f"{p.type} {p.match}" + (f" → {p.value}" if p.value else "")
+
+
 def htmx_done(request: Request, payload, *, then: str | None = None):
     """For HTMX callers, navigate server-side (HX-Redirect to `?then=` or the given url,
     else HX-Refresh). Header-driven so it works even if the clicked element was already
@@ -184,7 +191,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.db = db
         app.state.notifier = Notifier(settings.notify_webhook_url, base_url=settings.public_base_url)
-        db.on_status_change = app.state.notifier.status_changed
+
+        async def status_hook(cid: str, old, new, note: str | None, actor: str | None) -> None:
+            """Every status-history row: notify on real transitions, and keep collection.yaml
+            (record + history with actors) current — including job-driven transitions."""
+            if old != new:
+                await app.state.notifier.status_changed(cid, old, new, note, actor)
+            c = await db.get_collection(cid)
+            if c:
+                write_collection_yaml(settings.collections_dir, c, await db.status_history(cid))
+
+        db.on_status_change = status_hook
+        if settings.app_password and await db.count_users() == 0:
+            # first start with login enabled: APP_PASSWORD seeds the bootstrap admin account
+            await db.create_user("admin", auth.hash_password(settings.app_password), Role.ADMIN)
         app.state.bus = EventBus()
         jobs = JobManager(
             settings, db, app.state.bus, scraper=make_scrape_backend(settings),
@@ -223,6 +243,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         j = request.app.state.jobs.active_for(c.collection_id)
         if j:
             raise HTTPException(409, f"{j.kind} job #{j.id} is running — wait for it or cancel it")
+
+    # ── identity (set by auth.AuthMiddleware; absent when login is off) ─
+
+    def current_user(request: Request) -> User | None:
+        return getattr(request.state, "user", None)
+
+    def actor(request: Request) -> str:
+        """Provenance name for whoever is making this request."""
+        u = current_user(request)
+        return u.username if u else ANONYMOUS_ACTOR
+
+    def is_admin(request: Request) -> bool:
+        if not settings.app_password:
+            return True
+        u = current_user(request)
+        return u is not None and u.role is Role.ADMIN
+
+    def require_admin(request: Request) -> None:
+        if not is_admin(request):
+            raise HTTPException(403, "admin only")
+
+    templates.env.globals.update(current_user=current_user, is_admin=is_admin)
+
+    async def audit(request: Request, action: str, collection_id: str | None = None, detail: str | None = None) -> None:
+        await db(request).audit(actor(request), action, collection_id, detail)
 
     async def with_validation(request: Request, c: Collection) -> Collection:
         if c.status is Status.CONFIG_GENERATED:
@@ -336,7 +381,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pattern_types=list(PatternType),
             )
         else:
-            ctx.update(history=await d.status_history(c.collection_id), jobs=await d.list_jobs(c.collection_id, 50))
+            ctx.update(history=await d.status_history(c.collection_id), jobs=await d.list_jobs(c.collection_id, 50),
+                       audit=await d.list_audit(c.collection_id, 100))
         return ctx
 
     async def header_context(request: Request, c: Collection) -> dict[str, Any]:
@@ -459,9 +505,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_create(request: Request, body: CollectionCreate):
         if await db(request).get_collection(body.collection_id):
             raise HTTPException(409, f"collection {body.collection_id!r} already exists")
-        c = Collection(**body.model_dump())
+        c = Collection(**body.model_dump(), created_by=actor(request))
         await db(request).insert_collection(c)
-        write_collection_yaml(settings.collections_dir, c)
+        write_collection_yaml(settings.collections_dir, c, await db(request).status_history(c.collection_id))
+        await audit(request, "collection.create", c.collection_id, f"{c.name} ← {c.seed_url}")
         bus(request).publish("collection_created", {"collection_id": c.collection_id})
         emit_collection(request, c)
         return c
@@ -491,7 +538,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.delete("/api/collections/{collection_id}", response_model=None)
     async def api_delete(request: Request, collection_id: str):
-        ensure_idle(request, await must_get(request, collection_id))
+        require_admin(request)
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        await audit(request, "collection.delete", collection_id, f"{c.name} ← {c.seed_url} (status {c.status})")
         if not await db(request).delete_collection(collection_id):
             raise HTTPException(404, "not found")
         remove_collection_files(settings.collections_dir, collection_id)
@@ -509,11 +559,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, problem)
         try:
             c = await db(request).set_status(
-                collection_id, body.status, body.note, force=body.force
+                collection_id, body.status, body.note, force=body.force, actor=actor(request)
             )
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
-        write_collection_yaml(settings.collections_dir, c)
+        await audit(request, "status.set", collection_id, f"→ {body.status}" + (f": {body.note}" if body.note else ""))
         emit_collection(request, c)
         if _is_htmx(request) and request.headers.get("HX-Target", "").startswith("row-"):
             return templates.TemplateResponse(
@@ -526,6 +576,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await must_get(request, collection_id)
         return await db(request).status_history(collection_id)
 
+    @app.get("/api/collections/{collection_id}/audit")
+    async def api_audit(request: Request, collection_id: str, limit: int = 100):
+        """Provenance ledger: who did what to this collection, newest first."""
+        await must_get(request, collection_id)
+        return await db(request).list_audit(collection_id, max(1, min(limit, 1000)))
+
     # ── jobs ───────────────────────────────────────────────────────────
 
     @app.post("/api/collections/{collection_id}/scrape", status_code=202, response_model=None)
@@ -533,9 +589,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c = await must_get(request, collection_id)
         jobs: JobManager = request.app.state.jobs
         try:
-            job = await jobs.start_scrape(c)
+            job = await jobs.start_scrape(c, actor=actor(request))
         except JobConflict as e:
             raise HTTPException(409, str(e)) from e
+        await audit(request, "scrape.start", collection_id, f"job #{job.id}")
         if _is_htmx(request) and request.headers.get("HX-Target", "").startswith("row-"):
             return templates.TemplateResponse(
                 request, "partials/row.html", await row_context(request, c)
@@ -546,9 +603,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_cancel_job(request: Request, collection_id: str):
         c = await must_get(request, collection_id)
         jobs: JobManager = request.app.state.jobs
-        job = await jobs.cancel(c.collection_id)
+        job = await jobs.cancel(c.collection_id, actor=actor(request))
         if job is None:
             raise HTTPException(409, "no running job")
+        await audit(request, "job.cancel", collection_id, f"{job.kind} job #{job.id}")
         if _is_htmx(request) and request.headers.get("HX-Target", "").startswith("row-"):
             return templates.TemplateResponse(
                 request, "partials/row.html", await row_context(request, c)
@@ -598,18 +656,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await db(request).set_flag(c.collection_id, False)
             c = await db(request).set_status(
                 c.collection_id, Status.CURATED, note="re-crawl matches curated set: no changes",
-                force=True,
+                force=True, actor=actor(request),
             )
         elif (pre and n) or (
             n and c.status in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE)
         ):
             c = await db(request).set_status(
-                c.collection_id, Status.CURATING, note=f"deltas recomputed: {n} pending", force=True
+                c.collection_id, Status.CURATING, note=f"deltas recomputed: {n} pending", force=True,
+                actor=actor(request),
             )
         elif n == 0 and c.status is Status.CURATING and c.curated_count:
             # nothing left to review on an already-promoted set → it is curated
             c = await db(request).set_status(
-                c.collection_id, Status.CURATED, note="recomputed: no pending deltas", force=True
+                c.collection_id, Status.CURATED, note="recomputed: no pending deltas", force=True,
+                actor=actor(request),
             )
         c = await must_get(request, c.collection_id)
         write_patterns_yaml(settings.collections_dir, c.collection_id,
@@ -626,6 +686,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "no dump ingested yet — scrape first")
         ds = await curation(request).recompute(c)
         await _after_curation_change(request, c, ds)
+        await audit(request, "recompute", collection_id, f"{len(ds.deltas)} pending")
         return htmx_done(request, ds.counts)
 
     @app.get("/api/collections/{collection_id}/patterns")
@@ -638,22 +699,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         try:
-            p, ds = await curation(request).add_pattern(c, body)
+            p, ds = await curation(request).add_pattern(c, body, actor=actor(request))
         except Exception as e:
             if "UNIQUE" in str(e):
                 raise HTTPException(409, "pattern already exists") from e
             raise
         await _after_curation_change(request, c, ds)
+        await audit(request, "pattern.add", collection_id, _pattern_detail(p))
         return htmx_done(request, {"pattern": p.model_dump(mode="json"), "deltas": ds.counts})
 
     @app.delete("/api/collections/{collection_id}/patterns/{pattern_id}")
     async def api_delete_pattern(request: Request, collection_id: str, pattern_id: int):
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
+        gone = next((p for p in await db(request).list_patterns(collection_id) if p.id == pattern_id), None)
         ds = await curation(request).delete_pattern(c, pattern_id)
-        if ds is None:
+        if ds is None or gone is None:
             raise HTTPException(404, "pattern not found")
         await _after_curation_change(request, c, ds)
+        await audit(request, "pattern.delete", collection_id, _pattern_detail(gone))
         return htmx_done(request, ds.counts)
 
     @app.post("/api/collections/{collection_id}/urls")
@@ -670,9 +734,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             ds = await curation(request).replace_exact_pattern(
                 c, PatternCreate(type=body.type, match=body.url, value=body.value),
-                old_id=existing[0].id if existing else None,
+                old_id=existing[0].id if existing else None, actor=actor(request),
             )
         await _after_curation_change(request, c, ds)
+        await audit(request, "url.edit", collection_id,
+                    f"{body.type} {body.url}" + (f" → {body.value}" if body.value else ""))
         return htmx_done(request, ds.counts)
 
     @app.get("/api/collections/{collection_id}/deltas")
@@ -693,9 +759,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ensure_idle(request, c)
         if c.status is not Status.CURATING:
             raise HTTPException(409, f"promote requires status 'curating' (is {c.status})")
-        n = await curation(request).promote(c)
+        n = await curation(request).promote(c, actor=actor(request))
         c = await must_get(request, collection_id)
-        write_collection_yaml(settings.collections_dir, c)
+        await audit(request, "promote", collection_id, f"{n} curated")
         emit_collection(request, c)
         return htmx_done(request, {"curated": n, "status": c.status})
 
@@ -727,9 +793,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(409, "prod indexing requires a successful, validated test run first")
         jobs: JobManager = request.app.state.jobs
         try:
-            job, run = await jobs.start_index(c, target)
+            job, run = await jobs.start_index(c, target, actor=actor(request))
         except (JobConflict, IndexError_) as e:
             raise HTTPException(409, str(e)) from e
+        await audit(request, "index.start", collection_id, f"{target} run {run.run_id}")
         return htmx_done(request, {**job.model_dump(mode="json"), "run_id": run.run_id})
 
     @app.post("/api/collections/{collection_id}/index/revalidate", status_code=202, response_model=None)
@@ -742,9 +809,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "no successful test index run to validate")
         jobs: JobManager = request.app.state.jobs
         try:
-            job = await jobs.start_revalidate(c, last)
+            job = await jobs.start_revalidate(c, last, actor=actor(request))
         except (JobConflict, IndexError_) as e:
             raise HTTPException(409, str(e)) from e
+        await audit(request, "revalidate", collection_id, f"test run {last.run_id}")
         return htmx_done(request, job)
 
     @app.get("/api/collections/{collection_id}/index_runs")
@@ -754,15 +822,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ── LLM assist ─────────────────────────────────────────────────────
 
-    async def _start_llm(request: Request, collection_id: str, starter) -> Any:
+    async def _start_llm(request: Request, collection_id: str, action: str, starter) -> Any:
         c = await must_get(request, collection_id)
         jobs: JobManager = request.app.state.jobs
         try:
-            job = await starter(jobs, c)
+            job = await starter(jobs, c, actor(request))
         except JobConflict as e:
             raise HTTPException(409, str(e)) from e
         except LLMError as e:
             raise HTTPException(409, str(e)) from e
+        await audit(request, action, collection_id, f"job #{job.id}")
         return htmx_done(request, job)
 
     @app.post("/api/collections/{collection_id}/suggest/patterns", status_code=202, response_model=None)
@@ -771,7 +840,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c = await must_get(request, collection_id)
         if c.dump_count == 0:
             raise HTTPException(409, "no crawl dump yet — scrape first")
-        return await _start_llm(request, collection_id, lambda j, c: j.start_llm_patterns(c))
+        return await _start_llm(request, collection_id, "suggest.patterns",
+                                lambda j, c, who: j.start_llm_patterns(c, actor=who))
 
     @app.post("/api/collections/{collection_id}/suggest/metadata", status_code=202, response_model=None)
     async def api_suggest_metadata(request: Request, collection_id: str, all: bool = False):
@@ -785,7 +855,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 409, "nothing to classify: every pending (non-excluded) URL already has suggestions"
                      " — use ?all=true to redo them",
             )
-        return await _start_llm(request, collection_id, lambda j, c: j.start_llm_metadata(c, only_missing=not all))
+        return await _start_llm(request, collection_id, "suggest.metadata",
+                                lambda j, c, who: j.start_llm_metadata(c, only_missing=not all, actor=who))
 
     @app.get("/api/collections/{collection_id}/suggestions")
     async def api_suggestions(request: Request, collection_id: str, state: str | None = "pending"):
@@ -807,12 +878,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if decision == "accept":
             try:
                 _, ds = await curation(request).add_pattern(
-                    c, PatternCreate(type=sug["type"], match=sug["match"], value=sug["value"])
+                    c, PatternCreate(type=sug["type"], match=sug["match"], value=sug["value"]),
+                    actor=actor(request),
                 )
             except sqlite3.IntegrityError:
                 ds = await curation(request).recompute(c)  # identical pattern already exists
             await _after_curation_change(request, c, ds)
-        await db(request).set_pattern_suggestion_state(collection_id, sid, "accepted" if decision == "accept" else "rejected")
+        await db(request).set_pattern_suggestion_state(
+            collection_id, sid, "accepted" if decision == "accept" else "rejected", actor=actor(request)
+        )
+        await audit(request, f"suggestion.{decision}", collection_id,
+                    f"{sug['type']} {sug['match']}" + (f" → {sug['value']}" if sug.get("value") else ""))
         return htmx_done(request, {"id": sid, "state": decision + "ed"})
 
     @app.post("/api/collections/{collection_id}/ai/{decision}")
@@ -834,18 +910,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         if p.match == body.url and p.type == body.field]
             ds = await curation(request).replace_exact_pattern(
                 c, PatternCreate(type=PatternType(body.field), match=body.url, value=str(value)),
-                old_id=existing[0].id if existing else None,
+                old_id=existing[0].id if existing else None, actor=actor(request),
             )
             await _after_curation_change(request, c, ds)
         await db(request).clear_delta_ai(collection_id, body.url, body.field)
+        await audit(request, f"ai.{decision}", collection_id, f"{body.field} {body.url} → {value}")
         return htmx_done(request, {"url": body.url, "field": body.field, "state": decision + "ed"})
 
-    # ── login (only mounted when APP_PASSWORD is set) ──────────────────
+    # ── login + accounts (only mounted when APP_PASSWORD is set) ───────
 
     if settings.app_password:
         # When SESSION_SECRET is unset every restart invalidates all cookies, which is fine.
         session_secret = settings.session_secret or secrets.token_hex(32)
         app.add_middleware(auth.AuthMiddleware, secret=session_secret)
+        USERNAME_RE = re.compile(r"^[a-z0-9._-]{2,32}$")
+        MIN_PASSWORD = 8
+
+        def set_session_cookie(resp: Response, user: User) -> None:
+            resp.set_cookie(
+                auth.COOKIE,
+                auth.sign(session_secret, user.id, user.session_version, int(time.time()) + settings.session_ttl_s),
+                max_age=settings.session_ttl_s, httponly=True, samesite="lax",
+                secure=settings.auth_cookie_secure, path="/",
+            )
 
         @app.get("/login", response_class=HTMLResponse)
         async def login_form(request: Request, next: str = "/"):
@@ -856,24 +943,135 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         @app.post("/login", response_class=HTMLResponse)
-        async def login_submit(request: Request, password: str = Form(...), next: str = Form("/")):
-            if not auth.password_ok(settings.app_password, password):
+        async def login_submit(
+            request: Request, username: str = Form(...), password: str = Form(...), next: str = Form("/")
+        ):
+            u = await db(request).get_user_by_username(username.strip())
+            if not (u and u.active and auth.verify_password(u.password_hash, password)):
                 return templates.TemplateResponse(
                     request, "login.html",
-                    {"next": auth.safe_next(next), "error": "Wrong password."}, status_code=401,
+                    {"next": auth.safe_next(next), "error": "Wrong username or password."}, status_code=401,
                 )
             resp = RedirectResponse(auth.safe_next(next), status_code=303)
-            resp.set_cookie(
-                auth.COOKIE, auth.sign(session_secret, int(time.time()) + settings.session_ttl_s),
-                max_age=settings.session_ttl_s, httponly=True, samesite="lax",
-                secure=settings.auth_cookie_secure, path="/",
-            )
+            set_session_cookie(resp, u)
             return resp
 
         @app.post("/logout")
         async def logout(request: Request):
             resp = RedirectResponse("/login", status_code=303)
             resp.delete_cookie(auth.COOKIE, path="/")
+            return resp
+
+        # ── own account ─────────────────────────────────────────────
+
+        def account_view(request: Request, *, error: str | None = None, ok: bool = False, status_code: int = 200):
+            return templates.TemplateResponse(
+                request, "account.html", {"user": current_user(request), "error": error, "ok": ok},
+                status_code=status_code,
+            )
+
+        @app.get("/account", response_class=HTMLResponse)
+        async def account_page(request: Request, changed: int = 0):
+            return account_view(request, ok=bool(changed))
+
+        @app.post("/account/password", response_class=HTMLResponse)
+        async def account_password(
+            request: Request, current: str = Form(...), new: str = Form(...), confirm: str = Form(...)
+        ):
+            u = current_user(request)
+            assert u is not None  # the middleware only lets authenticated requests through
+            if not auth.verify_password(u.password_hash, current):
+                return account_view(request, error="Current password is wrong.", status_code=401)
+            if new != confirm:
+                return account_view(request, error="New passwords do not match.", status_code=422)
+            if len(new) < MIN_PASSWORD:
+                return account_view(request, error=f"Use at least {MIN_PASSWORD} characters.", status_code=422)
+            await db(request).set_password(u.id, auth.hash_password(new))
+            await audit(request, "user.password", None, u.username)
+            resp = RedirectResponse("/account?changed=1", status_code=303)
+            set_session_cookie(resp, await db(request).get_user(u.id))  # new session_version
+            return resp
+
+        # ── user administration (admins) ─────────────────────────────
+
+        async def users_view(request: Request, *, error: str | None = None, status_code: int = 200):
+            return templates.TemplateResponse(
+                request, "users.html",
+                {"users": await db(request).list_users(), "roles": list(Role), "error": error},
+                status_code=status_code,
+            )
+
+        async def target_user(request: Request, user_id: int) -> User:
+            u = await db(request).get_user(user_id)
+            if u is None:
+                raise HTTPException(404, "user not found")
+            return u
+
+        async def guard_lockout(request: Request, u: User) -> None:
+            """Disabling/demoting: never yourself, never the last active admin."""
+            me = current_user(request)
+            if me and me.id == u.id:
+                raise HTTPException(409, "you cannot disable or demote yourself")
+            if u.role is Role.ADMIN and u.active:
+                admins = [x for x in await db(request).list_users() if x.role is Role.ADMIN and x.active]
+                if len(admins) <= 1:
+                    raise HTTPException(409, f"{u.username} is the last active admin")
+
+        @app.get("/users", response_class=HTMLResponse)
+        async def users_page(request: Request):
+            require_admin(request)
+            return await users_view(request)
+
+        @app.post("/users", response_class=HTMLResponse)
+        async def users_create(
+            request: Request, username: str = Form(...), password: str = Form(...),
+            role: Annotated[Role, Form()] = Role.CURATOR,
+        ):
+            require_admin(request)
+            username = username.strip().lower()
+            if not USERNAME_RE.match(username):
+                return await users_view(request, error="Username: 2–32 characters, a-z 0-9 . _ -", status_code=422)
+            if len(password) < MIN_PASSWORD:
+                return await users_view(request, error=f"Password: at least {MIN_PASSWORD} characters.", status_code=422)
+            try:
+                await db(request).create_user(username, auth.hash_password(password), role)
+            except sqlite3.IntegrityError:
+                return await users_view(request, error=f"User {username!r} already exists.", status_code=409)
+            await audit(request, "user.create", None, f"{username} ({role})")
+            return RedirectResponse("/users", status_code=303)
+
+        @app.post("/users/{user_id}/active")
+        async def users_active(request: Request, user_id: int, active: int = Form(...)):
+            require_admin(request)
+            u = await target_user(request, user_id)
+            if not active:
+                await guard_lockout(request, u)
+            await db(request).set_active(u.id, bool(active))
+            await audit(request, "user.enable" if active else "user.disable", None, u.username)
+            return RedirectResponse("/users", status_code=303)
+
+        @app.post("/users/{user_id}/role")
+        async def users_role(request: Request, user_id: int, role: Annotated[Role, Form()]):
+            require_admin(request)
+            u = await target_user(request, user_id)
+            if role is not Role.ADMIN:
+                await guard_lockout(request, u)
+            await db(request).set_role(u.id, role)
+            await audit(request, "user.role", None, f"{u.username} → {role}")
+            return RedirectResponse("/users", status_code=303)
+
+        @app.post("/users/{user_id}/password", response_class=HTMLResponse)
+        async def users_password(request: Request, user_id: int, password: str = Form(...)):
+            require_admin(request)
+            u = await target_user(request, user_id)
+            if len(password) < MIN_PASSWORD:
+                return await users_view(request, error=f"Password: at least {MIN_PASSWORD} characters.", status_code=422)
+            await db(request).set_password(u.id, auth.hash_password(password))
+            await audit(request, "user.password", None, u.username)
+            resp = RedirectResponse("/users", status_code=303)
+            me = current_user(request)
+            if me and me.id == u.id:  # our own session_version just changed: keep this session alive
+                set_session_cookie(resp, await db(request).get_user(u.id))
             return resp
 
     # ── SSE ────────────────────────────────────────────────────────────

@@ -122,7 +122,7 @@ tr.row-deleted td.url a { color: #dc2626; text-decoration: line-through; }
 /* login */
 .login { max-width: 22rem; margin: 4rem auto; }
 .login label { display: block; margin: 1rem 0; }
-.login input[type=password] { width: 100%; padding: .5rem; margin-top: .25rem; }
+.login input { width: 100%; padding: .5rem; margin-top: .25rem; box-sizing: border-box; }
+.whoami { margin-left: auto; display: flex; gap: .4rem; align-items: center; font-size: .9rem; }
 .login .error { color: #b00020; }
-.signout { margin-left: auto; }
 button.link { background: none; border: 0; color: inherit; text-decoration: underline; cursor: pointer; }

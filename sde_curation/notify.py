@@ -25,11 +25,15 @@ class Notifier:
             r = await client.post(url, json=payload)
             r.raise_for_status()
 
-    async def status_changed(self, collection_id: str, old: str | None, new: str, note: str | None) -> None:
-        text = f"*{collection_id}*: {old or '—'} → *{new}*" + (f" — {note}" if note else "")
+    async def status_changed(
+        self, collection_id: str, old: str | None, new: str, note: str | None, actor: str | None = None
+    ) -> None:
+        text = (f"*{collection_id}*: {old or '—'} → *{new}*" + (f" — {note}" if note else "")
+                + (f" (by {actor})" if actor else ""))
         link = f"{self.base_url}/collections/{collection_id}" if self.base_url else ""
         payload = {"text": text + (f"\n{link}" if link else ""),
-                   "collection_id": collection_id, "old_status": old, "new_status": new, "note": note}
+                   "collection_id": collection_id, "old_status": old, "new_status": new, "note": note,
+                   "actor": actor}
         self.sent.append(payload)
         if not self.url:
             return

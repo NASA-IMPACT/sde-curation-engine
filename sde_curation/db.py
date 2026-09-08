@@ -19,8 +19,10 @@ from .models import (
     JobRun,
     JobState,
     Pattern,
+    Role,
     Status,
     StatusHistory,
+    User,
     check_transition,
     utcnow,
 )
@@ -43,7 +45,9 @@ CREATE TABLE IF NOT EXISTS collections (
   updated_at TEXT NOT NULL,
   dump_count INTEGER NOT NULL DEFAULT 0,
   delta_count INTEGER NOT NULL DEFAULT 0,
-  curated_count INTEGER NOT NULL DEFAULT 0
+  curated_count INTEGER NOT NULL DEFAULT 0,
+  last_run_id TEXT,
+  created_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS status_history (
@@ -52,7 +56,8 @@ CREATE TABLE IF NOT EXISTS status_history (
   old_status TEXT,
   new_status TEXT NOT NULL,
   note TEXT,
-  at TEXT NOT NULL
+  at TEXT NOT NULL,
+  actor TEXT
 );
 
 CREATE TABLE IF NOT EXISTS dump_urls (
@@ -98,6 +103,7 @@ CREATE TABLE IF NOT EXISTS patterns (
   match TEXT NOT NULL,
   value TEXT,
   created_at TEXT NOT NULL,
+  created_by TEXT,
   UNIQUE (collection_id, type, match)
 );
 
@@ -119,6 +125,7 @@ CREATE TABLE IF NOT EXISTS pattern_suggestions (
   matches INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL,
+  decided_by TEXT,
   UNIQUE (collection_id, type, match)
 );
 
@@ -134,7 +141,8 @@ CREATE TABLE IF NOT EXISTS index_runs (
   validated_by TEXT,
   error TEXT,
   started_at TEXT NOT NULL,
-  finished_at TEXT
+  finished_at TEXT,
+  started_by TEXT
 );
 CREATE INDEX IF NOT EXISTS index_runs_coll ON index_runs(collection_id, started_at DESC);
 
@@ -148,9 +156,32 @@ CREATE TABLE IF NOT EXISTS job_runs (
   progress TEXT NOT NULL DEFAULT '{}',
   error TEXT,
   started_at TEXT NOT NULL,
-  finished_at TEXT
+  finished_at TEXT,
+  started_by TEXT
 );
 CREATE INDEX IF NOT EXISTS job_runs_coll ON job_runs(collection_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'curator',
+  active INTEGER NOT NULL DEFAULT 1,
+  session_version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- append-only provenance ledger; no FK so it survives collection deletion
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  collection_id TEXT,
+  action TEXT NOT NULL,
+  detail TEXT
+);
+CREATE INDEX IF NOT EXISTS audit_log_coll ON audit_log(collection_id, id DESC);
 """
 
 
@@ -163,7 +194,7 @@ class Database:
         self.path = str(path)
         self.exclusive = exclusive
         self._conn: aiosqlite.Connection | None = None
-        # optional async hook(collection_id, old_status, new_status, note) after every transition
+        # optional async hook(collection_id, old_status, new_status, note, actor) after every history row
         self.on_status_change = None
 
     @property
@@ -187,18 +218,24 @@ class Database:
         return self
 
     async def _migrate(self) -> None:
-        """Rename legacy *_ml columns to *_ai on databases created before the rename."""
+        """Idempotent schema evolution for databases created by earlier versions."""
         cur = await self._conn.execute("PRAGMA table_info(delta_urls)")
         cols = {r[1] for r in await cur.fetchall()}
         for f in ("title", "division", "document_type"):
-            if f"{f}_ml" in cols:
+            if f"{f}_ml" in cols:  # legacy *_ml → *_ai rename
                 await self._conn.execute(f"ALTER TABLE delta_urls RENAME COLUMN {f}_ml TO {f}_ai")
-        cur = await self._conn.execute("PRAGMA table_info(collections)")
-        if "last_run_id" not in {r[1] for r in await cur.fetchall()}:
-            await self._conn.execute("ALTER TABLE collections ADD COLUMN last_run_id TEXT")
-        cur = await self._conn.execute("PRAGMA table_info(index_runs)")
-        if "validated_by" not in {r[1] for r in await cur.fetchall()}:
-            await self._conn.execute("ALTER TABLE index_runs ADD COLUMN validated_by TEXT")
+        for table, col in (
+            ("collections", "last_run_id"), ("index_runs", "validated_by"),
+            # provenance (rows from before these columns existed keep NULL = unknown)
+            ("collections", "created_by"), ("status_history", "actor"), ("patterns", "created_by"),
+            ("pattern_suggestions", "decided_by"), ("index_runs", "started_by"), ("job_runs", "started_by"),
+        ):
+            await self._add_column(table, col, "TEXT")
+
+    async def _add_column(self, table: str, col: str, ddl: str) -> None:
+        cur = await self._conn.execute(f"PRAGMA table_info({table})")
+        if col not in {r[1] for r in await cur.fetchall()}:
+            await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -214,17 +251,17 @@ class Database:
     async def insert_collection(self, c: Collection) -> Collection:
         await self.conn.execute(
             """INSERT INTO collections (collection_id,name,seed_url,division,document_type,connector,
-               max_pages,status,needs_recuration,created_at,updated_at,dump_count,delta_count,curated_count)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               max_pages,status,needs_recuration,created_at,updated_at,dump_count,delta_count,curated_count,
+               created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 c.collection_id, c.name, c.seed_url, c.division, c.document_type, c.connector,
                 c.max_pages, c.status, int(c.needs_recuration), _iso(c.created_at),
-                _iso(c.updated_at), c.dump_count, c.delta_count, c.curated_count,
+                _iso(c.updated_at), c.dump_count, c.delta_count, c.curated_count, c.created_by,
             ),
         )
         await self.conn.execute(
-            "INSERT INTO status_history (collection_id,old_status,new_status,note,at) VALUES (?,?,?,?,?)",
-            (c.collection_id, None, c.status, "created", _iso(utcnow())),
+            "INSERT INTO status_history (collection_id,old_status,new_status,note,at,actor) VALUES (?,?,?,?,?,?)",
+            (c.collection_id, None, c.status, "created", _iso(utcnow()), c.created_by),
         )
         await self.conn.commit()
         return c
@@ -248,7 +285,8 @@ class Database:
         return cur.rowcount > 0
 
     async def set_status(
-        self, collection_id: str, new: Status, note: str | None = None, *, force: bool = False
+        self, collection_id: str, new: Status, note: str | None = None, *, force: bool = False,
+        actor: str | None = None,
     ) -> Collection:
         c = await self.get_collection(collection_id)
         if c is None:
@@ -261,13 +299,13 @@ class Database:
             (new, _iso(now), collection_id),
         )
         await self.conn.execute(
-            "INSERT INTO status_history (collection_id,old_status,new_status,note,at) VALUES (?,?,?,?,?)",
-            (collection_id, c.status, new, note, _iso(now)),
+            "INSERT INTO status_history (collection_id,old_status,new_status,note,at,actor) VALUES (?,?,?,?,?,?)",
+            (collection_id, c.status, new, note, _iso(now), actor),
         )
         await self.conn.commit()
-        if self.on_status_change and new != c.status:
+        if self.on_status_change:  # every history row (the hook decides what to notify / persist)
             try:
-                await self.on_status_change(collection_id, c.status, new, note)
+                await self.on_status_change(collection_id, c.status, new, note, actor)
             except Exception as e:  # noqa: BLE001 - notifications must never break a transition
                 logging.getLogger(__name__).warning("status hook failed: %s", e)
         c.status, c.updated_at = new, now
@@ -358,13 +396,15 @@ class Database:
             return {}
         marks = ",".join("?" * len(urls))
         cur = await self.conn.execute(
-            f"""SELECT e.url, e.field, p.type, p.match, p.value FROM pattern_effects e
+            f"""SELECT e.url, e.field, p.type, p.match, p.value, p.created_by FROM pattern_effects e
                 JOIN patterns p ON p.id=e.pattern_id
                 WHERE e.collection_id=? AND e.url IN ({marks})""", [collection_id, *urls],
         )
         out: dict[str, dict[str, str]] = {}
-        for url, field, ptype, match, value in await cur.fetchall():
-            out.setdefault(url, {})[field] = f"{ptype} {match}" + (f" → {value}" if value else "")
+        for url, field, ptype, match, value, by in await cur.fetchall():
+            out.setdefault(url, {})[field] = (
+                f"{ptype} {match}" + (f" → {value}" if value else "") + (f" (by {by})" if by else "")
+            )
         return out
 
     async def list_curated(
@@ -497,10 +537,10 @@ class Database:
     async def insert_index_run(self, r: IndexRun) -> IndexRun:
         await self.conn.execute(
             """INSERT INTO index_runs (run_id,collection_id,target,state,exported,external_ref,status,validation,
-               validated_by,error,started_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               validated_by,error,started_at,finished_at,started_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (r.run_id, r.collection_id, r.target, r.state, r.exported, r.external_ref,
              json.dumps(r.status) if r.status else None, json.dumps(r.validation) if r.validation else None,
-             r.validated_by, r.error, _iso(r.started_at), _iso(r.finished_at)),
+             r.validated_by, r.error, _iso(r.started_at), _iso(r.finished_at), r.started_by),
         )
         await self.conn.execute(
             "UPDATE collections SET last_run_id=?, updated_at=? WHERE collection_id=?",
@@ -581,9 +621,12 @@ class Database:
         row = await cur.fetchone()
         return dict(row) if row else None
 
-    async def set_pattern_suggestion_state(self, collection_id: str, sid: int, state: str) -> None:
+    async def set_pattern_suggestion_state(
+        self, collection_id: str, sid: int, state: str, *, actor: str | None = None
+    ) -> None:
         await self.conn.execute(
-            "UPDATE pattern_suggestions SET state=? WHERE id=? AND collection_id=?", (state, sid, collection_id)
+            "UPDATE pattern_suggestions SET state=?, decided_by=? WHERE id=? AND collection_id=?",
+            (state, actor, sid, collection_id),
         )
         await self.conn.commit()
 
@@ -608,8 +651,8 @@ class Database:
 
     async def insert_pattern(self, p: Pattern) -> Pattern:
         cur = await self.conn.execute(
-            "INSERT INTO patterns (collection_id,type,match,value,created_at) VALUES (?,?,?,?,?)",
-            (p.collection_id, p.type, p.match, p.value, _iso(p.created_at)),
+            "INSERT INTO patterns (collection_id,type,match,value,created_at,created_by) VALUES (?,?,?,?,?,?)",
+            (p.collection_id, p.type, p.match, p.value, _iso(p.created_at), p.created_by),
         )
         await self.conn.commit()
         p.id = cur.lastrowid
@@ -633,10 +676,10 @@ class Database:
     async def insert_job(self, j: JobRun) -> JobRun:
         cur = await self.conn.execute(
             """INSERT INTO job_runs (collection_id,kind,state,run_id,external_ref,progress,error,
-               started_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?)""",
+               started_at,finished_at,started_by) VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
                 j.collection_id, j.kind, j.state, j.run_id, j.external_ref,
-                json.dumps(j.progress), j.error, _iso(j.started_at), _iso(j.finished_at),
+                json.dumps(j.progress), j.error, _iso(j.started_at), _iso(j.finished_at), j.started_by,
             ),
         )
         await self.conn.commit()
@@ -685,3 +728,80 @@ class Database:
             "SELECT * FROM job_runs WHERE state IN ('queued','running') ORDER BY id"
         )
         return [self._job(r) for r in await cur.fetchall()]
+
+    # ── users ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _user(row: Any) -> User:
+        d = dict(row)
+        d["active"] = bool(d["active"])
+        return User(**d)
+
+    async def create_user(self, username: str, password_hash: str, role: Role = Role.CURATOR) -> User:
+        """Raises sqlite3.IntegrityError when the username (case-insensitive) is taken."""
+        now = _iso(utcnow())
+        cur = await self.conn.execute(
+            "INSERT INTO users (username,password_hash,role,active,session_version,created_at,updated_at) "
+            "VALUES (?,?,?,1,1,?,?)",
+            (username, password_hash, role, now, now),
+        )
+        await self.conn.commit()
+        return (await self.get_user(cur.lastrowid))  # type: ignore[return-value]
+
+    async def get_user(self, user_id: int) -> User | None:
+        cur = await self.conn.execute("SELECT * FROM users WHERE id=?", (user_id,))
+        row = await cur.fetchone()
+        return self._user(row) if row else None
+
+    async def get_user_by_username(self, username: str) -> User | None:
+        cur = await self.conn.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,))
+        row = await cur.fetchone()
+        return self._user(row) if row else None
+
+    async def list_users(self) -> list[User]:
+        cur = await self.conn.execute("SELECT * FROM users ORDER BY username COLLATE NOCASE")
+        return [self._user(r) for r in await cur.fetchall()]
+
+    async def count_users(self) -> int:
+        cur = await self.conn.execute("SELECT COUNT(*) FROM users")
+        return (await cur.fetchone())[0]
+
+    async def set_password(self, user_id: int, password_hash: str) -> None:
+        """Also invalidates every existing session of that user."""
+        await self.conn.execute(
+            "UPDATE users SET password_hash=?, session_version=session_version+1, updated_at=? WHERE id=?",
+            (password_hash, _iso(utcnow()), user_id),
+        )
+        await self.conn.commit()
+
+    async def set_role(self, user_id: int, role: Role) -> None:
+        await self.conn.execute(
+            "UPDATE users SET role=?, updated_at=? WHERE id=?", (role, _iso(utcnow()), user_id)
+        )
+        await self.conn.commit()
+
+    async def set_active(self, user_id: int, active: bool) -> None:
+        await self.conn.execute(
+            "UPDATE users SET active=?, updated_at=? WHERE id=?", (int(active), _iso(utcnow()), user_id)
+        )
+        await self.conn.commit()
+
+    # ── audit ledger ───────────────────────────────────────────────────
+
+    async def audit(
+        self, actor: str, action: str, collection_id: str | None = None, detail: str | None = None
+    ) -> None:
+        await self.conn.execute(
+            "INSERT INTO audit_log (at,actor,collection_id,action,detail) VALUES (?,?,?,?,?)",
+            (_iso(utcnow()), actor, collection_id, action, detail),
+        )
+        await self.conn.commit()
+
+    async def list_audit(self, collection_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if collection_id is None:
+            cur = await self.conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
+        else:
+            cur = await self.conn.execute(
+                "SELECT * FROM audit_log WHERE collection_id=? ORDER BY id DESC LIMIT ?", (collection_id, limit)
+            )
+        return [dict(r) for r in await cur.fetchall()]

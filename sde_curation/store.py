@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
 
-from .models import Collection, Pattern
+from .models import Collection, Pattern, StatusHistory
 
 
 def collection_dir(root: Path, collection_id: str) -> Path:
@@ -16,9 +17,13 @@ def collection_dir(root: Path, collection_id: str) -> Path:
     return d
 
 
-def write_collection_yaml(root: Path, c: Collection) -> Path:
+def write_collection_yaml(root: Path, c: Collection, history: Sequence[StatusHistory] = ()) -> Path:
+    """collection.yaml = the collection record plus its status history with actors (provenance)."""
     path = collection_dir(root, c.collection_id) / "collection.yaml"
     data = c.model_dump(mode="json", exclude={"dump_count", "delta_count", "curated_count"})
+    data["history"] = [
+        h.model_dump(mode="json", include={"at", "old_status", "new_status", "note", "actor"}) for h in history
+    ]
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return path
 

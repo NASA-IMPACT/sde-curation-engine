@@ -75,9 +75,11 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost:8080"  # used in notification links
 
     # ── access control (deployed only) ─────────────────────────────────
-    # One shared password gates every page and API route except /health, /login and /static.
-    # Unset = no auth (local dev, tests). SESSION_SECRET signs the cookie; when unset a random
-    # per-process secret is used, so a restart logs everyone out.
+    # Login with local user accounts gates every page and API route except /health, /login and
+    # /static. APP_PASSWORD switches it on and seeds the bootstrap `admin` account with that value
+    # (only while the users table is empty; later changes to the secret do nothing). Unset = no
+    # auth (local dev, tests). SESSION_SECRET signs the cookie; when unset a random per-process
+    # secret is used, so a restart logs everyone out.
     app_password: str | None = None
     session_secret: str | None = None
     session_ttl_s: int = 12 * 3600

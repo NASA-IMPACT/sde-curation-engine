@@ -135,9 +135,13 @@ account, same model as `sde-api-scrapers`); pull requests only run tests. Accoun
 (instance ids, buckets, endpoints, role ARNs) are not in git — they live in SSM Parameter Store per
 environment and are resolved at deploy time; API keys and the login password are Secrets Manager
 secrets set once per environment. Step-by-step runbook (one-time account setup, first deploy,
-verification): `docs/deploy-dev.md`; stack reference and the exact IAM the task role gets:
-`infra/README.md`. Set `APP_PASSWORD` to require a login (the deployment does; locally it is off so
-the UI and tests run unauthenticated).
+verification): `docs/deploy-dev.md`; manual end-to-end test plan: `docs/e2e-test.md`; stack reference and the exact IAM the task role gets:
+`infra/README.md`. `APP_PASSWORD` turns on login and seeds the first `admin` account with that value (only while the
+users table is empty); admins create accounts at `/users`, everyone changes their own password at
+`/account`. Roles: admin (users, delete collections), curator (everything else). Every action is
+attributed to the signed-in user: status history, patterns, jobs, an append-only audit trail
+(Activity tab, `/api/collections/{id}/audit`) and the per-collection `collection.yaml` /
+`patterns.yaml`. Locally it is off, so the UI and tests run as `anonymous`.
 
 ### Curation semantics
 Effective value per URL = the most specific matching pattern (smallest match set, tie → longest
@@ -174,7 +178,7 @@ unapply (next most specific → curated → NULL). Diff + apply run as one idemp
 | `VALIDATION_DELAY_S`, `VALIDATION_TITLE_MATCH_THRESHOLD`, `VALIDATION_ASSUME_ROLE_ARN` | validation gate |
 | `NOTIFY_WEBHOOK_URL`, `PUBLIC_BASE_URL` | Slack-compatible notifications on every status change |
 | `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.4-mini`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` | LLM assist; any OpenAI-compatible endpoint |
-| `APP_PASSWORD`, `SESSION_SECRET`, `SESSION_TTL_S`, `AUTH_COOKIE_SECURE` | shared-password login (off when `APP_PASSWORD` is empty); `/health` stays open |
+| `APP_PASSWORD`, `SESSION_SECRET`, `SESSION_TTL_S`, `AUTH_COOKIE_SECURE` | login with local accounts (off when `APP_PASSWORD` is empty; the value seeds the bootstrap `admin`); `/health` stays open |
 | `DB_LOCKING_MODE` (`normal`\|`exclusive`) | `exclusive` when `engine.db` lives on EFS/NFS |
 
 ## API
@@ -231,7 +235,7 @@ sde_curation/
   llm/             base.py (provider protocol + registry), openai.py, fake.py, tasks.py (prompts, sanity filters)
   jobs.py          JobManager: background tasks, cancel, recovery, SSE events
   events.py        in-process event bus → SSE
-  web/             FastAPI app, auth.py (shared-password login), Jinja templates, vendored htmx (+sse, json-enc)
+  web/             FastAPI app, auth.py (local users, roles, signed sessions), Jinja templates, vendored htmx (+sse, json-enc)
 tests/             pytest; fake crawler fixture, moto for AWS, state-matrix
 infra/             AWS CDK (Python): Fargate + EFS + ALB + CloudFront/WAF; bootstrap/ = GitHub deploy role
 .github/workflows/ deploy.yml (push to dev|test|prod → cdk deploy), test.yml (PRs)

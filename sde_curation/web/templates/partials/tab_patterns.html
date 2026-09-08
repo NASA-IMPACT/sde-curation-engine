@@ -52,11 +52,12 @@
   <h2>Patterns <span class="count">{{ patterns|length }}</span></h2>
   {% if patterns %}
   <table>
-    <thead><tr><th>Type</th><th>Match</th><th>Value</th><th title="URLs in the current crawl this pattern matches">Matches</th><th>Added</th><th></th></tr></thead>
+    <thead><tr><th>Type</th><th>Match</th><th>Value</th><th title="URLs in the current crawl this pattern matches">Matches</th><th>Added</th><th>By</th><th></th></tr></thead>
     <tbody>{% for p in patterns %}
       <tr><td><span class="ptype {{ p.type }}">{{ p.type }}</span></td><td><code>{{ p.match }}</code></td><td>{{ p.value or '' }}</td>
           <td class="num"><a href="/collections/{{ cid }}?tab=urls&set=deltas&q={{ p.match|replace('*','')|urlencode }}" title="show matching deltas">{{ p.matches }}</a></td>
           <td class="muted small">{{ p.created_at[:16]|replace('T',' ') }}</td>
+          <td class="small">{{ p.created_by or '' }}</td>
           <td><button class="danger" aria-label="delete pattern" {% if running %}disabled{% endif %} hx-delete="/api/collections/{{ cid }}/patterns/{{ p.id }}" hx-swap="none" hx-confirm="Delete pattern? Its effects are unapplied (next most specific pattern → curated value → empty).">×</button></td></tr>
     {% endfor %}</tbody>
   </table>
