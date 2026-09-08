@@ -1,6 +1,6 @@
 """CDK app for sde-curation-engine.
 
-    cd infra && AWS_PROFILE=sde-dev uv run cdk deploy -c environment=dev
+    cd infra && . .venv/bin/activate && AWS_PROFILE=sde-dev cdk deploy -c environment=dev
 
 One stack per environment (`CurationEngine-<env>`). The target account is whatever the active AWS
 profile resolves to (CDK_DEFAULT_ACCOUNT); everything account-specific is read from SSM Parameter

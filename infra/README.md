@@ -34,13 +34,13 @@ Step-by-step, including the one-time account setup: `docs/deploy-dev.md`.
 
 ## Prerequisites
 - Docker running (the image is built locally for linux/amd64 and pushed by CDK).
-- `cdk` CLI (`npm i -g aws-cdk`), `uv`, and an SSO session: `aws sso login --profile sde-dev`.
+- Python 3.13 (or uv), the `cdk` CLI (`npm i -g aws-cdk`), and an SSO session: `aws sso login --profile sde-dev`.
 - The account is CDK-bootstrapped with qualifier `sde`
   (`cdk bootstrap aws://<account>/us-east-1 --qualifier sde --profile <profile>`; dev already is).
 
 ## Manual deploy (from the repo root; `ENV=dev PROFILE=sde-dev` are the defaults)
 ```bash
-make infra-install            # uv sync in infra/
+make infra-install            # infra/.venv: `uv sync` if uv is installed, else venv + pip -r requirements-dev.txt
 make infra-test               # synth assertions
 cp infra/envs/example.json infra/envs/dev.json   # fill in the account's values (ask a maintainer)
 make infra-seed ENV=dev       # → SSM /sde-curation-engine/dev/*

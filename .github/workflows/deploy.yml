@@ -18,6 +18,7 @@ on:
       - 'Dockerfile'
       - '.dockerignore'
       - 'pyproject.toml'
+      - 'requirements.txt'
       - 'uv.lock'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
@@ -49,20 +50,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v10
+      - uses: actions/setup-python@v6
         with:
-          enable-cache: true
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            infra/requirements-dev.txt
+      - name: Install
+        run: |
+          pip install -r requirements-dev.txt -e .
+          pip install -r infra/requirements-dev.txt
+      - name: requirements*.txt match uv.lock
+        run: |
+          pip install -q uv
+          make requirements-check
       - name: App tests + lint
         run: |
-          uv sync --frozen
-          uv run pytest -q
-          uv run ruff check sde_curation tests
+          python -m pytest -q
+          python -m ruff check sde_curation tests
       - name: Infra synth assertions
         working-directory: infra
         run: |
-          uv sync --frozen
-          uv run ruff check .
-          uv run pytest -q
+          python -m ruff check .
+          python -m pytest -q
         env:
           JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION: '1'
 
@@ -77,28 +88,32 @@ jobs:
       cloudfront_url: ${{ steps.outputs.outputs.cloudfront_url }}
     steps:
       - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v10
+      - uses: actions/setup-python@v6
         with:
-          enable-cache: true
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            infra/requirements-dev.txt
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - name: Install CDK CLI
-        run: npm install -g aws-cdk
-      - name: Install infra dependencies
-        run: uv sync --frozen
+      - name: Install CDK CLI and infra dependencies
+        run: |
+          npm install -g aws-cdk
+          pip install -r requirements-dev.txt
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.AWS_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
       - name: CDK diff
-        run: uv run cdk diff CurationEngine-${{ env.ENVIRONMENT }} -c environment=${{ env.ENVIRONMENT }}
+        run: cdk diff CurationEngine-${{ env.ENVIRONMENT }} -c environment=${{ env.ENVIRONMENT }}
         env:
           JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION: '1'
       - name: CDK deploy
         run: |
-          uv run cdk deploy CurationEngine-${{ env.ENVIRONMENT }} \
+          cdk deploy CurationEngine-${{ env.ENVIRONMENT }} \
             -c environment=${{ env.ENVIRONMENT }} \
             --require-approval never \
             --outputs-file outputs.json

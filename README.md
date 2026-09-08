@@ -17,9 +17,9 @@ WEB_COSMOS test indexing, validation gate, prod indexing, notifications.
 ## Quick start
 ```bash
 cp .env.example .env      # sibling repo paths, AWS values, OPENAI_API_KEY (or LLM_PROVIDER=fake)
-uv sync
+make install              # uv sync if uv is installed, else python3.13 venv + pip -r requirements-dev.txt
 make run                  # http://localhost:8080   (8000 is taken by sde-elastic-wrapper)
-make test                 # 66 tests, incl. a state-matrix that fires every action in every status
+make test                 # 91 tests, incl. a state-matrix that fires every action in every status
 make lint
 ```
 
@@ -27,10 +27,16 @@ Crawler prerequisite (one-off): the local scrape backend runs `run.py` from
 `../sde-crawl4ai-scraper-v1` with its own Python 3.11 venv:
 ```bash
 cd ../sde-crawl4ai-scraper-v1
-uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -r requirements.txt
+python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m playwright install chromium
 ```
 Point `CRAWLER_PYTHON` in `.env` elsewhere if you use a different interpreter.
+
+**Dependencies** — `pyproject.toml` + `uv.lock` (and the same pair in `infra/`) are the source of
+truth. `requirements.txt` / `requirements-dev.txt` are exported from the locks and committed, so a
+developer without uv, CI, and the Docker image all install the exact same versions with pip.
+Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, commit all four files
+(CI fails if the exports are stale). Never edit `requirements*.txt` by hand.
 
 ## Using it
 1. **Dashboard** (`/`): add a collection (seed URL, name, division, max pages). Each row shows
@@ -229,5 +235,5 @@ sde_curation/
 tests/             pytest; fake crawler fixture, moto for AWS, state-matrix
 infra/             AWS CDK (Python): Fargate + EFS + ALB + CloudFront/WAF; bootstrap/ = GitHub deploy role
 .github/workflows/ deploy.yml (push to dev|test|prod → cdk deploy), test.yml (PRs)
-Dockerfile         python:3.13-slim + uv, non-root, uvicorn on 8080
+Dockerfile         python:3.13-slim + pip -r requirements.txt (exported from uv.lock), non-root, uvicorn on 8080
 ```

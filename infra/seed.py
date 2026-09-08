@@ -1,6 +1,6 @@
 """Write the account-specific values for one environment into SSM Parameter Store.
 
-    uv run python seed.py dev [--profile sde-dev]
+    python3 seed.py dev [--profile sde-dev]
 
 Reads infra/envs/<env>.json (gitignored; see envs/example.json), checks it has exactly the keys in
 config.PARAMS, and `aws ssm put-parameter --overwrite`s each one. Re-run after changing a value,

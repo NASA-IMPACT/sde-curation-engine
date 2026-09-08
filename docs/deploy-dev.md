@@ -69,7 +69,7 @@ Everything in this section is done once per AWS account. Dev needs it before the
 
 **Step 1 — install** (macOS with Homebrew; on Linux use your package manager for the same tools):
 ```bash
-brew install uv awscli gh jq node
+brew install python@3.13 awscli gh jq node   # uv is optional: `brew install uv` and `make install` will use it
 npm install -g aws-cdk
 brew install --cask docker            # only needed for a manual `make deploy`; CI builds the image otherwise
 ```
@@ -87,7 +87,7 @@ region makes every `aws` command fail with "You must specify a region".
 
 **Step 3 — verify** every tool answers:
 ```bash
-uv --version && cdk --version && gh --version && jq --version
+python3.13 --version && cdk --version && gh --version && jq --version   # (or `uv --version` if you use uv)
 aws sts get-caller-identity --profile sde-dev      # → your account id + role; that account is "dev"
 gh auth status                                      # logged in to github.com
 docker info >/dev/null && echo docker ok            # only for the manual path
@@ -95,8 +95,8 @@ docker info >/dev/null && echo docker ok            # only for the manual path
 
 **Step 4 — install the project dependencies** from the repository root:
 ```bash
-make infra-install                    # uv sync in infra/  (CDK libraries)
-uv sync                               # app dependencies, for `make test`
+make install                          # .venv: `uv sync` if uv is on PATH, otherwise python3.13 venv + pip (same pinned versions)
+make infra-install                    # infra/.venv, same rule, with the CDK libraries
 ```
 
 ### 2.2 CDK bootstrap
@@ -133,7 +133,7 @@ none, add `-c create_oidc_provider=true` in step 2 (see the second command).
 aws sso login --profile sde-dev
 make bootstrap-github ENV=dev PROFILE=sde-dev
 # account without the OIDC provider (not dev):
-# cd infra && AWS_PROFILE=sde-dev uv run cdk --app "uv run python bootstrap/app.py" deploy CurationEngine-Bootstrap-dev -c environment=dev -c create_oidc_provider=true
+# cd infra && . .venv/bin/activate && AWS_PROFILE=sde-dev cdk --app "python bootstrap/app.py" deploy CurationEngine-Bootstrap-dev -c environment=dev -c create_oidc_provider=true
 ```
 This creates `GitHubActions-CurationEngine-DEV`, trusted only by
 `repo:NASA-IMPACT/sde-curation-engine:ref:refs/heads/dev`, allowed only to assume the CDK toolkit
