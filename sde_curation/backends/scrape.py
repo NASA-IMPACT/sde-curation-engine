@@ -84,6 +84,16 @@ class LogProgress:
             return True
         return False
 
+    def feed_tail(self, lines: list[str]) -> bool:
+        """Feed a `tail -n N` snapshot that overlaps the previous one: page lines carry their
+        sequence number, so anything at or below what we already counted is skipped."""
+        changed = False
+        for line in lines:
+            if (m := _PAGE_RE.match(line)) and int(m.group(1)) <= self.processed:
+                continue
+            changed |= self.feed(line)
+        return changed
+
     def snapshot(self) -> dict[str, Any]:
         return {"processed": self.processed, "docs": self.ok, "failed": self.failed}
 
@@ -186,10 +196,64 @@ class LocalSubprocessScraper:
 # ── remote EC2 via SSM ─────────────────────────────────────────────────
 
 
+@dataclass
+class RemotePoll:
+    """One look at the crawler host: is our job still in the inbox, has the crawler touched
+    our log since we submitted, and what are the last log lines."""
+
+    inbox: bool = False  # jobs/incoming/<cid>.json still present (queued or running)
+    jobs: int = 0  # *.json files in the inbox, ours included
+    watcher: int | None = None  # watch_inbox.sh processes; None if unknown
+    log_mtime: datetime | None = None
+    tail: list[str] = field(default_factory=list)
+
+    def fresh(self, submitted: datetime) -> bool:
+        """True once the crawler has written our log after we dropped the job."""
+        return self.log_mtime is not None and self.log_mtime >= submitted
+
+
+def parse_poll(out: str) -> RemotePoll:
+    poll = RemotePoll()
+    tail: list[str] = []
+    for line in out.splitlines():
+        if line.startswith("@@inbox="):
+            poll.inbox = line[8:].strip() == "1"
+        elif line.startswith("@@jobs="):
+            poll.jobs = _int(line[7:])
+        elif line.startswith("@@watcher="):
+            v = line[10:].strip()
+            poll.watcher = _int(v) if v else None
+        elif line.startswith("@@mtime="):
+            v = line[8:].strip()
+            poll.log_mtime = datetime.fromtimestamp(int(v), UTC) if v.isdigit() else None
+        else:
+            tail.append(line)
+    poll.tail = tail
+    return poll
+
+
+def _int(v: str) -> int:
+    try:
+        return int(v.strip())
+    except ValueError:
+        return 0
+
+
 class SsmRemoteScraper:
     """Port of scripts/drop_job.sh: write the job JSON into the EC2 inbox through SSM,
     then wait for the documents object to appear in S3 (uploaded by run.py on success).
-    Failure is detected from the tail of the remote job log."""
+
+    The crawler's watch_inbox.sh runs one run.py at a time under flock, and run.py only
+    picks up the inbox files that exist when it starts — so a job dropped while a batch is
+    running waits for the whole batch. We therefore track two phases:
+
+    * queued  — our job file is in the inbox and our log has not been touched since we
+      submitted. No clock runs: a queue can legitimately be days long. Only a dead watcher
+      (or the job file disappearing) fails it; the UI shows how long it has waited.
+    * running — the crawler rewrote our log after submission. The stall clock
+      (INDEX_STALL_TIMEOUT_S) restarts on every change to the log tail.
+
+    The log is only read once it is fresh, so a previous run's `# exit=1` cannot fail a new job."""
 
     name = "ssm"
 
@@ -210,6 +274,17 @@ class SsmRemoteScraper:
             "set -euo pipefail\n"
             f"cat > {inbox}/{cid}.json <<'JOB'\n{json.dumps(job)}\nJOB\n"
             f"chown ec2-user:ec2-user {inbox}/{cid}.json\n"
+        )
+
+    def poll_script(self, cid: str) -> str:
+        inbox = self.s.crawler_remote_inbox
+        log = f"{self.remote_root}/logs/jobs/{cid}.log"
+        return (
+            f"[ -f {inbox}/{cid}.json ] && echo '@@inbox=1' || echo '@@inbox=0'\n"
+            f"echo \"@@jobs=$(ls {inbox}/*.json 2>/dev/null | wc -l)\"\n"
+            "echo \"@@watcher=$(pgrep -fc watch_inbox || true)\"\n"
+            f"echo \"@@mtime=$(stat -c %Y {log} 2>/dev/null || true)\"\n"
+            f"tail -n 5 {log} 2>/dev/null || true\n"
         )
 
     async def _send(self, script: str) -> str:
@@ -247,40 +322,74 @@ class SsmRemoteScraper:
             return None
         return r["ETag"], r["LastModified"]
 
+    async def _poll(self, cid: str) -> RemotePoll | None:
+        status, out = await self._invocation(await self._send(self.poll_script(cid)))
+        return parse_poll(out) if status == "Success" else None
+
     async def run(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult:
         cid = collection.collection_id
         docs_key = f"scraped_collections/{cid}.json"
         summary_key = f"failure_logs/{cid}_failures_summary.json"
         before = await self._head(docs_key)
-        # S3 LastModified has 1-second resolution: floor our own timestamp so an upload
-        # landing in the same second still counts, and also accept any ETag change.
+        # S3 LastModified and the remote log mtime have 1-second resolution: floor our own
+        # timestamp so a write landing in the same second still counts.
         submitted = datetime.now(UTC).replace(microsecond=0)
 
         cmd_id = await self._send(self.remote_script(build_job(collection)))
         status, out = await self._invocation(cmd_id)
         if status != "Success":
             raise ScrapeError(f"SSM job drop {status}: {out[-400:]}")
-        await on_progress({"ssm_command": cmd_id, "processed": 0, "docs": 0, "failed": 0})
+        await on_progress({"ssm_command": cmd_id, "processed": 0, "docs": 0, "failed": 0, "queued": True})
 
-        log = f"{self.remote_root}/logs/jobs/{cid}.log"
+        def uploaded(now: tuple[str, datetime] | None) -> bool:
+            return now is not None and now != before and (before is None or now[1] >= submitted)
+
         progress = LogProgress()
-        t0 = time.monotonic()
+        queued = True
+        last_activity = time.monotonic()
         while True:
             await asyncio.sleep(self.s.scrape_poll_interval_s)
-            now = await self._head(docs_key)
-            if now is not None and now != before and (before is None or now[1] >= submitted):
+            if uploaded(await self._head(docs_key)):
                 break
-            tail_id = await self._send(f"tail -n 5 {log} 2>/dev/null || true")
-            _, tail = await self._invocation(tail_id)
-            changed = False
-            for line in tail.splitlines():
-                changed |= progress.feed(line)
+            poll = await self._poll(cid)
+            if poll is None:  # SSM hiccup: neither evidence of life nor of death
+                continue
+            if not poll.fresh(submitted):
+                if not poll.inbox:
+                    raise ScrapeError(
+                        "job file vanished from the crawler inbox before the crawl started"
+                    )
+                if poll.watcher == 0:
+                    raise ScrapeError(
+                        "crawler inbox watcher (watch_inbox.sh) is not running; job left in the inbox"
+                    )
+                await on_progress({"queued": True, "queue_ahead": max(poll.jobs - 1, 0)})
+                continue
+            if queued:  # first sign of the crawler working on our job
+                queued = False
+                last_activity = time.monotonic()
+                await on_progress({"queued": False, "queue_ahead": 0})
+            changed = progress.feed_tail(poll.tail)
             if progress.exit_code == 1:
-                raise ScrapeError(f"remote crawler failed: {progress.error or tail[-400:]}")
+                raise ScrapeError(
+                    f"remote crawler failed: {progress.error or ' '.join(poll.tail)[-400:]}"
+                )
             if changed:
+                last_activity = time.monotonic()
                 await on_progress(progress.snapshot())
-            if time.monotonic() - t0 > self.s.index_stall_timeout_s:
-                raise ScrapeError("remote crawl timed out waiting for S3 documents object")
+            if progress.exit_code == 0:
+                # run.py uploads before writing exit=0, so the object is there or never will be
+                if uploaded(await self._head(docs_key)):
+                    break
+                raise ScrapeError(
+                    "remote crawler finished but uploaded no documents object "
+                    "(is SDE_S3_BUCKET set on the crawler host?)"
+                )
+            stalled = time.monotonic() - last_activity
+            if stalled > self.s.index_stall_timeout_s:
+                raise ScrapeError(
+                    f"remote crawl stalled: no log activity for {stalled / 3600:.1f}h"
+                )
 
         local = self.s.data_dir / "scrapes" / f"{cid}.json"
         local.parent.mkdir(parents=True, exist_ok=True)

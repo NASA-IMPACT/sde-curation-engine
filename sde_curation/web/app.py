@@ -8,6 +8,7 @@ import sqlite3
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -38,6 +39,7 @@ from ..models import (
     Role,
     Status,
     User,
+    utcnow,
 )
 from ..notify import Notifier
 from ..store import remove_collection_files, write_collection_yaml, write_patterns_yaml
@@ -52,7 +54,23 @@ def dom_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", value)
 
 
+def since(dt: datetime) -> str:
+    """Compact elapsed time since `dt`: 45s, 12m, 3h 10m, 2d 4h."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    s = max(int((utcnow() - dt).total_seconds()), 0)
+    if s < 60:
+        return f"{s}s"
+    m, h, d = s // 60, s // 3600, s // 86400
+    if h < 1:
+        return f"{m}m"
+    if d < 1:
+        return f"{h}h {m % 60}m"
+    return f"{d}d {h % 24}h"
+
+
 templates.env.filters["dom_id"] = dom_id
+templates.env.filters["since"] = since
 
 PIPELINE = [
     (Status.BACKLOG, "Backlog", "Collection registered"),

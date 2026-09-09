@@ -5,7 +5,8 @@
   <td title="Pending changes to review"><a href="/collections/{{ c.collection_id }}?tab=urls&set=deltas">{{ c.delta_count }}</a></td>
   <td title="Approved URLs">{{ c.curated_count }}</td>
   <td>{% if job %}<span class="job j-{{ job.state }}" title="{{ job.error or '' }}">{{ job.kind }} · {{ job.state }}</span>
-      {% if job.progress.docs is defined %}<small class="muted"> {{ job.progress.docs }} docs{% if job.progress.failed %} / {{ job.progress.failed }} failed{% endif %}</small>{% endif %}
+      {% if job.state == 'running' and job.progress.queued %}<small class="muted"> queued {{ job.started_at|since }}{% if job.progress.queue_ahead %} behind {{ job.progress.queue_ahead }} crawl{{ 's' if job.progress.queue_ahead != 1 }}{% endif %}</small>
+      {% elif job.progress.docs is defined %}<small class="muted"> {{ job.progress.docs }} docs{% if job.progress.failed %} / {{ job.progress.failed }} failed{% endif %}</small>{% endif %}
       {% if job.state == 'failed' and job.error %}<br><small class="err">{{ job.error[:90] }}</small>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
   <td><time datetime="{{ c.updated_at.isoformat() }}">{{ c.updated_at.strftime('%m-%d %H:%M') }}</time></td>
   <td class="actions">{% include "partials/action.html" %}</td>

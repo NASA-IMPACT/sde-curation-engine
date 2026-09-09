@@ -11,7 +11,7 @@
     <div class="badges">
       <span class="status s-{{ c.status }}" title="workflow status">{{ status_icon(c.status) }} {{ status_label(c.status) }}</span>
       {% if c.needs_recuration %}<span class="chip warn" title="A newer crawl exists — review deltas and re-index">⚠ needs re-curation</span>{% endif %}
-      {% if running %}<span class="chip busy"><span class="spinner"></span> {{ job.kind }}{% if job.progress.docs is defined %} · {{ job.progress.docs }} docs{% elif job.progress.total %} · {{ job.progress.done or 0 }}/{{ job.progress.total }}{% endif %}</span>
+      {% if running %}<span class="chip busy"><span class="spinner"></span> {{ job.kind }}{% if job.progress.queued %} · queued {{ job.started_at|since }}{% if job.progress.queue_ahead %} behind {{ job.progress.queue_ahead }} crawl{{ 's' if job.progress.queue_ahead != 1 }}{% endif %}{% elif job.progress.docs is defined %} · {{ job.progress.docs }} docs{% elif job.progress.total %} · {{ job.progress.done or 0 }}/{{ job.progress.total }}{% endif %}</span>
       {% elif job and job.state == 'failed' %}<span class="chip fail" title="{{ job.error }}">✗ last {{ job.kind }} failed</span>{% endif %}
     </div>
   </div>
