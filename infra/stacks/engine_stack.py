@@ -222,9 +222,18 @@ class CurationEngineStack(Stack):
             minimum_protocol_version=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
             http_version=cloudfront.HttpVersion.HTTP2_AND_3,
         )
+        # Static assets are referenced as /static/x.css?v=<content hash> (see web.app.static_url).
+        # The managed CachingOptimized policy drops query strings from the cache key, so a deploy
+        # would keep serving the old file; this policy keys on them and honours the app's Cache-Control.
+        static_cache = cloudfront.CachePolicy(
+            self, "StaticCache", comment=f"{cfg.name} /static/* keyed on ?v=",
+            query_string_behavior=cloudfront.CacheQueryStringBehavior.all(),
+            enable_accept_encoding_gzip=True, enable_accept_encoding_brotli=True,
+            default_ttl=Duration.days(1), max_ttl=Duration.days(365), min_ttl=Duration.seconds(0),
+        )
         distribution.add_behavior(
             "/static/*", origins.LoadBalancerV2Origin(alb, protocol_policy=cloudfront.OriginProtocolPolicy.HTTP_ONLY),
-            cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
+            cache_policy=static_cache,
             viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         )
 

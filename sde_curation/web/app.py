@@ -261,6 +261,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     templates.env.globals["settings"] = settings
     app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
 
+    @app.middleware("http")
+    async def static_cache_control(request: Request, call_next):
+        """?v=<hash> URLs never change content → cache for a year; bare /static URLs revalidate."""
+        response = await call_next(request)
+        if request.url.path.startswith("/static/") and response.status_code == 200:
+            hashed = request.query_params.get("v") and request.query_params["v"] == static_url(
+                request.url.path.removeprefix("/static/")).rsplit("v=", 1)[1]
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if hashed else "no-cache"
+        return response
+
     # ── helpers ────────────────────────────────────────────────────────
 
     def db(request: Request) -> Database:
