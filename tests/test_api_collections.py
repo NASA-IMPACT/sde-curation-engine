@@ -88,3 +88,29 @@ async def test_delete(client):
     await client.post("/api/collections", json={"seed_url": "https://a.org", "name": "A"})
     assert (await client.delete("/api/collections/a.org")).status_code == 204
     assert (await client.get("/api/collections/a.org")).status_code == 404
+
+
+async def test_dashboard_filters(client):
+    await client.post("/api/collections", json={"seed_url": "https://a.org", "name": "Alpha", "division": "Earth Science"})
+    await client.post("/api/collections", json={"seed_url": "https://b.org", "name": "Beta", "division": "Heliophysics"})
+    home = await client.get("/")
+    assert 'id="filters"' in home.text and "Alpha" in home.text and "Beta" in home.text
+    assert 'id="f-division-Earth_Science" class="cnt">1<' in home.text
+    r = await client.get("/", params={"division": "Earth Science"})
+    assert "Alpha" in r.text and 'href="/collections/b.org"' not in r.text and ">1 of 2<" in r.text
+    r = await client.get("/", params=[("division", "Earth Science"), ("division", "Heliophysics"), ("status", "backlog")])
+    assert "Alpha" in r.text and "Beta" in r.text
+    r = await client.get("/", params={"status": "live"})
+    assert "No collections match" in r.text
+    r = await client.get("/rows", params={"q": "beta"})
+    assert 'id="collections"' in r.text and "Beta" in r.text and 'href="/collections/a.org"' not in r.text
+    assert 'id="f-shown" hx-swap-oob="true">1 of 2<' in r.text
+    # No login → actor "anonymous"; rows that predate provenance (created_by NULL) show as "Unassigned".
+    assert 'value="anonymous"' in home.text and "Unassigned" not in home.text
+    await client.app.state.db.conn.execute("UPDATE collections SET created_by=NULL WHERE collection_id='b.org'")
+    r = await client.get("/", params={"curator": "anonymous"})
+    assert "Alpha" in r.text and 'href="/collections/b.org"' not in r.text and "Unassigned" in r.text
+    r = await client.get("/", params={"curator": "__none__"})
+    assert "Beta" in r.text and 'href="/collections/a.org"' not in r.text
+    r = await client.get("/", params={"curator": "someone"})
+    assert "No collections match" in r.text

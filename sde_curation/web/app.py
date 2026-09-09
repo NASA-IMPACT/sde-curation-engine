@@ -6,6 +6,7 @@ import re
 import secrets
 import sqlite3
 import time
+from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -133,6 +134,7 @@ def pipeline_steps(c: Collection) -> list[dict]:
 STATUS_ICON = {Status.BACKLOG: "○", Status.SCRAPED: "⬇", Status.CURATING: "✎", Status.CURATED: "✓",
                Status.CONFIG_GENERATED: "⚙", Status.LIVE: "●"}
 STATUS_LABEL = {st: label for st, label, _ in PIPELINE}
+NONE_CURATOR = "__none__"  # filter value for collections without provenance
 
 
 def status_icon(st) -> str:
@@ -322,17 +324,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ── pages ──────────────────────────────────────────────────────────
 
+    async def dashboard_context(request: Request) -> dict:
+        """Collections filtered by the left pane (?status=&division=&curator=&q=), plus
+        unfiltered per-option counts so the pane shows the whole distribution."""
+        qp = request.query_params
+        f = {
+            "status": set(qp.getlist("status")), "division": set(qp.getlist("division")),
+            "curator": set(qp.getlist("curator")), "q": (qp.get("q") or "").strip(),
+        }
+        cols = await db(request).list_collections()
+
+        def curator_of(c: Collection) -> str:
+            return c.created_by or NONE_CURATOR
+
+        def keep(c: Collection) -> bool:
+            if f["status"] and c.status not in f["status"]:
+                return False
+            if f["division"] and c.division not in f["division"]:
+                return False
+            if f["curator"] and curator_of(c) not in f["curator"]:
+                return False
+            q = f["q"].lower()
+            return not q or q in c.name.lower() or q in c.collection_id.lower() or q in c.seed_url.lower()
+
+        counts = {
+            "status": Counter(c.status for c in cols),
+            "division": Counter(c.division for c in cols),
+            "curator": Counter(curator_of(c) for c in cols),
+        }
+        curators = sorted((k for k in counts["curator"] if k != NONE_CURATOR), key=str.lower)
+        if NONE_CURATOR in counts["curator"]:
+            curators.append(NONE_CURATOR)
+        shown = [c for c in cols if keep(c)]
+        return {
+            "rows": [await row_context(request, c) for c in shown],
+            "statuses": list(Status), "divisions": list(Division), "curators": curators,
+            "counts": counts, "filters": f, "active": bool(f["q"] or f["status"] or f["division"] or f["curator"]),
+            "total": len(cols), "shown": len(shown), "none_curator": NONE_CURATOR,
+        }
+
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
-        rows = [await row_context(request, c) for c in await db(request).list_collections()]
-        return templates.TemplateResponse(
-            request, "dashboard.html", {"rows": rows, "statuses": list(Status)}
-        )
+        return templates.TemplateResponse(request, "dashboard.html", await dashboard_context(request))
 
     @app.get("/rows", response_class=HTMLResponse)
     async def dashboard_rows(request: Request):
-        rows = [await row_context(request, c) for c in await db(request).list_collections()]
-        return templates.TemplateResponse(request, "partials/rows.html", {"rows": rows})
+        """The collections table (outerHTML swap) + out-of-band filter counts."""
+        return templates.TemplateResponse(request, "partials/rows.html", {**await dashboard_context(request), "oob": True})
 
     TABS = ("overview", "urls", "patterns", "activity")
     SETS = ("dump", "deltas", "curated")
@@ -542,10 +580,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             msg = e.detail if isinstance(e, HTTPException) else "; ".join(
                 err["msg"] for err in e.errors()
             ) if hasattr(e, "errors") else str(e)
-            rows = [await row_context(request, c) for c in await db(request).list_collections()]
             return templates.TemplateResponse(
                 request, "dashboard.html",
-                {"rows": rows, "statuses": list(Status), "error": msg, "form": data},
+                {**await dashboard_context(request), "error": msg, "form": data},
                 status_code=422,
             )
         return RedirectResponse("/", status_code=303)

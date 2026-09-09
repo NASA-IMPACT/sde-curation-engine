@@ -1,25 +1,43 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="toolbar">
-  {% if error %}<div class="banner err">{{ error }}</div>{% endif %}
-  <form method="post" action="/collections" class="inline">
-    <input name="seed_url" placeholder="https://science.nasa.gov/" required size="34" value="{{ form.seed_url if form else '' }}">
-    <input name="name" placeholder="Display name" required size="22" value="{{ form.name if form else '' }}">
-    <select name="division">
-      {% for d in ["General","Astrophysics","Biological and Physical Sciences","Earth Science","Heliophysics","Planetary Science"] %}
-      <option>{{ d }}</option>{% endfor %}
-    </select>
-    <input name="max_pages" type="number" value="100000" min="1" max="100000" size="7" title="max pages">
-    <button>Add collection</button>
-  </form>
-</section>
-
-<table id="collections">
-  <thead>
-    <tr><th>Collection</th><th>Status</th><th>Dump</th><th>Delta</th><th>Curated</th><th>Last job</th><th>Updated</th><th></th></tr>
-  </thead>
-  <tbody id="rows" hx-get="/rows" hx-trigger="sse:collection_deleted, sse:collection_created" hx-swap="innerHTML" hx-sync="this:replace">
+<div class="dash">
+  <aside class="filters">{% include "partials/filters.html" %}</aside>
+  <div class="dash-main">
+    <div class="searchbar">
+      <span class="search-icon" aria-hidden="true">&#x1F50D;&#xFE0E;</span>
+      <input id="f-q" type="search" name="q" form="filters" placeholder="Search collections by name, id or URL…  ( / )"
+             value="{{ filters.q }}" autocomplete="off" aria-label="Search collections"
+             hx-get="/rows" hx-include="#filters" hx-target="#collections" hx-swap="outerHTML"
+             hx-trigger="input changed delay:250ms" hx-sync="#filters:replace">
+    </div>
+    <section class="toolbar">
+      {% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+      <form method="post" action="/collections" class="inline">
+        <input name="seed_url" placeholder="https://science.nasa.gov/" required size="34" value="{{ form.seed_url if form else '' }}">
+        <input name="name" placeholder="Display name" required size="22" value="{{ form.name if form else '' }}">
+        <select name="division">
+          {% for d in divisions %}<option {% if (form.division if form else "General") == d %}selected{% endif %}>{{ d }}</option>{% endfor %}
+        </select>
+        <input name="max_pages" type="number" value="{{ form.max_pages if form else 100000 }}" min="1" max="100000" size="7" title="max pages">
+        <button>Add collection</button>
+      </form>
+    </section>
     {% include "partials/rows.html" %}
-  </tbody>
-</table>
+  </div>
+</div>
+<script>
+  // Keep the address bar in sync with the filter pane so a filtered view can be reloaded or shared.
+  document.body.addEventListener('htmx:afterRequest', (e) => {
+    if (!['filters', 'f-q'].includes(e.detail.elt.id) || !e.detail.successful) return;
+    const qs = new URLSearchParams(new FormData(document.getElementById('filters')));
+    for (const k of [...qs.keys()]) if (!qs.get(k)) qs.delete(k);
+    history.replaceState(null, '', qs.toString() ? '/?' + qs : '/');
+  });
+  // "/" jumps to the search bar (unless already typing somewhere).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) return;
+    e.preventDefault(); const q = document.getElementById('f-q'); q.focus(); q.select();
+  });
+</script>
 {% endblock %}
