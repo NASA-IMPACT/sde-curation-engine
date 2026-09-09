@@ -12,8 +12,8 @@ import aiosqlite
 
 from .models import (
     Collection,
-    CurationStage,
     CuratedUrl,
+    CurationStage,
     DeltaUrl,
     DumpUrl,
     IndexRun,
