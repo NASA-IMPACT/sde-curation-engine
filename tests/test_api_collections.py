@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 
 import yaml
 
@@ -114,3 +115,15 @@ async def test_dashboard_filters(client):
     assert "Beta" in r.text and 'href="/collections/a.org"' not in r.text
     r = await client.get("/", params={"curator": "someone"})
     assert "No collections match" in r.text
+
+
+async def test_static_assets_are_hash_versioned(client):
+    home = await client.get("/")
+    m = re.search(r'href="(/static/app\.css\?v=([0-9a-f]{10}))"', home.text)
+    assert m, home.text[:800]
+    r = await client.get(m.group(1))
+    assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=31536000, immutable"
+    r = await client.get("/static/app.css")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+    r = await client.get("/static/app.css?v=stale00000")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"

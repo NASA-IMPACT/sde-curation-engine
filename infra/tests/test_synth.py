@@ -90,6 +90,24 @@ def test_cloudfront_fronts_alb_with_waf(template):
     })
 
 
+def test_static_cache_keys_on_query_string(template):
+    """/static/x.css?v=<hash> must miss the cache after a deploy (CachingOptimized ignores ?v=)."""
+    template.resource_count_is("AWS::CloudFront::CachePolicy", 1)
+    template.has_resource_properties("AWS::CloudFront::CachePolicy", {
+        "CachePolicyConfig": Match.object_like({
+            "ParametersInCacheKeyAndForwardedToOrigin": Match.object_like({
+                "QueryStringsConfig": {"QueryStringBehavior": "all"},
+                "EnableAcceptEncodingGzip": True,
+            }),
+        }),
+    })
+    template.has_resource_properties("AWS::CloudFront::Distribution", {
+        "DistributionConfig": Match.object_like({
+            "CacheBehaviors": [Match.object_like({"PathPattern": "/static/*", "CachePolicyId": {"Ref": Match.any_value()}})],
+        }),
+    })
+
+
 def test_task_role_can_drive_indexer_and_crawler(template):
     template.has_resource_properties("AWS::IAM::Policy", {
         "PolicyDocument": {"Statement": Match.array_with([  # statement order
