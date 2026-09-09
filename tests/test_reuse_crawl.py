@@ -4,7 +4,7 @@ import json
 
 from sde_curation.models import Collection, Division
 from tests.conftest import wait_job
-from tests.test_scrape_backend import aws, ssm_env  # noqa: F401, F811 - pytest fixtures
+from tests.test_scrape_backend import aws, ssm_env  # noqa: F401 - pytest fixtures
 
 COLL = Collection(collection_id="ex.org", name="Ex", seed_url="https://ex.org", division=Division.GENERAL,
                   connector="crawler2", max_pages=10)
