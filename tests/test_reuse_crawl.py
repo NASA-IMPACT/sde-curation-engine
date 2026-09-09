@@ -49,7 +49,7 @@ async def test_reuse_local_crawl_output(crawler_client):
 
 
 async def test_ssm_existing_and_fetch(ssm_env, tmp_path):  # noqa: F811
-    host, make, upload = ssm_env
+    _host, make, upload = ssm_env
     s = make()
     assert await s.existing(COLL) is None
     upload([{"url": "https://ex.org/a", "title": "A", "full_text": "t"}])
