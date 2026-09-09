@@ -1,0 +1,27 @@
+{# One place for "what is this job doing / what did it do" text. Reads job.progress keys written
+   by jobs.py (scrape: docs/failed/queued/queue_ahead/reused; index: exported/phase/waiting_s/
+   validation_ok; LLM: sample/urls/suggestions/done/total/classified). #}
+{% macro job_progress(job) -%}
+{%- set p = job.progress or {} -%}
+{%- if job.state == 'running' -%}
+  {%- if p.reused %}loading existing crawl{% if p.docs %} · {{ p.docs }} docs{% endif %}
+  {%- elif p.queued %}queued {{ job.started_at|since }}{% if p.queue_ahead %} behind {{ p.queue_ahead }} crawl{{ 's' if p.queue_ahead != 1 }}{% endif %}
+  {%- elif p.phase == 'dispatch' %}exported {{ p.exported }} · starting indexer
+  {%- elif p.phase == 'indexing' %}indexing {{ p.exported }} docs{% if p.waiting_s %} · {{ (p.waiting_s // 60)|int }}m{% endif %}
+  {%- elif p.phase == 'validating' %}validating the test index
+  {%- elif p.phase == 'done' %}validation {{ 'passed' if p.validation_ok else 'failed' }}
+  {%- elif p.total %}{{ p.done or 0 }}/{{ p.total }} classified
+  {%- elif p.sample %}sampling {{ p.sample }} of {{ p.urls }} URLs
+  {%- elif p.docs is defined %}{{ p.docs }} docs{% if p.failed %}, {{ p.failed }} failed{% endif %}
+  {%- else %}running…{% endif -%}
+{%- elif job.error -%}
+  {{ job.error }}
+{%- else -%}
+  {%- if p.reused %}loaded existing crawl · {{ p.docs or 0 }} docs
+  {%- elif p.docs is defined %}{{ p.docs }} docs{% if p.failed %}, {{ p.failed }} failed{% endif %}
+  {%- elif p.suggestions is defined %}{{ p.suggestions }} suggestions
+  {%- elif p.classified is defined %}{{ p.classified }} classified
+  {%- elif p.exported is defined %}{{ p.exported }} exported{% if p.validation_ok is defined %} · validation {{ 'passed' if p.validation_ok else 'failed' }}{% endif %}
+  {%- endif -%}
+{%- endif -%}
+{%- endmacro %}

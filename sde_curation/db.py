@@ -451,16 +451,25 @@ class Database:
         )
         return [DeltaUrl(**dict(r)) for r in await cur.fetchall()]
 
+    async def get_delta(self, collection_id: str, url: str) -> DeltaUrl | None:
+        cur = await self.conn.execute(
+            "SELECT * FROM delta_urls WHERE collection_id=? AND url=?", (collection_id, url)
+        )
+        row = await cur.fetchone()
+        return DeltaUrl(**dict(row)) if row else None
+
     async def list_deltas(
         self, collection_id: str, *, kind: str | None = None, excluded: bool | None = None,
         q: str | None = None, division: str | None = None, document_type: str | None = None,
-        limit: int = 100, offset: int = 0,
+        ai_pending: bool = False, limit: int = 100, offset: int = 0,
     ) -> tuple[list[DeltaUrl], int]:
         where, args = ["collection_id=?"], [collection_id]
         if kind:
             where.append("kind=?"); args.append(kind)
         if excluded is not None:
             where.append("excluded=?"); args.append(int(excluded))
+        if ai_pending:
+            where.append("(title_ai IS NOT NULL OR division_ai IS NOT NULL OR document_type_ai IS NOT NULL)")
         if division:
             where.append("division=?"); args.append(division)
         if document_type:
@@ -723,10 +732,34 @@ class Database:
         jobs = await self.list_jobs(collection_id, limit=1)
         return jobs[0] if jobs else None
 
+    async def latest_job_of_kind(self, collection_id: str, kind: str) -> JobRun | None:
+        cur = await self.conn.execute(
+            "SELECT * FROM job_runs WHERE collection_id=? AND kind=? ORDER BY id DESC LIMIT 1",
+            (collection_id, str(kind)),
+        )
+        row = await cur.fetchone()
+        return self._job(row) if row else None
+
+    async def job_exists(self, collection_id: str, kind: str) -> bool:
+        cur = await self.conn.execute(
+            "SELECT 1 FROM job_runs WHERE collection_id=? AND kind=? LIMIT 1", (collection_id, str(kind))
+        )
+        return await cur.fetchone() is not None
+
     async def active_jobs(self) -> list[JobRun]:
         cur = await self.conn.execute(
             "SELECT * FROM job_runs WHERE state IN ('queued','running') ORDER BY id"
         )
+        return [self._job(r) for r in await cur.fetchall()]
+
+    async def list_recent_jobs(self, limit: int = 20, state: str | None = None) -> list[JobRun]:
+        """Newest jobs across every collection, optionally only one state (e.g. 'failed')."""
+        if state:
+            cur = await self.conn.execute(
+                "SELECT * FROM job_runs WHERE state=? ORDER BY id DESC LIMIT ?", (state, limit)
+            )
+        else:
+            cur = await self.conn.execute("SELECT * FROM job_runs ORDER BY id DESC LIMIT ?", (limit,))
         return [self._job(r) for r in await cur.fetchall()]
 
     # ── users ──────────────────────────────────────────────────────────

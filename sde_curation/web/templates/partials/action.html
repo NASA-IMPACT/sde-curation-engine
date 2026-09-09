@@ -1,13 +1,16 @@
-{# one contextual button: the next step in the pipeline for this collection #}
+{# one contextual button: the next step in the pipeline for this collection.
+   in_row=True (dashboard rows) swaps the row in place; elsewhere the response's HX-Refresh /
+   HX-Redirect header drives navigation, so there must be no swap target. #}
 {% set a = next_action(c, job) %}
+{% set swap = 'hx-target="closest tr" hx-swap="outerHTML"' if in_row else 'hx-swap="none"' %}
 {% if a.kind == 'post' %}
   <button class="primary" title="{{ a.hint }}" hx-post="{{ a.url }}{% if a.then %}?then={{ a.then|urlencode }}{% endif %}" {% if a.confirm %}hx-confirm="{{ a.confirm }}"{% endif %}
-          {% if a.then %}hx-swap="none"{% else %}hx-target="closest tr" hx-swap="outerHTML"{% endif %}>{{ a.label }}</button>
+          {% if a.then %}hx-swap="none"{% else %}{{ swap|safe }}{% endif %}>{{ a.label }}</button>
 {% elif a.kind == 'link' %}
   <a class="button primary" href="{{ a.url }}" title="{{ a.hint }}">{{ a.label }}</a>
 {% elif a.kind == 'busy' %}
   <span class="spinner"></span> <small class="muted">{{ a.label }}</small>
-  <button class="mini" title="Cancel the running job" hx-post="/api/collections/{{ c.collection_id }}/jobs/cancel" hx-confirm="Cancel the running job?" hx-target="closest tr" hx-swap="outerHTML">✕</button>
+  <button class="mini" title="Cancel the running job" hx-post="/api/collections/{{ c.collection_id }}/jobs/cancel" hx-confirm="Cancel the running job?" {{ swap|safe }}>✕</button>
 {% elif a.kind == 'done' %}
   <span class="done" title="{{ a.hint }}">{{ a.label }}</span>
 {% else %}

@@ -178,7 +178,7 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     await c.post("/api/collections/ex.org/patterns", json={"type": "division", "match": "*/p2", "value": "Earth Science"})
     # dump tab: state column and search
     t = (await c.get("/collections/ex.org?tab=urls&set=dump")).text
-    assert t.count("<tr>") >= 8 and ">pending<" in t
+    assert t.count("<tr>") >= 8 and ">pending change<" in t
     assert "https://ex.org/p7" in t and "https://ex.org/p7" not in (await c.get("/collections/ex.org?tab=urls&set=dump&q=p2")).text
     # deltas tab: filters (kind / excluded / division), effects tooltip, paging
     t = (await c.get("/collections/ex.org?tab=urls&set=deltas&division=Earth+Science")).text
@@ -186,7 +186,7 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     assert 'title="division */p2 → Earth Science (by anonymous)"' in t  # "why" tooltip from pattern_effects
     assert "https://ex.org/p1" in (await c.get("/collections/ex.org?tab=urls&set=deltas&excluded=true")).text
     t = (await c.get("/collections/ex.org?tab=urls&set=deltas&per=25&page=2")).text
-    assert "No deltas match" in t
+    assert "No pending changes match" in t
     # csv export honours filters
     r = await c.get("/collections/ex.org/urls/deltas?format=csv&excluded=true")
     assert r.headers["content-type"].startswith("text/csv") and r.text.splitlines()[0].startswith("kind,url,excluded")
@@ -194,13 +194,13 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     # curated tab after promote: read-only rows, 'Curate ↗' only when a delta exists
     await c.post("/api/collections/ex.org/promote")
     t = (await c.get("/collections/ex.org?tab=urls&set=curated")).text
-    assert ">indexed<" in t and ">excluded<" in t and "unchanged" in t and "Curate ↗</a>" not in t
+    assert ">included<" in t and ">excluded<" in t and "unchanged" in t and "Curate ↗</a>" not in t
     await c.post("/api/collections/ex.org/patterns", json={"type": "title", "match": "*/p3", "value": "Three"})
     t = (await c.get("/collections/ex.org?tab=urls&set=curated&q=p3")).text
     assert "Curate ↗</a>" in t
     # header chips reflect counts
     h = (await c.get("/collections/ex.org/header")).text
-    assert "Dump <b>8</b>" in h and "Curated <b>8</b>" in h and "Patterns <b>3</b>" in h
+    assert "Dump <b>8</b>" in h and "Curated <b>8</b>" in h and "Rules <b>3</b>" in h
     assert (await c.get("/collections/ex.org/urls/nope")).status_code == 404
 
 
@@ -209,7 +209,7 @@ async def test_then_redirect_keeps_full_target(crawler_client):
     await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 10})
     await c.post("/api/collections/ex.org/scrape"); await wait_job(c, "ex.org")
     row = (await c.get("/collections/ex.org/row")).text
-    assert "then=/collections/ex.org%3Ftab%3Durls%26set%3Ddeltas" in row
+    assert "then=/collections/ex.org%3Ftab%3Dcurate" in row
     r = await c.post("/api/collections/ex.org/recompute?then=%2Fcollections%2Fex.org%3Ftab%3Durls%26set%3Ddeltas",
                      headers={"HX-Request": "true"})
     assert r.headers["HX-Redirect"] == "/collections/ex.org?tab=urls&set=deltas"

@@ -90,15 +90,22 @@ def static_url(name: str) -> str:
 
 templates.env.globals["static_url"] = static_url
 
+# (status, label, what to do while this is the current/upcoming step, what it means once done)
 PIPELINE = [
-    (Status.BACKLOG, "Backlog", "Collection registered"),
-    (Status.SCRAPED, "Scraped", "Crawl finished, dump ingested"),
-    (Status.CURATING, "Curating", "Deltas computed, patterns being applied"),
-    (Status.CURATED, "Curated", "Deltas promoted to the curated set"),
-    (Status.CONFIG_GENERATED, "Test index", "Exported and indexed to the test index"),
-    (Status.LIVE, "Live", "Validated and indexed to production"),
+    (Status.BACKLOG, "Backlog", "Run the crawler on the seed URL, or load an existing crawl.", "Registered"),
+    (Status.SCRAPED, "Scraped", "Click Start curating to compute what changed vs. the curated set.", "Crawl ingested"),
+    (Status.CURATING, "Curating", "Scope the crawl (include/exclude), set metadata, then promote.", "Reviewed and promoted"),
+    (Status.CURATED, "Curated", "Index the curated set to the test index.", "Curated set promoted"),
+    (Status.CONFIG_GENERATED, "Test index", "Check the validation result, then index to production.", "Indexed to test and validated"),
+    (Status.LIVE, "Live", "Live. Re-scrape to start a new cycle.", "Indexed to production"),
 ]
-_ORDER = {st: i for i, (st, _, _) in enumerate(PIPELINE)}
+_ORDER = {st: i for i, (st, _, _, _) in enumerate(PIPELINE)}
+
+# Which pipeline step a job kind belongs to (failure footers, step panels).
+STEP_FOR_KIND = {
+    "scrape": Status.BACKLOG, "llm_patterns": Status.CURATING, "llm_metadata": Status.CURATING,
+    "index_test": Status.CONFIG_GENERATED, "validate": Status.CONFIG_GENERATED, "index_prod": Status.LIVE,
+}
 
 
 def next_action(c: Collection, job) -> dict:
@@ -111,10 +118,10 @@ def next_action(c: Collection, job) -> dict:
                 "hint": "Run the crawler on the seed URL"}
     if c.status is Status.SCRAPED:
         return {"label": "Start curating", "kind": "post", "url": f"/api/collections/{cid}/recompute",
-                "then": f"/collections/{cid}?tab=urls&set=deltas", "hint": "Compute deltas vs. the curated set"}
+                "then": f"/collections/{cid}?tab=curate", "hint": "Compute what changed vs. the curated set"}
     if c.status is Status.CURATING:
-        return {"label": "Open curation", "kind": "link", "url": f"/collections/{cid}?tab=urls&set=deltas",
-                "hint": "Review deltas, add patterns, then promote"}
+        return {"label": "Open curation", "kind": "link", "url": f"/collections/{cid}?tab=curate",
+                "hint": "Scope the crawl, set metadata, then promote"}
     if c.status is Status.CURATED:
         return {"label": "Index to test", "kind": "post", "url": f"/api/collections/{cid}/index?target=test",
                 "hint": "Export the curated set to S3 and run the WEB_COSMOS indexer against the test index"}
@@ -141,16 +148,17 @@ def status_invariant_problem(c: Collection, new: Status) -> str | None:
 
 def pipeline_steps(c: Collection) -> list[dict]:
     cur = _ORDER[c.status]
-    return [
-        {"status": st, "label": label, "hint": hint, "index": i + 1,
-         "state": "done" if i < cur else "current" if i == cur else "todo"}
-        for i, (st, label, hint) in enumerate(PIPELINE)
-    ]
+    steps = []
+    for i, (st, label, do, done) in enumerate(PIPELINE):
+        state = "done" if i < cur else "current" if i == cur else "todo"
+        steps.append({"status": st, "label": label, "do": do, "done": done, "index": i + 1,
+                      "state": state, "hint": done if state == "done" else do})
+    return steps
 
 
 STATUS_ICON = {Status.BACKLOG: "○", Status.SCRAPED: "⬇", Status.CURATING: "✎", Status.CURATED: "✓",
                Status.CONFIG_GENERATED: "⚙", Status.LIVE: "●"}
-STATUS_LABEL = {st: label for st, label, _ in PIPELINE}
+STATUS_LABEL = {st: label for st, label, _, _ in PIPELINE}
 NONE_CURATOR = "__none__"  # filter value for collections without provenance
 
 
@@ -163,7 +171,8 @@ def status_label(st) -> str:
 
 
 templates.env.globals.update(
-    next_action=next_action, pipeline_steps=pipeline_steps, status_icon=status_icon, status_label=status_label
+    next_action=next_action, pipeline_steps=pipeline_steps, status_icon=status_icon, status_label=status_label,
+    step_for_kind=lambda kind: STEP_FOR_KIND.get(str(kind)),
 )
 
 
@@ -399,7 +408,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """The collections table (outerHTML swap) + out-of-band filter counts."""
         return templates.TemplateResponse(request, "partials/rows.html", {**await dashboard_context(request), "oob": True})
 
-    TABS = ("overview", "urls", "patterns", "activity")
+    TABS = ("overview", "curate", "urls", "activity")
+    TAB_ALIASES = {"patterns": "curate"}  # old links / bookmarks
+
+    def norm_tab(tab: str | None) -> str:
+        tab = TAB_ALIASES.get(tab or "", tab or "")
+        return tab if tab in TABS else "overview"
     SETS = ("dump", "deltas", "curated")
 
     def list_params(request: Request) -> dict[str, Any]:
@@ -416,6 +430,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "q": (qp.get("q") or "").strip() or None, "kind": qp.get("kind") or None,
             "excluded": tri_bool(qp.get("excluded")), "division": qp.get("division") or None,
             "document_type": qp.get("document_type") or None, "page": page, "per": per,
+            "ai": "pending" if qp.get("ai") == "pending" else None,
         }
 
     async def urls_context(request: Request, c: Collection, set_: str) -> dict[str, Any]:
@@ -433,7 +448,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             rows, total = await d.list_deltas(
                 c.collection_id, kind=lp["kind"], excluded=lp["excluded"], q=lp["q"],
-                division=lp["division"], document_type=lp["document_type"], limit=lp["per"], offset=off,
+                division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending",
+                limit=lp["per"], offset=off,
             )
             effects = await d.effects_for(c.collection_id, [r.url for r in rows])
         return {
@@ -455,7 +471,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if set_ not in SETS:
                 set_ = "deltas"
             ctx.update(await urls_context(request, c, set_))
-        elif tab == "patterns":
+        elif tab == "curate":
             ctx.update(
                 patterns=await curation(request).pattern_stats(c),
                 suggestions=await d.list_pattern_suggestions(c.collection_id, "pending"),
@@ -475,7 +491,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/collections/{collection_id}", response_class=HTMLResponse)
     async def collection_page(request: Request, collection_id: str, tab: str = "overview"):
         c = await must_get(request, collection_id)
-        tab = tab if tab in TABS else "overview"
+        tab = norm_tab(tab)
         ctx = await header_context(request, c)
         ctx.update(await tab_context(request, c, tab))
         ctx["selected"] = ctx.get("selected", c.status)
@@ -489,7 +505,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/collections/{collection_id}/tab/{tab}", response_class=HTMLResponse)
     async def collection_tab(request: Request, collection_id: str, tab: str):
         c = await must_get(request, collection_id)
-        tab = tab if tab in TABS else "overview"
+        tab = norm_tab(tab)
         ctx = await tab_context(request, c, tab)
         ctx["selected"] = ctx.get("selected", c.status)
         return templates.TemplateResponse(request, f"partials/tab_{tab}.html", ctx)
@@ -520,7 +536,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             rows, _ = await d.list_deltas(
                 c.collection_id, kind=lp["kind"], excluded=lp["excluded"], q=lp["q"],
-                division=lp["division"], document_type=lp["document_type"], limit=1_000_000,
+                division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending",
+                limit=1_000_000,
             )
             cols = ["kind", "url", "excluded", "scraped_title", "title", "division", "document_type",
                     "title_ai", "division_ai", "document_type_ai"]
@@ -543,8 +560,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             counts["excluded"] = (await d.list_deltas(c.collection_id, excluded=True, limit=1))[1]
         curated = await d.load_curated(c.collection_id) if c.curated_count else []
         runs = await d.list_index_runs(c.collection_id, limit=5)
+        failed = jobs[0] if jobs and jobs[0].state == "failed" else None
         stats = {
-            "last_scrape": next((j for j in jobs if j.kind == "scrape"), None),
+            "last_scrape": await d.latest_job_of_kind(c.collection_id, "scrape"),
+            "failed_step": STEP_FOR_KIND.get(str(failed.kind)) if failed else None,
             "index_runs": runs,
             "last_test_run": next((r for r in runs if r.target == "test"), None),
             "last_prod_run": next((r for r in runs if r.target == "prod"), None),
@@ -980,8 +999,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ensure_idle(request, c)
         if decision not in ("accept", "reject"):
             raise HTTPException(422, "decision must be accept or reject")
-        rows, _ = await db(request).list_deltas(collection_id, q=body.url, limit=1000)
-        row = next((r for r in rows if r.url == body.url), None)
+        row = await db(request).get_delta(collection_id, body.url)
         if row is None:
             raise HTTPException(404, "URL not in deltas")
         value = getattr(row, f"{body.field}_ai")

@@ -1,4 +1,5 @@
 {# panel for one pipeline step. context: c, job, step (Status), steps (pipeline_steps), stats #}
+{% from "partials/job_progress.html" import job_progress %}
 {% set step = step or selected or c.status %}
 {% set info = (steps or pipeline_steps(c)) | selectattr('status', 'equalto', step) | first %}
 {% set running = job and job.state == 'running' %}
@@ -12,7 +13,7 @@
 <div class="step-head">
   <strong>Step {{ info.index }} · {{ info.label }}</strong>
   <span class="state-tag {{ info.state }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[info.state] }}</span>
-  {% if running %}<span class="spinner"></span> <small class="muted">{{ job.kind }} {% if job.progress.queued %}queued {{ job.started_at|since }}{% if job.progress.queue_ahead %} behind {{ job.progress.queue_ahead }} crawl{{ 's' if job.progress.queue_ahead != 1 }}{% endif %}{% else %}running… {{ job.progress.docs or 0 }} docs{% endif %}</small>
+  {% if running %}<span class="spinner"></span> <small class="muted">{{ job.kind }} · {{ job_progress(job) }}</small>
     <button class="secondary mini" hx-post="/api/collections/{{ cid }}/jobs/cancel" hx-swap="none" hx-confirm="Cancel the running {{ job.kind }} job?">Cancel</button>{% endif %}
 </div>
 <p class="muted">{{ info.hint }}</p>
@@ -35,8 +36,8 @@
       {% if sj.progress.summary and sj.progress.summary.failures_by_reason %}<dt>Failures</dt><dd>{{ sj.progress.summary.failures_by_reason }}</dd>{% endif %}</dl>
   {% else %}<p class="muted">Not scraped yet.</p>{% endif %}
   <div class="inline">
-    {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Compute deltas vs. the curated set and open the curation page',
-           primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=urls&set=deltas') }}
+    {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Compute what changed vs. the curated set and open the curation workspace',
+           primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=curate') }}
     {{ btn('Re-scrape', '/api/collections/' ~ cid ~ '/scrape', 'Run the crawler again', confirm='Re-run the crawl? Existing dump is replaced.') }}
   </div>
 
@@ -45,14 +46,13 @@
       <dt>Patterns</dt><dd>{{ stats.pattern_count }}</dd></dl>
   <div class="inline">
     {% if info.state == 'todo' %}
-      {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Scrape first', primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=urls&set=deltas') }}
+      {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute',
+             'Scrape first' if c.dump_count == 0 else 'Compute what changed vs. the curated set and open the curation workspace',
+             primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=curate') }}
     {% else %}
-      <a class="button primary" href="/collections/{{ cid }}?tab=urls&set=deltas">Open curation</a>
+      <a class="button primary" href="/collections/{{ cid }}?tab=curate">Open curation</a>
       {{ btn('Recompute deltas', '/api/collections/' ~ cid ~ '/recompute', 'Re-run the diff against the latest crawl (safe to repeat)', disabled=(c.dump_count == 0)) }}
-      {{ btn('Promote → curated' if c.delta_count else 'Mark curated', '/api/collections/' ~ cid ~ '/promote',
-             'Apply all pending deltas to the curated set' if c.delta_count else 'No pending deltas: mark the collection curated',
-             primary=(c.status == 'curating'), disabled=(c.status != 'curating'),
-             confirm=('Promote ' ~ c.delta_count ~ ' deltas to the curated set?') if c.delta_count else None) }}
+      {% if c.status == 'curating' %}<span class="muted small">Promote from the Curate tab once scope and metadata are reviewed.</span>{% endif %}
     {% endif %}
   </div>
 
@@ -65,7 +65,7 @@
              'Export ' ~ stats.exportable ~ ' curated URLs to S3 and run the WEB_COSMOS indexer against the test index',
              primary=True, disabled=(not stats.exportable or c.delta_count > 0),
              confirm='Export ' ~ stats.exportable ~ ' URLs and index them into the TEST index?') }}
-      {{ btn('Review / re-curate', '/api/collections/' ~ cid ~ '/recompute', 'Recompute deltas against the current crawl and open the curation page (status changes only if something differs)', then='/collections/' ~ cid ~ '?tab=urls&set=deltas') }}
+      {{ btn('Review / re-curate', '/api/collections/' ~ cid ~ '/recompute', 'Recompute deltas against the current crawl and open the curation workspace (status changes only if something differs)', then='/collections/' ~ cid ~ '?tab=curate') }}
       {% if c.delta_count %}<span class="muted small">{{ c.delta_count }} deltas pending — promote before indexing.</span>{% endif %}
     {% endif %}
   </div>
@@ -116,4 +116,4 @@
   </div>
 {% endif %}
 
-{% if job and job.state == 'failed' and step == c.status %}<div class="err">Last {{ job.kind }} failed: {{ job.error }}</div>{% endif %}
+{% if job and job.state == 'failed' and (step == c.status or step == stats.failed_step) %}<div class="err">Last {{ job.kind }} failed: {{ job.error }}</div>{% endif %}

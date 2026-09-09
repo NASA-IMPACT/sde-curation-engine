@@ -28,7 +28,7 @@ dl.meta dt { color:var(--muted); } dl.meta dd { margin:0; }
 .actions button { padding:.15rem .5rem; font-size:.8rem; }
 .spinner { width:.9rem; height:.9rem; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; display:inline-block; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-tr.excluded td { opacity:.55; text-decoration: line-through; }
+tr.excluded td { opacity:.7; } tr.excluded td.url a { color: var(--muted); }
 .ai { font-size:.75rem; color:#7c3aed; background:#ede9fe; padding:0 .3rem; border-radius:3px; }
 button.mini { padding:0 .4rem; font-size:.8rem; background:var(--bg); color:var(--fg); }
 button.danger { background:#dc2626; border-color:#dc2626; padding:0 .4rem; }
@@ -110,7 +110,10 @@ table.urls tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, tra
 td.num { text-align: right; font-variant-numeric: tabular-nums; } .nowrap { white-space: nowrap; }
 .kind { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; padding: .05rem .4rem; border-radius: 3px; font-weight: 600; }
 .k-new { background: #dcfce7; color: #166534; } .k-modified { background: #dbeafe; color: #1e40af; } .k-deleted { background: #fee2e2; color: #991b1b; } .k-ok { background: var(--line); color: var(--muted); }
-@media (prefers-color-scheme: dark) { .k-new { background: #14532d; color: #bbf7d0; } .k-modified { background: #1e3a8a; color: #bfdbfe; } .k-deleted { background: #7f1d1d; color: #fecaca; } }
+.k-included { background: #dcfce7; color: #166534; } .k-excluded { background: #fef3c7; color: #78350f; }
+@media (prefers-color-scheme: dark) { .k-new, .k-included { background: #14532d; color: #bbf7d0; } .k-modified { background: #1e3a8a; color: #bfdbfe; } .k-deleted { background: #7f1d1d; color: #fecaca; } .k-excluded { background: #78350f; color: #fef3c7; } }
+.count.warn { background: #fef3c7; color: #78350f; } .count.ok { background: #dcfce7; color: #166534; }
+@media (prefers-color-scheme: dark) { .count.warn { background: #78350f; color: #fef3c7; } .count.ok { background: #14532d; color: #bbf7d0; } }
 tr.row-deleted td.url a { color: #dc2626; text-decoration: line-through; }
 .ptype { font-size: .75rem; padding: .05rem .4rem; border-radius: 3px; background: var(--line); }
 .ptype.exclude { background: #fee2e2; color: #991b1b; } .ptype.include { background: #dcfce7; color: #166534; }
