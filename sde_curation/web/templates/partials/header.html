@@ -25,6 +25,8 @@
   </div>
   <div class="wb-next">
     <span class="muted small">Next:</span> {% include "partials/action.html" %}
+    {% set ex = stats.existing_crawl %}{% if a.label == 'Scrape' and ex and not ex.already_loaded and not running %}
+    <button class="secondary" title="Ingest the crawl already at {{ ex.where }} instead of crawling again" hx-post="/api/collections/{{ cid }}/scrape?reuse=true" hx-swap="none">or load existing ({{ ex.modified.strftime('%Y-%m-%d') }})</button>{% endif %}
     {% if running %}<button class="mini" title="Cancel the running job" hx-post="/api/collections/{{ cid }}/jobs/cancel" hx-confirm="Cancel the running job?" hx-swap="none">✕ cancel</button>{% endif %}
   </div>
 </div>

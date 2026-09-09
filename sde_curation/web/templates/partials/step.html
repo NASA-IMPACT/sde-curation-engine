@@ -18,26 +18,36 @@
 </div>
 <p class="muted">{{ info.hint }}</p>
 
+{% macro load_existing(ex, primary) -%}
+  {{ btn('Load existing crawl (from ' ~ ex.modified.strftime('%Y-%m-%d %H:%M') ~ 'Z)', '/api/collections/' ~ cid ~ '/scrape?reuse=true',
+         'The crawler already produced output for this collection at ' ~ ex.where ~ ' — ingest it instead of crawling again',
+         primary=primary, confirm=('Load the crawl from ' ~ ex.modified.strftime('%Y-%m-%d %H:%M') ~ 'Z? The current dump is replaced.' if c.dump_count else None)) }}
+{%- endmacro %}
 {% if step == 'backlog' %}
+  {% set ex = stats.existing_crawl %}
   <dl class="meta"><dt>Seed</dt><dd><a href="{{ c.seed_url }}" target="_blank" rel="noopener">{{ c.seed_url }}</a></dd>
-      <dt>Max pages</dt><dd>{{ c.max_pages }}</dd><dt>Division</dt><dd>{{ c.division }}</dd></dl>
+      <dt>Max pages</dt><dd>{{ c.max_pages }}</dd><dt>Division</dt><dd>{{ c.division }}</dd>
+      {% if ex %}<dt>Existing crawl</dt><dd>{{ ex.modified.strftime('%Y-%m-%d %H:%M') }}Z{% if ex.already_loaded %} <span class="muted">(loaded)</span>{% else %} <span class="muted">(not loaded yet)</span>{% endif %} <small class="muted">{{ ex.where }}</small></dd>{% endif %}</dl>
   <div class="inline">
+    {% if ex and not ex.already_loaded %}{{ load_existing(ex, info.state == 'current') }}{% endif %}
     {{ btn('Scrape' if info.state == 'current' else 'Re-scrape', '/api/collections/' ~ cid ~ '/scrape',
            'Run the crawler on the seed URL' ~ ('; a newer crawl will flag the collection for re-curation' if info.state == 'done' else ''),
-           primary=(info.state == 'current'), confirm=('Re-run the crawl? Existing dump is replaced.' if info.state == 'done' else None)) }}
+           primary=(info.state == 'current' and not (ex and not ex.already_loaded)), confirm=('Re-run the crawl? Existing dump is replaced.' if info.state == 'done' else None)) }}
   </div>
 
 {% elif step == 'scraped' %}
-  {% set sj = stats.last_scrape %}
-  {% if sj %}
-  <dl class="meta"><dt>Last crawl</dt><dd><span class="job j-{{ sj.state }}">{{ sj.state }}</span> {{ sj.started_at.strftime('%Y-%m-%d %H:%M') }}Z
-      {% if sj.error %}<span class="err">{{ sj.error }}</span>{% endif %}</dd>
-      <dt>URLs</dt><dd>{{ c.dump_count }} in dump{% if sj.progress.failed %}, {{ sj.progress.failed }} failed to fetch{% endif %}</dd>
-      {% if sj.progress.summary and sj.progress.summary.failures_by_reason %}<dt>Failures</dt><dd>{{ sj.progress.summary.failures_by_reason }}</dd>{% endif %}</dl>
+  {% set sj = stats.last_scrape %}{% set ex = stats.existing_crawl %}
+  {% if c.last_scraped_at or sj %}
+  <dl class="meta"><dt>Last crawl</dt><dd>{% if c.last_scraped_at %}{{ c.last_scraped_at.strftime('%Y-%m-%d %H:%M') }}Z{% endif %}
+      {% if sj %}<span class="job j-{{ sj.state }}">{{ sj.state }}</span>{% if sj.progress.reused %} <span class="muted">(loaded from existing crawl)</span>{% endif %}{% if sj.error %} <span class="err">{{ sj.error }}</span>{% endif %}{% endif %}</dd>
+      <dt>URLs</dt><dd>{{ c.dump_count }} crawled{% if sj and sj.progress.failed %}, {{ sj.progress.failed }} failed to fetch{% endif %}</dd>
+      {% if sj and sj.progress.summary and sj.progress.summary.failures_by_reason %}<dt>Failures</dt><dd>{{ sj.progress.summary.failures_by_reason }}</dd>{% endif %}
+      {% if ex and not ex.already_loaded %}<dt>Newer crawl</dt><dd>{{ ex.modified.strftime('%Y-%m-%d %H:%M') }}Z <small class="muted">{{ ex.where }}</small></dd>{% endif %}</dl>
   {% else %}<p class="muted">Not scraped yet.</p>{% endif %}
   <div class="inline">
     {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Compute what changed vs. the curated set and open the curation workspace',
            primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=curate') }}
+    {% if ex and not ex.already_loaded %}{{ load_existing(ex, False) }}{% endif %}
     {{ btn('Re-scrape', '/api/collections/' ~ cid ~ '/scrape', 'Run the crawler again', confirm='Re-run the crawl? Existing dump is replaced.') }}
   </div>
 

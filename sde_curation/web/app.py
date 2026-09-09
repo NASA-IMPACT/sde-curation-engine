@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import logging
 import re
 import secrets
 import sqlite3
@@ -50,6 +51,7 @@ from ..store import remove_collection_files, write_collection_yaml, write_patter
 from . import auth
 
 _HERE = Path(__file__).parent
+log = logging.getLogger(__name__)
 templates = Jinja2Templates(directory=_HERE / "templates")
 
 
@@ -273,6 +275,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             indexer=lambda: make_index_backend(settings),
         )
         app.state.jobs = jobs
+        app.state.existing_cache = {}
         app.state.curation = CurationService(db, lock_for=jobs.lock)
         await jobs.recover()
         try:
@@ -621,6 +624,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "pattern_count": len(await d.list_patterns(c.collection_id)),
             "curated_excluded": sum(1 for r in curated if r.excluded),
         }
+        if step in (Status.BACKLOG, Status.SCRAPED) or c.status in (Status.BACKLOG, Status.SCRAPED):
+            stats["existing_crawl"] = await existing_crawl(request, c)
         await with_validation(request, c)
         return {"c": c, "job": jobs[0] if jobs else None, "step": step,
                 "steps": pipeline_steps(c), "stats": stats}
@@ -734,15 +739,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ── jobs ───────────────────────────────────────────────────────────
 
+    async def existing_crawl(request: Request, c: Collection) -> dict[str, Any] | None:
+        """The crawl output already produced for this collection (S3 or local), cached briefly:
+        the pipeline and header partials poll every few seconds. Never raises."""
+        cache: dict[str, tuple[float, Any]] = request.app.state.existing_cache
+        hit = cache.get(c.collection_id)
+        if hit and time.monotonic() - hit[0] < 60:
+            ex = hit[1]
+        else:
+            try:
+                ex = await request.app.state.jobs.scraper.existing(c)
+            except Exception as e:  # noqa: BLE001 - a broken backend must not break the page
+                log.warning("existing crawl lookup failed for %s: %s", c.collection_id, e)
+                ex = None
+            cache[c.collection_id] = (time.monotonic(), ex)
+        if ex is None:
+            return None
+        loaded = c.last_scraped_at is not None and ex.modified <= c.last_scraped_at
+        return {"modified": ex.modified, "where": ex.where, "size": ex.size, "already_loaded": loaded}
+
+    @app.get("/api/collections/{collection_id}/crawl/existing")
+    async def api_existing_crawl(request: Request, collection_id: str):
+        c = await must_get(request, collection_id)
+        ex = await existing_crawl(request, c)
+        return {"exists": ex is not None, **(ex or {})}
+
     @app.post("/api/collections/{collection_id}/scrape", status_code=202, response_model=None)
-    async def api_scrape(request: Request, collection_id: str):
+    async def api_scrape(request: Request, collection_id: str, reuse: bool = False):
+        """Run the crawler; with ?reuse=true ingest the crawl output that already exists instead."""
         c = await must_get(request, collection_id)
         jobs: JobManager = request.app.state.jobs
         try:
-            job = await jobs.start_scrape(c, actor=actor(request))
+            job = await jobs.start_scrape(c, actor=actor(request), reuse=reuse)
         except JobConflict as e:
             raise HTTPException(409, str(e)) from e
-        await audit(request, "scrape.start", collection_id, f"job #{job.id}")
+        request.app.state.existing_cache.pop(collection_id, None)
+        await audit(request, "scrape.reuse" if reuse else "scrape.start", collection_id, f"job #{job.id}")
         if _is_htmx(request) and request.headers.get("HX-Target", "").startswith("row-"):
             return templates.TemplateResponse(
                 request, "partials/row.html", await row_context(request, c)

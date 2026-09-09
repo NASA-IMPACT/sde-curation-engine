@@ -126,21 +126,23 @@ class JobManager:
 
     # ── scrape ─────────────────────────────────────────────────────────
 
-    async def start_scrape(self, c: Collection, *, actor: str | None = None) -> JobRun:
+    async def start_scrape(self, c: Collection, *, actor: str | None = None, reuse: bool = False) -> JobRun:
+        """Run the crawler, or with reuse=True load the crawl output that already exists."""
         cid = c.collection_id
         if cid in self._starting or self.active_for(cid) or self.lock(cid).locked():
             raise JobConflict(f"a job is already running for {cid}")
         self._starting.add(cid)
         try:
             job = await self.db.insert_job(
-                JobRun(collection_id=cid, kind=JobKind.SCRAPE, state=JobState.RUNNING, started_by=actor)
+                JobRun(collection_id=cid, kind=JobKind.SCRAPE, state=JobState.RUNNING, started_by=actor,
+                       progress={"reused": True} if reuse else {})
             )
             self._emit(c, job)
-            return await self._spawn(job, self._run_scrape(c, job))
+            return await self._spawn(job, self._run_scrape(c, job, reuse))
         finally:
             self._starting.discard(cid)
 
-    async def _run_scrape(self, c: Collection, job: JobRun) -> None:
+    async def _run_scrape(self, c: Collection, job: JobRun, reuse: bool = False) -> None:
         async with self._lock(c.collection_id):
             try:
                 async def on_progress(p: dict[str, Any]) -> None:
@@ -150,19 +152,24 @@ class JobManager:
                     await self.db.update_job(job)
                     self._emit(c, job)
 
-                result = await self.scraper.run(c, on_progress)
+                if reuse:
+                    result = await self.scraper.fetch_existing(c, on_progress)
+                else:
+                    result = await self.scraper.run(c, on_progress)
                 docs = parse_documents(result.documents_path)
                 n = await self.ingest_dump(c.collection_id, docs)
-                await self.db.set_last_scraped(c.collection_id, utcnow())
+                crawled_at = result.crawled_at or utcnow()
+                await self.db.set_last_scraped(c.collection_id, crawled_at)
                 # deltas computed against the previous dump are now meaningless
                 await self.db.replace_deltas(c.collection_id, [], [])
                 job.progress = {**job.progress, "docs": n, "summary": _brief(result.summary)}
                 job.external_ref = result.external_ref or job.external_ref
+                note = (f"loaded existing crawl from {crawled_at:%Y-%m-%d %H:%M}Z: {n} documents" if reuse
+                        else f"scrape ok: {n} documents")
                 # Collection state first, job record last: "succeeded" must mean every effect of
                 # the job is already visible to whoever polls the job list.
                 updated = await self.db.set_status(
-                    c.collection_id, Status.SCRAPED, note=f"scrape ok: {n} documents", force=True,
-                    actor=SYSTEM_ACTOR,
+                    c.collection_id, Status.SCRAPED, note=note, force=True, actor=SYSTEM_ACTOR,
                 )
                 if c.curated_count:  # anything already promoted must be re-reviewed
                     await self.db.set_flag(c.collection_id, True)
