@@ -169,12 +169,13 @@ unapply (next most specific → curated → NULL). Diff + apply run as one idemp
 | `DATA_DIR` | SQLite (`engine.db`) + `collections/<id>/{collection,patterns}.yaml` |
 | `CRAWLER_ROOT`, `CRAWLER_PYTHON` | crawl4ai repo and its interpreter |
 | `INDEXER_ROOT`, `INDEXER_PYTHON` | sde-api-scrapers repo (Phase 5) |
-| `SCRAPE_BACKEND` | `local` (subprocess) or `ssm` (drop job on the EC2 inbox via SSM, poll S3) |
+| `SCRAPE_BACKEND` | `local` (subprocess) or `ssm` (drop the job on the EC2 inbox via SSM; the job shows as *queued* until the crawler rewrites its log, then S3 is polled for the documents object) |
 | `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET` | needed for `ssm` |
 | `INDEX_BACKEND` (`local`\|`ecs`), `COSMOS_INDEX_BUCKET`, `WEB_INDEX_NAME` | indexing target bucket / index |
 | `INDEXING_ECS_CLUSTER`, `INDEXING_TASK_FAMILY`, `INDEXING_CONTAINER_NAME`, `INDEXING_SUBNETS`, `INDEXING_SECURITY_GROUPS`, `INDEXING_DISPATCH_ROLE_ARN` | `ecs` backend |
 | `OPENSEARCH_ENDPOINT_TEST`, `OPENSEARCH_ENDPOINT_PROD`, `SAGEMAKER_ENDPOINT_NAME` | `local` backend (the ECS task def already carries these) |
-| `INDEX_POLL_INTERVAL_S`, `INDEX_STALL_TIMEOUT_S` | status.json polling |
+| `INDEX_POLL_INTERVAL_S`, `INDEX_STALL_TIMEOUT_S` | status.json polling; the stall timeout also bounds a *started* remote crawl's silence |
+| `SCRAPE_POLL_INTERVAL_S` | `ssm` backend: how often to look at the crawler host. A queued job waits indefinitely (the UI shows for how long); only a dead `watch_inbox.sh` fails it |
 | `VALIDATION_DELAY_S`, `VALIDATION_TITLE_MATCH_THRESHOLD`, `VALIDATION_ASSUME_ROLE_ARN` | validation gate |
 | `NOTIFY_WEBHOOK_URL`, `PUBLIC_BASE_URL` | Slack-compatible notifications on every status change |
 | `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.4-mini`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` | LLM assist; any OpenAI-compatible endpoint |

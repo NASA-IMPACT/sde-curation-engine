@@ -12,7 +12,7 @@
 <div class="step-head">
   <strong>Step {{ info.index }} · {{ info.label }}</strong>
   <span class="state-tag {{ info.state }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[info.state] }}</span>
-  {% if running %}<span class="spinner"></span> <small class="muted">{{ job.kind }} running… {{ job.progress.docs or 0 }} docs</small>
+  {% if running %}<span class="spinner"></span> <small class="muted">{{ job.kind }} {% if job.progress.queued %}queued {{ job.started_at|since }}{% if job.progress.queue_ahead %} behind {{ job.progress.queue_ahead }} crawl{{ 's' if job.progress.queue_ahead != 1 }}{% endif %}{% else %}running… {{ job.progress.docs or 0 }} docs{% endif %}</small>
     <button class="secondary mini" hx-post="/api/collections/{{ cid }}/jobs/cancel" hx-swap="none" hx-confirm="Cancel the running {{ job.kind }} job?">Cancel</button>{% endif %}
 </div>
 <p class="muted">{{ info.hint }}</p>
