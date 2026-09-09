@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}SDE Curation Engine{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
-  <script src="/static/htmx.min.js"></script>
-  <script src="/static/sse.js"></script>
-  <script src="/static/json-enc.js"></script>
+  <link rel="stylesheet" href="{{ static_url('app.css') }}">
+  <script src="{{ static_url('htmx.min.js') }}"></script>
+  <script src="{{ static_url('sse.js') }}"></script>
+  <script src="{{ static_url('json-enc.js') }}"></script>
 </head>
 <body {% block body_attrs %}hx-ext="sse" sse-connect="/events"{% endblock %}>
   <header>
