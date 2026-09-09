@@ -12,6 +12,7 @@ import aiosqlite
 
 from .models import (
     Collection,
+    CurationStage,
     CuratedUrl,
     DeltaUrl,
     DumpUrl,
@@ -40,7 +41,9 @@ CREATE TABLE IF NOT EXISTS collections (
   connector TEXT NOT NULL,
   max_pages INTEGER NOT NULL,
   status TEXT NOT NULL,
+  curation_stage TEXT,
   needs_recuration INTEGER NOT NULL DEFAULT 0,
+  last_scraped_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   dump_count INTEGER NOT NULL DEFAULT 0,
@@ -229,8 +232,21 @@ class Database:
             # provenance (rows from before these columns existed keep NULL = unknown)
             ("collections", "created_by"), ("status_history", "actor"), ("patterns", "created_by"),
             ("pattern_suggestions", "decided_by"), ("index_runs", "started_by"), ("job_runs", "started_by"),
+            ("collections", "curation_stage"), ("collections", "last_scraped_at"),
         ):
             await self._add_column(table, col, "TEXT")
+        # Rows from before last_scraped_at existed: take the last successful scrape job.
+        await self._conn.execute(
+            """UPDATE collections SET last_scraped_at = (
+                 SELECT MAX(finished_at) FROM job_runs j
+                 WHERE j.collection_id = collections.collection_id AND j.kind='scrape' AND j.state='succeeded')
+               WHERE last_scraped_at IS NULL AND dump_count > 0"""
+        )
+        # Collections already curating when stages were introduced start at the first stage.
+        await self._conn.execute(
+            "UPDATE collections SET curation_stage='scope' WHERE status='curating' AND curation_stage IS NULL"
+        )
+        await self._conn.commit()
 
     async def _add_column(self, table: str, col: str, ddl: str) -> None:
         cur = await self._conn.execute(f"PRAGMA table_info({table})")
@@ -294,9 +310,15 @@ class Database:
         if not force:
             check_transition(c.status, new)
         now = utcnow()
+        # Stage rule, applied for every caller: entering `curating` starts at scope, staying in
+        # it keeps the current stage, leaving it clears the stage.
+        if new is Status.CURATING:
+            stage = c.curation_stage if c.status is Status.CURATING and c.curation_stage else CurationStage.SCOPE
+        else:
+            stage = None
         await self.conn.execute(
-            "UPDATE collections SET status=?, updated_at=? WHERE collection_id=?",
-            (new, _iso(now), collection_id),
+            "UPDATE collections SET status=?, curation_stage=?, updated_at=? WHERE collection_id=?",
+            (new, stage, _iso(now), collection_id),
         )
         await self.conn.execute(
             "INSERT INTO status_history (collection_id,old_status,new_status,note,at,actor) VALUES (?,?,?,?,?,?)",
@@ -308,8 +330,23 @@ class Database:
                 await self.on_status_change(collection_id, c.status, new, note, actor)
             except Exception as e:  # noqa: BLE001 - notifications must never break a transition
                 logging.getLogger(__name__).warning("status hook failed: %s", e)
-        c.status, c.updated_at = new, now
+        c.status, c.curation_stage, c.updated_at = new, stage, now
         return c
+
+    async def set_stage(self, collection_id: str, stage: CurationStage) -> bool:
+        """Move a curating collection between stages; no-op (False) outside `curating`."""
+        cur = await self.conn.execute(
+            "UPDATE collections SET curation_stage=?, updated_at=? WHERE collection_id=? AND status='curating'",
+            (stage, _iso(utcnow()), collection_id),
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
+    async def set_last_scraped(self, collection_id: str, at: datetime) -> None:
+        await self.conn.execute(
+            "UPDATE collections SET last_scraped_at=? WHERE collection_id=?", (_iso(at), collection_id)
+        )
+        await self.conn.commit()
 
     async def set_flag(self, collection_id: str, needs_recuration: bool) -> None:
         await self.conn.execute(

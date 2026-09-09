@@ -2,5 +2,7 @@
    to every /rows response so the pane stays current without the form being replaced. #}
 <span id="f-shown" hx-swap-oob="true">{% if active %}{{ shown }} of {{ total }}{% else %}{{ total }}{% endif %}</span>
 {% for st in statuses %}<span id="f-status-{{ st }}" class="cnt" hx-swap-oob="true">{{ counts.status[st] }}</span>{% endfor %}
+{% for sg in stages %}<span id="f-stage-{{ sg }}" class="cnt" hx-swap-oob="true">{{ counts.stage[sg] }}</span>{% endfor %}
+<span id="f-flag-needs_recuration" class="cnt" hx-swap-oob="true">{{ counts.flag.needs_recuration }}</span>
 {% for d in divisions %}<span id="f-division-{{ d|dom_id }}" class="cnt" hx-swap-oob="true">{{ counts.division[d] }}</span>{% endfor %}
 {% for u in curators %}<span id="f-curator-{{ u|dom_id }}" class="cnt" hx-swap-oob="true">{{ counts.curator[u] }}</span>{% endfor %}

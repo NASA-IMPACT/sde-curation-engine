@@ -170,3 +170,7 @@ button.link { background: none; border: 0; color: inherit; text-decoration: unde
 .menu-panel a:hover, .menu-panel button:hover, .menu-panel a:focus-visible, .menu-panel button:focus-visible { background: color-mix(in srgb, var(--accent) 12%, transparent); outline: none; }
 .menu-panel form { border-top: 1px solid var(--line); margin-top: .25rem; padding-top: .25rem; }
 .menu-panel form button { color: #dc2626; }
+.chip.stage { border-color: #b45309; color: #78350f; background: color-mix(in srgb, #fef3c7 60%, transparent); font-weight: 600; }
+@media (prefers-color-scheme: dark) { .chip.stage { color: #fde68a; background: color-mix(in srgb, #78350f 40%, transparent); } }
+.pipeline li small.stage { font-weight: 400; opacity: .8; }
+.filters .f-opt.sub { padding-left: 1.4rem; }

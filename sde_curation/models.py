@@ -43,6 +43,14 @@ ALLOWED_TRANSITIONS: dict[Status, set[Status]] = {
 }
 
 
+class CurationStage(StrEnum):
+    """Sub-stage while a collection is `curating`: first decide scope (include/exclude), then
+    metadata (title / division / document type). Cleared whenever the status leaves curating."""
+
+    SCOPE = "scope"
+    METADATA = "metadata"
+
+
 def check_transition(current: Status, new: Status) -> None:
     if new == current:
         return
@@ -173,7 +181,9 @@ class Collection(BaseModel):
     connector: ConnectorType
     max_pages: int
     status: Status = Status.BACKLOG
+    curation_stage: CurationStage | None = None  # only while status == curating
     needs_recuration: bool = False
+    last_scraped_at: datetime | None = None  # when the current dump was crawled (or loaded)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     last_run_id: str | None = None  # most recent index run (test or prod)

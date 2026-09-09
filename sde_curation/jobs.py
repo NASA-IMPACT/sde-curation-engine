@@ -153,6 +153,7 @@ class JobManager:
                 result = await self.scraper.run(c, on_progress)
                 docs = parse_documents(result.documents_path)
                 n = await self.ingest_dump(c.collection_id, docs)
+                await self.db.set_last_scraped(c.collection_id, utcnow())
                 # deltas computed against the previous dump are now meaningless
                 await self.db.replace_deltas(c.collection_id, [], [])
                 job.progress = {**job.progress, "docs": n, "summary": _brief(result.summary)}

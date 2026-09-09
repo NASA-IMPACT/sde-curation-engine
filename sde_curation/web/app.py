@@ -35,6 +35,7 @@ from ..models import (
     ANONYMOUS_ACTOR,
     Collection,
     CollectionCreate,
+    CurationStage,
     Division,
     DocumentType,
     PatternCreate,
@@ -180,6 +181,10 @@ class StatusChange(BaseModel):
     status: Status
     note: str | None = None
     force: bool = False
+
+
+class StageChange(BaseModel):
+    stage: CurationStage
 
 
 class UrlEdit(BaseModel):
@@ -365,7 +370,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         unfiltered per-option counts so the pane shows the whole distribution."""
         qp = request.query_params
         f = {
-            "status": set(qp.getlist("status")), "division": set(qp.getlist("division")),
+            "status": set(qp.getlist("status")), "stage": set(qp.getlist("stage")),
+            "flag": set(qp.getlist("flag")), "division": set(qp.getlist("division")),
             "curator": set(qp.getlist("curator")), "q": (qp.get("q") or "").strip(),
         }
         cols = await db(request).list_collections()
@@ -374,7 +380,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return c.created_by or NONE_CURATOR
 
         def keep(c: Collection) -> bool:
-            if f["status"] and c.status not in f["status"]:
+            # status and its curating sub-stages are one facet: any ticked box admits the row
+            if (f["status"] or f["stage"]) and c.status not in f["status"] and not (
+                c.status is Status.CURATING and c.curation_stage in f["stage"]
+            ):
+                return False
+            if "needs_recuration" in f["flag"] and not c.needs_recuration:
                 return False
             if f["division"] and c.division not in f["division"]:
                 return False
@@ -385,6 +396,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         counts = {
             "status": Counter(c.status for c in cols),
+            "stage": Counter(c.curation_stage for c in cols if c.status is Status.CURATING and c.curation_stage),
+            "flag": {"needs_recuration": sum(1 for c in cols if c.needs_recuration)},
             "division": Counter(c.division for c in cols),
             "curator": Counter(curator_of(c) for c in cols),
         }
@@ -394,8 +407,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         shown = [c for c in cols if keep(c)]
         return {
             "rows": [await row_context(request, c) for c in shown],
-            "statuses": list(Status), "divisions": list(Division), "curators": curators,
-            "counts": counts, "filters": f, "active": bool(f["q"] or f["status"] or f["division"] or f["curator"]),
+            "statuses": list(Status), "stages": list(CurationStage), "divisions": list(Division), "curators": curators,
+            "counts": counts, "filters": f,
+            "active": bool(f["q"] or f["status"] or f["stage"] or f["flag"] or f["division"] or f["curator"]),
             "total": len(cols), "shown": len(shown), "none_curator": NONE_CURATOR,
         }
 
@@ -854,6 +868,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return {"total": total, "items": rows}
 
+    @app.post("/api/collections/{collection_id}/stage")
+    async def api_set_stage(request: Request, collection_id: str, body: StageChange):
+        """Move between the curation stages (scope → metadata → back). Metadata is gated on every
+        pattern suggestion having been decided."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        if c.status is not Status.CURATING:
+            raise HTTPException(409, f"stages only apply while curating (status is {c.status})")
+        if body.stage is CurationStage.METADATA:
+            pending = await db(request).list_pattern_suggestions(collection_id, "pending")
+            if pending:
+                raise HTTPException(
+                    409, f"{len(pending)} pattern suggestion{'s are' if len(pending) != 1 else ' is'} pending"
+                         " — accept or reject them first"
+                )
+        await _set_stage(request, collection_id, body.stage)
+        await audit(request, "stage.set", collection_id, f"→ {body.stage}")
+        return htmx_done(request, {"stage": body.stage})
+
+    async def _set_stage(request: Request, collection_id: str, stage: CurationStage) -> None:
+        await db(request).set_stage(collection_id, stage)
+        c = await must_get(request, collection_id)
+        write_collection_yaml(settings.collections_dir, c, await db(request).status_history(collection_id))
+        emit_collection(request, c)
+
     @app.post("/api/collections/{collection_id}/promote")
     async def api_promote(request: Request, collection_id: str):
         c = await must_get(request, collection_id)
@@ -949,15 +988,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """LLM suggests title/division/doc type per pending URL → *_ai fields (never the effective values)."""
         c = await must_get(request, collection_id)
         if c.delta_count == 0:
-            raise HTTPException(409, "no pending deltas — recompute first")
+            raise HTTPException(409, "no pending changes — recompute first")
+        pending = await db(request).list_pattern_suggestions(collection_id, "pending")
+        if pending:  # scope first: excluded URLs are never classified, and titles depend on scope
+            raise HTTPException(
+                409, f"{len(pending)} pattern suggestion{'s are' if len(pending) != 1 else ' is'} pending"
+                     " — accept or reject them before suggesting metadata",
+            )
         todo = await db(request).deltas_for_llm(collection_id, only_missing=not all)
         if not todo:
             raise HTTPException(
                 409, "nothing to classify: every pending (non-excluded) URL already has suggestions"
                      " — use ?all=true to redo them",
             )
-        return await _start_llm(request, collection_id, "suggest.metadata",
+        resp = await _start_llm(request, collection_id, "suggest.metadata",
                                 lambda j, c, who: j.start_llm_metadata(c, only_missing=not all, actor=who))
+        if c.status is Status.CURATING and c.curation_stage is not CurationStage.METADATA:
+            await _set_stage(request, collection_id, CurationStage.METADATA)
+        return resp
 
     @app.get("/api/collections/{collection_id}/suggestions")
     async def api_suggestions(request: Request, collection_id: str, state: str | None = "pending"):

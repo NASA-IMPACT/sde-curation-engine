@@ -13,7 +13,16 @@
     {% for st in statuses %}
     <label class="f-opt"><input type="checkbox" name="status" value="{{ st }}" {% if st in filters.status %}checked{% endif %}>
       <span class="status s-{{ st }}">{{ status_icon(st) }} {{ status_label(st) }}</span><span id="f-status-{{ st }}" class="cnt">{{ counts.status[st] }}</span></label>
+    {% if st == 'curating' %}{% for sg in stages %}
+    <label class="f-opt sub" title="curating collections in the {{ sg }} stage"><input type="checkbox" name="stage" value="{{ sg }}" {% if sg in filters.stage %}checked{% endif %}>
+      <span class="f-lbl">{{ '① Scope' if sg == 'scope' else '② Metadata' }}</span><span id="f-stage-{{ sg }}" class="cnt">{{ counts.stage[sg] }}</span></label>
+    {% endfor %}{% endif %}
     {% endfor %}
+  </fieldset>
+  <fieldset>
+    <legend>Flags</legend>
+    <label class="f-opt" title="A newer crawl exists — review pending changes and re-index"><input type="checkbox" name="flag" value="needs_recuration" {% if 'needs_recuration' in filters.flag %}checked{% endif %}>
+      <span class="f-lbl">⚠ needs re-curation</span><span id="f-flag-needs_recuration" class="cnt">{{ counts.flag.needs_recuration }}</span></label>
   </fieldset>
   <fieldset>
     <legend>Division</legend>

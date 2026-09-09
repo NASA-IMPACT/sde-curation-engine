@@ -27,6 +27,9 @@ ACTIONS = [
     ("GET", "/collections/{c}?tab=urls&set=dump", None),
     ("GET", "/collections/{c}?tab=urls&set=curated", None),
     ("GET", "/collections/{c}?tab=patterns", None),
+    ("GET", "/collections/{c}?tab=curate", None),
+    ("POST", "/api/collections/{c}/stage", {"stage": "metadata"}),
+    ("POST", "/api/collections/{c}/stage", {"stage": "scope"}),
     ("GET", "/collections/{c}?tab=activity", None),
     ("GET", "/collections/{c}/urls/deltas?format=csv", None),
     ("GET", "/collections/{c}/header", None),
@@ -46,7 +49,9 @@ async def invariants(client, cid):
     if st in ("curating", "curated", "config_generated", "live"):
         assert c["dump_count"] > 0 or c["curated_count"] > 0, f"{st} with no data"
     if st == "curating":
-        assert c["delta_count"] > 0 or c["curated_count"] == 0 or True  # allowed transiently (manual)
+        assert c["curation_stage"] in ("scope", "metadata"), "curating without a stage"
+    else:
+        assert c["curation_stage"] is None, f"{st} carries a curation stage"
     jobs = (await client.get(f"/api/collections/{cid}/jobs")).json()
     for j in jobs:
         assert j["state"] != "queued"

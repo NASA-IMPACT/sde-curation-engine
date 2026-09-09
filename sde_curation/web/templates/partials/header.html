@@ -10,8 +10,7 @@
       <a class="wb-id" href="{{ c.seed_url }}" target="_blank" rel="noopener" title="open seed URL {{ c.seed_url }}">{{ cid }} ↗</a>
     </h1>
     <div class="badges">
-      <span class="status s-{{ c.status }}" title="workflow status">{{ status_icon(c.status) }} {{ status_label(c.status) }}</span>
-      {% if c.needs_recuration %}<span class="chip warn" title="A newer crawl exists — review deltas and re-index">⚠ needs re-curation</span>{% endif %}
+      {% include "partials/status_badge.html" %}
       {% if running %}<span class="chip busy"><span class="spinner"></span> {{ job.kind }} · {{ job_progress(job) }}</span>
       {% elif job and job.state == 'failed' %}<span class="chip fail" title="{{ job.error }}">✗ last {{ job.kind }} failed</span>{% endif %}
     </div>
