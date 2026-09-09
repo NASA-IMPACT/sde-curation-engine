@@ -23,6 +23,7 @@
       <div class="menu-panel" role="menu">
         {% if me %}<div class="menu-head"><span class="muted">signed in as</span> <b>{{ me.username }}</b>{% if is_admin(request) %} <span class="role">admin</span>{% endif %}</div>{% endif %}
         <a role="menuitem" href="/">Collections</a>
+        <a role="menuitem" href="/jobs">Jobs</a>
         {% if me %}<a role="menuitem" href="/account">Account</a>{% endif %}
         {% if me and is_admin(request) %}<a role="menuitem" href="/users">Users</a>{% endif %}
         {% if me %}<form method="post" action="/logout"><button type="submit" role="menuitem">Sign out</button></form>{% endif %}

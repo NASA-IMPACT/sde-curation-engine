@@ -428,7 +428,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
-        return templates.TemplateResponse(request, "dashboard.html", await dashboard_context(request))
+        return templates.TemplateResponse(
+            request, "dashboard.html", {**await dashboard_context(request), **await jobs_context(request, compact=True)}
+        )
+
+    async def jobs_context(request: Request, *, compact: bool = False) -> dict[str, Any]:
+        d = db(request)
+        return {
+            "jobs_active": await d.active_jobs(), "jobs_failed": await d.list_recent_jobs(5, "failed"),
+            "names": {c.collection_id: c.name for c in await d.list_collections()}, "compact": compact,
+        }
+
+    @app.get("/jobs", response_class=HTMLResponse)
+    async def jobs_page(request: Request):
+        ctx = await jobs_context(request)
+        ctx["recent"] = await db(request).list_recent_jobs(50)
+        return templates.TemplateResponse(request, "jobs.html", ctx)
+
+    @app.get("/jobs/panel", response_class=HTMLResponse)
+    async def jobs_panel(request: Request):
+        return templates.TemplateResponse(
+            request, "partials/jobs_panel.html", await jobs_context(request, compact=request.headers.get("HX-Target") == "jobs-panel")
+        )
 
     @app.get("/rows", response_class=HTMLResponse)
     async def dashboard_rows(request: Request):
@@ -682,7 +703,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ) if hasattr(e, "errors") else str(e)
             return templates.TemplateResponse(
                 request, "dashboard.html",
-                {**await dashboard_context(request), "error": msg, "form": data},
+                {**await dashboard_context(request), **await jobs_context(request, compact=True), "error": msg, "form": data},
                 status_code=422,
             )
         return RedirectResponse("/", status_code=303)

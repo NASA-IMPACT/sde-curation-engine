@@ -185,3 +185,8 @@ button.link { background: none; border: 0; color: inherit; text-decoration: unde
 details.add-rule { margin: .4rem 0; } details.add-rule summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
 details.add-rule form { margin-top: .4rem; }
 details.rules summary { cursor: pointer; }
+/* Jobs strip */
+.jobs-card { padding: .5rem 1rem; } .jobs-strip { display: flex; flex-direction: column; gap: .3rem; }
+.jobs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .25rem; }
+.jobs-list li { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.job.j-queued { color: #b45309; }
