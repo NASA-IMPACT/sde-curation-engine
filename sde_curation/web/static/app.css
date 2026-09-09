@@ -48,7 +48,7 @@ code { font-size:.85em; }
 .primary, a.button.primary { background:var(--accent); color:#fff; border:1px solid var(--accent); }
 button.secondary { background:var(--bg); color:var(--fg); border-color:var(--line); }
 button:disabled { opacity:.45; cursor:not-allowed; }
-.done { color:#16a34a; font-weight:600; }
+span.done { color:#16a34a; font-weight:600; }
 .cols { display:grid; grid-template-columns:1fr 1fr; gap:1.5rem; } @media (max-width:800px) { .cols { grid-template-columns:1fr; } }
 details.advanced { margin-top:2rem; color:var(--muted); } details.advanced summary { cursor:pointer; }
 details.advanced .inline { margin-top:.6rem; gap:1.2rem; }
