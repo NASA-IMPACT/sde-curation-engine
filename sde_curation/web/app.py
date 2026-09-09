@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import hashlib
 import re
 import secrets
 import sqlite3
@@ -72,6 +74,21 @@ def since(dt: datetime) -> str:
 
 templates.env.filters["dom_id"] = dom_id
 templates.env.filters["since"] = since
+
+
+@functools.lru_cache(maxsize=32)
+def _static_digest(name: str, mtime_ns: int) -> str:
+    return hashlib.sha1((_HERE / "static" / name).read_bytes()).hexdigest()[:10]
+
+
+def static_url(name: str) -> str:
+    """/static/<name>?v=<content hash> so browsers drop cached copies after a deploy."""
+    path = _HERE / "static" / name
+    digest = _static_digest(name, path.stat().st_mtime_ns) if path.exists() else "0"
+    return f"/static/{name}?v={digest}"
+
+
+templates.env.globals["static_url"] = static_url
 
 PIPELINE = [
     (Status.BACKLOG, "Backlog", "Collection registered"),
