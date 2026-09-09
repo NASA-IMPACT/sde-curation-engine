@@ -4,7 +4,7 @@ import json
 
 from sde_curation.models import Collection, Division
 from tests.conftest import wait_job
-from tests.test_scrape_backend import aws, ssm_env  # noqa: F401 - fixtures
+from tests.test_scrape_backend import aws, ssm_env  # noqa: F401, F811 - pytest fixtures
 
 COLL = Collection(collection_id="ex.org", name="Ex", seed_url="https://ex.org", division=Division.GENERAL,
                   connector="crawler2", max_pages=10)
@@ -48,7 +48,7 @@ async def test_reuse_local_crawl_output(crawler_client):
     assert "loaded existing crawl from" in hist and "scrape.reuse" in hist
 
 
-async def test_ssm_existing_and_fetch(ssm_env, tmp_path):
+async def test_ssm_existing_and_fetch(ssm_env, tmp_path):  # noqa: F811
     host, make, upload = ssm_env
     s = make()
     assert await s.existing(COLL) is None
