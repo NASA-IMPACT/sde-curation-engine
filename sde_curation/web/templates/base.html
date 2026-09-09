@@ -13,13 +13,21 @@
   <header>
     <a href="/" class="brand">SDE Curation Engine</a>
     <span id="conn" class="dot" title="SSE connection"></span>
-    {% if settings.app_password %}
-    {% set me = current_user(request) %}
-    <span class="whoami">
-      {% if me %}<span class="muted">signed in as</span> <b>{{ me.username }}</b>
-      · <a href="/account">Account</a>{% if is_admin(request) %} · <a href="/users">Users</a>{% endif %} ·{% endif %}
-      <form method="post" action="/logout" class="inline"><button type="submit" class="link">Sign out</button></form>
-    </span>
+    {% set me = current_user(request) if settings.app_password else None %}
+    {% if me or not settings.app_password %}
+    <details class="menu" id="menu">
+      <summary aria-label="Menu" title="Menu">
+        {% if me %}<span class="menu-user">{{ me.username }}</span>{% endif %}
+        <span class="burger" aria-hidden="true"><i></i><i></i><i></i></span>
+      </summary>
+      <div class="menu-panel" role="menu">
+        {% if me %}<div class="menu-head"><span class="muted">signed in as</span> <b>{{ me.username }}</b>{% if is_admin(request) %} <span class="role">admin</span>{% endif %}</div>{% endif %}
+        <a role="menuitem" href="/">Collections</a>
+        {% if me %}<a role="menuitem" href="/account">Account</a>{% endif %}
+        {% if me and is_admin(request) %}<a role="menuitem" href="/users">Users</a>{% endif %}
+        {% if me %}<form method="post" action="/logout"><button type="submit" role="menuitem">Sign out</button></form>{% endif %}
+      </div>
+    </details>
     {% endif %}
   </header>
   <main>{% block content %}{% endblock %}</main>
@@ -37,6 +45,9 @@
       if (!v.trim()) { alert("Title cannot be empty. To fall back to the pattern/curated value, delete the exact-URL title pattern in Patterns & AI."); return; }
       editField(cid, url, "title", v);
     }
+    // Hamburger menu: close on outside click or Escape.
+    document.addEventListener('click', (e) => { const m = document.getElementById('menu'); if (m && m.open && !m.contains(e.target)) m.open = false; });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { const m = document.getElementById('menu'); if (m) m.open = false; } });
     // Connection indicator: green when the SSE stream is open.
     document.body.addEventListener('htmx:sseOpen', () => document.getElementById('conn').classList.add('on'));
     document.body.addEventListener('htmx:sseError', () => document.getElementById('conn').classList.remove('on'));

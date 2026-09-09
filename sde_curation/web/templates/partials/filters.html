@@ -1,0 +1,33 @@
+{# Left pane: narrows the collections table. Any change re-fetches /rows (the form's own
+   fields are the query string; the top search bar joins via form="filters"); counts arrive
+   out-of-band so this form is never replaced. #}
+<form id="filters" hx-get="/rows" hx-target="#collections" hx-swap="outerHTML" hx-sync="this:replace"
+      hx-trigger="input changed delay:250ms" onsubmit="return false">
+  <div class="f-head">
+    <span class="f-title">Filters</span>
+    <span class="muted small"><span id="f-shown">{% if active %}{{ shown }} of {{ total }}{% else %}{{ total }}{% endif %}</span></span>
+    <a href="/" class="f-clear" title="Clear all filters">Clear</a>
+  </div>
+  <fieldset>
+    <legend>Workflow status</legend>
+    {% for st in statuses %}
+    <label class="f-opt"><input type="checkbox" name="status" value="{{ st }}" {% if st in filters.status %}checked{% endif %}>
+      <span class="status s-{{ st }}">{{ status_icon(st) }} {{ status_label(st) }}</span><span id="f-status-{{ st }}" class="cnt">{{ counts.status[st] }}</span></label>
+    {% endfor %}
+  </fieldset>
+  <fieldset>
+    <legend>Division</legend>
+    {% for d in divisions %}
+    <label class="f-opt"><input type="checkbox" name="division" value="{{ d }}" {% if d in filters.division %}checked{% endif %}>
+      <span class="f-lbl" title="{{ d }}">{{ d }}</span><span id="f-division-{{ d|dom_id }}" class="cnt">{{ counts.division[d] }}</span></label>
+    {% endfor %}
+  </fieldset>
+  <fieldset>
+    <legend>Curator</legend>
+    {% for u in curators %}
+    <label class="f-opt"><input type="checkbox" name="curator" value="{{ u }}" {% if u in filters.curator %}checked{% endif %}>
+      <span class="f-lbl {% if u == none_curator %}muted{% endif %}">{{ 'Unassigned' if u == none_curator else u }}</span><span id="f-curator-{{ u|dom_id }}" class="cnt">{{ counts.curator[u] }}</span></label>
+    {% endfor %}
+    {% if not curators %}<span class="muted small">No collections yet.</span>{% endif %}
+  </fieldset>
+</form>

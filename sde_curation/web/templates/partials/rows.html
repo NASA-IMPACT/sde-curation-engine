@@ -1,2 +1,13 @@
-{% for r in rows %}{% with c=r.c, job=r.job %}{% include "partials/row.html" %}{% endwith %}{% endfor %}
-{% if not rows %}<tr><td colspan="8" class="muted">No collections yet.</td></tr>{% endif %}
+{# The collections table. Swapped whole (outerHTML) so a filter change or a create/delete
+   re-renders the list; counts in the filter pane ride along as out-of-band swaps. #}
+<table id="collections" hx-get="/rows" hx-include="#filters"
+       hx-trigger="sse:collection_deleted, sse:collection_created" hx-swap="outerHTML" hx-sync="this:replace">
+  <thead>
+    <tr><th>Collection</th><th>Status</th><th>Dump</th><th>Delta</th><th>Curated</th><th>Last job</th><th>Updated</th><th></th></tr>
+  </thead>
+  <tbody id="rows">
+    {% for r in rows %}{% with c=r.c, job=r.job %}{% include "partials/row.html" %}{% endwith %}{% endfor %}
+    {% if not rows %}<tr><td colspan="8" class="muted">{% if total %}No collections match the current filters.{% else %}No collections yet.{% endif %}</td></tr>{% endif %}
+  </tbody>
+</table>
+{% if oob %}{% include "partials/filter_counts.html" %}{% endif %}

@@ -1,0 +1,6 @@
+{# Out-of-band copies of the filter pane's counts (ids match partials/filters.html), appended
+   to every /rows response so the pane stays current without the form being replaced. #}
+<span id="f-shown" hx-swap-oob="true">{% if active %}{{ shown }} of {{ total }}{% else %}{{ total }}{% endif %}</span>
+{% for st in statuses %}<span id="f-status-{{ st }}" class="cnt" hx-swap-oob="true">{{ counts.status[st] }}</span>{% endfor %}
+{% for d in divisions %}<span id="f-division-{{ d|dom_id }}" class="cnt" hx-swap-oob="true">{{ counts.division[d] }}</span>{% endfor %}
+{% for u in curators %}<span id="f-curator-{{ u|dom_id }}" class="cnt" hx-swap-oob="true">{{ counts.curator[u] }}</span>{% endfor %}
