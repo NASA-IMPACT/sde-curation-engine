@@ -91,8 +91,8 @@ async def test_pattern_suggestions_flow(crawler_client):
     title = next(s for s in sugs if s["type"] == "title")
     # nothing applied yet
     assert (await c.get("/api/collections/ex.org/patterns")).json() == []
-    page = (await c.get("/collections/ex.org?tab=patterns")).text
-    assert "Suggested patterns" in page and "Accept" in page
+    page = (await c.get("/collections/ex.org?tab=curate")).text
+    assert f"{len(sugs)} suggestion" in page and "Accept" in page and "accept all" in page
     # accept → real pattern, recomputed
     r = await c.post(f"/api/collections/ex.org/suggestions/{title['id']}/accept")
     assert r.status_code == 200

@@ -174,3 +174,14 @@ button.link { background: none; border: 0; color: inherit; text-decoration: unde
 @media (prefers-color-scheme: dark) { .chip.stage { color: #fde68a; background: color-mix(in srgb, #78350f 40%, transparent); } }
 .pipeline li small.stage { font-weight: 400; opacity: .8; }
 .filters .f-opt.sub { padding-left: 1.4rem; }
+/* Curate workspace */
+.stepper li a { color: inherit; }
+.stage-card h2 .n { width: 1.5rem; height: 1.5rem; border-radius: 50%; display: inline-grid; place-items: center; font-size: .8rem; background: var(--line); }
+.stage-card.current h2 .n { background: var(--accent); color: #fff; } .stage-card.done h2 .n { background: #16a34a; color: #fff; }
+.stage-card.current { border-left: 4px solid var(--accent); } .stage-card.todo { opacity: .85; }
+.stage-card .next { margin: .4rem 0 .6rem; }
+.bulk-bar { margin-bottom: .5rem; gap: .6rem; } .bulk-bar .grow { flex: 1; }
+.stage-foot { margin-top: .6rem; } .stage-foot .grow { flex: 1; }
+details.add-rule { margin: .4rem 0; } details.add-rule summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
+details.add-rule form { margin-top: .4rem; }
+details.rules summary { cursor: pointer; }

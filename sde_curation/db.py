@@ -670,11 +670,21 @@ class Database:
     async def set_pattern_suggestion_state(
         self, collection_id: str, sid: int, state: str, *, actor: str | None = None
     ) -> None:
-        await self.conn.execute(
-            "UPDATE pattern_suggestions SET state=?, decided_by=? WHERE id=? AND collection_id=?",
-            (state, actor, sid, collection_id),
-        )
+        await self.set_pattern_suggestions_state(collection_id, [sid], state, actor=actor)
+
+    async def set_pattern_suggestions_state(
+        self, collection_id: str, ids: list[int], state: str, *, actor: str | None = None
+    ) -> int:
+        n = 0
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            cur = await self.conn.execute(
+                f"UPDATE pattern_suggestions SET state=?, decided_by=? WHERE collection_id=? AND id IN ({','.join('?' * len(chunk))})",
+                (state, actor, collection_id, *chunk),
+            )
+            n += cur.rowcount
         await self.conn.commit()
+        return n
 
     async def deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> list[dict[str, Any]]:
         """Non-deleted, non-excluded delta URLs joined with dump text for classification."""
@@ -685,6 +695,32 @@ class Database:
             q += " AND d.title_ai IS NULL AND d.division_ai IS NULL AND d.document_type_ai IS NULL"
         cur = await self.conn.execute(q + " ORDER BY d.url", (collection_id,))
         return [dict(r) for r in await cur.fetchall()]
+
+    async def deltas_with_ai(self, collection_id: str, field: str) -> list[tuple[str, str]]:
+        """(url, suggested value) for every pending, non-removed URL with an AI suggestion for `field`."""
+        assert field in ("title", "division", "document_type")
+        cur = await self.conn.execute(
+            f"SELECT url, {field}_ai FROM delta_urls WHERE collection_id=? AND kind!='deleted' AND {field}_ai IS NOT NULL ORDER BY url",
+            (collection_id,),
+        )
+        return [(r[0], r[1]) for r in await cur.fetchall()]
+
+    async def delta_ai_counts(self, collection_id: str) -> dict[str, int]:
+        cur = await self.conn.execute(
+            """SELECT SUM(title_ai IS NOT NULL), SUM(division_ai IS NOT NULL), SUM(document_type_ai IS NOT NULL)
+               FROM delta_urls WHERE collection_id=? AND kind!='deleted'""",
+            (collection_id,),
+        )
+        t, d, dt = await cur.fetchone()
+        return {"title": t or 0, "division": d or 0, "document_type": dt or 0}
+
+    async def clear_delta_ai_field(self, collection_id: str, field: str) -> int:
+        assert field in ("title", "division", "document_type")
+        cur = await self.conn.execute(
+            f"UPDATE delta_urls SET {field}_ai=NULL WHERE collection_id=? AND {field}_ai IS NOT NULL", (collection_id,)
+        )
+        await self.conn.commit()
+        return cur.rowcount
 
     async def clear_delta_ai(self, collection_id: str, url: str, field: str) -> None:
         assert field in ("title", "division", "document_type")
@@ -703,6 +739,30 @@ class Database:
         await self.conn.commit()
         p.id = cur.lastrowid
         return p
+
+    async def insert_patterns(self, rows: list[Pattern]) -> int:
+        """Bulk insert; rows identical to an existing (type, match) are skipped. One commit."""
+        n = 0
+        for p in rows:
+            cur = await self.conn.execute(
+                "INSERT OR IGNORE INTO patterns (collection_id,type,match,value,created_at,created_by) VALUES (?,?,?,?,?,?)",
+                (p.collection_id, p.type, p.match, p.value, _iso(p.created_at), p.created_by),
+            )
+            n += cur.rowcount
+        await self.conn.commit()
+        return n
+
+    async def delete_exact_patterns(self, collection_id: str, type_: str, matches: list[str]) -> int:
+        n = 0
+        for i in range(0, len(matches), 500):
+            chunk = matches[i:i + 500]
+            cur = await self.conn.execute(
+                f"DELETE FROM patterns WHERE collection_id=? AND type=? AND match IN ({','.join('?' * len(chunk))})",
+                (collection_id, type_, *chunk),
+            )
+            n += cur.rowcount
+        await self.conn.commit()
+        return n
 
     async def list_patterns(self, collection_id: str) -> list[Pattern]:
         cur = await self.conn.execute(

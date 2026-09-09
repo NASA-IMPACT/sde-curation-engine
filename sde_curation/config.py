@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5.4-mini"
     openai_base_url: str | None = None  # any OpenAI-compatible endpoint
     llm_timeout_s: float = 60.0
+    # Suggest patterns sends this many crawled URLs (random, fixed seed) to the model.
+    llm_pattern_sample_size: int = Field(default=60, ge=5, le=500)
 
     # ── notifications ──────────────────────────────────────────────────
     notify_webhook_url: str | None = None

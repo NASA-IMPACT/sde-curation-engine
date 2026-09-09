@@ -204,10 +204,11 @@ class JobManager:
             self._starting.discard(cid)
 
     async def start_llm_patterns(
-        self, c: Collection, *, sample_size: int = 60, actor: str | None = None
+        self, c: Collection, *, sample_size: int | None = None, actor: str | None = None
     ) -> JobRun:
+        n = sample_size or self.s.llm_pattern_sample_size
         return await self._start(
-            c, JobKind.LLM_PATTERNS, lambda job: self._run_llm_patterns(c, job, sample_size), actor=actor
+            c, JobKind.LLM_PATTERNS, lambda job: self._run_llm_patterns(c, job, n), actor=actor
         )
 
     async def start_llm_metadata(

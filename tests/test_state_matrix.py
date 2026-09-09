@@ -205,7 +205,7 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     assert "Curate ↗</a>" in t
     # header chips reflect counts
     h = (await c.get("/collections/ex.org/header")).text
-    assert "Dump <b>8</b>" in h and "Curated <b>8</b>" in h and "Rules <b>3</b>" in h
+    assert "Crawl <b>8</b>" in h and "Curated <b>8</b>" in h and "Rules <b>3</b>" in h
     assert (await c.get("/collections/ex.org/urls/nope")).status_code == 404
 
 

@@ -187,6 +187,16 @@ class StageChange(BaseModel):
     stage: CurationStage
 
 
+class SuggestionBulk(BaseModel):
+    decision: Literal["accept", "reject"]
+    type: PatternType | None = None  # None = every pending suggestion
+
+
+class AiBulk(BaseModel):
+    decision: Literal["accept", "reject"]
+    field: Literal["title", "division", "document_type"]
+
+
 class UrlEdit(BaseModel):
     """Per-URL curator edit = an exact-URL pattern (the most specific pattern possible)."""
 
@@ -486,17 +496,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 set_ = "deltas"
             ctx.update(await urls_context(request, c, set_))
         elif tab == "curate":
-            ctx.update(
-                patterns=await curation(request).pattern_stats(c),
-                suggestions=await d.list_pattern_suggestions(c.collection_id, "pending"),
-                classifiable=len(await d.deltas_for_llm(c.collection_id)),
-                llm_name=settings.llm_provider, divisions=list(Division), doc_types=list(DocumentType),
-                pattern_types=list(PatternType),
-            )
+            ctx.update(await curate_context(request, c))
         else:
             ctx.update(history=await d.status_history(c.collection_id), jobs=await d.list_jobs(c.collection_id, 50),
                        audit=await d.list_audit(c.collection_id, 100))
         return ctx
+
+    async def curate_context(request: Request, c: Collection) -> dict[str, Any]:
+        """The guided workspace: ① scope (suggested patterns) → ② metadata (AI per URL) → ③ promote."""
+        d = db(request)
+        cid = c.collection_id
+        suggestions = await d.list_pattern_suggestions(cid, "pending")
+        ai_counts = await d.delta_ai_counts(cid)
+        step = await step_context(request, c, Status.CURATING)
+        return {
+            "stats": step["stats"],
+            "suggestions": suggestions,
+            "suggestion_counts": {"total": len(suggestions), "by_type": Counter(s["type"] for s in suggestions)},
+            "patterns_ever_run": await d.job_exists(cid, "llm_patterns"),
+            "last_patterns_job": await d.latest_job_of_kind(cid, "llm_patterns"),
+            "last_metadata_job": await d.latest_job_of_kind(cid, "llm_metadata"),
+            "classifiable": len(await d.deltas_for_llm(cid)),
+            "classifiable_all": len(await d.deltas_for_llm(cid, only_missing=False)),
+            "ai_counts": ai_counts, "ai_pending_total": sum(ai_counts.values()),
+            "sample_size": min(settings.llm_pattern_sample_size, c.dump_count),
+            "llm_name": settings.llm_provider, "divisions": list(Division), "doc_types": list(DocumentType),
+            "pattern_types": list(PatternType),
+        }
+
+    @app.get("/collections/{collection_id}/rules", response_class=HTMLResponse)
+    async def collection_rules(request: Request, collection_id: str):
+        """The rules (patterns) table, loaded lazily: match counting scans every dump URL."""
+        c = await must_get(request, collection_id)
+        job = await db(request).latest_job(collection_id)
+        return templates.TemplateResponse(request, "partials/rules.html", {
+            "c": c, "job": job, "patterns": await curation(request).pattern_stats(c),
+        })
 
     async def header_context(request: Request, c: Collection) -> dict[str, Any]:
         ctx = await step_context(request, c, c.status)
@@ -1012,9 +1047,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await must_get(request, collection_id)
         return await db(request).list_pattern_suggestions(collection_id, state or None)
 
+    async def _decide_suggestions(request: Request, c: Collection, sugs: list[dict], decision: str) -> int:
+        """accept → the suggestions become real patterns (one recompute); reject → kept for the
+        record, never applied. Returns how many suggestions were decided."""
+        if decision == "accept":
+            _, ds = await curation(request).add_patterns(
+                c, [PatternCreate(type=s["type"], match=s["match"], value=s["value"]) for s in sugs],
+                actor=actor(request),
+            )
+            await _after_curation_change(request, c, ds)
+        return await db(request).set_pattern_suggestions_state(
+            c.collection_id, [s["id"] for s in sugs], "accepted" if decision == "accept" else "rejected",
+            actor=actor(request),
+        )
+
+    @app.post("/api/collections/{collection_id}/suggestions/bulk")
+    async def api_decide_suggestions_bulk(request: Request, collection_id: str, body: SuggestionBulk):
+        """Accept or reject every pending pattern suggestion, optionally only one type."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        sugs = [s for s in await db(request).list_pattern_suggestions(collection_id, "pending")
+                if body.type is None or s["type"] == body.type]
+        if not sugs:
+            raise HTTPException(409, f"no pending {body.type or ''} suggestions".replace("  ", " "))
+        n = await _decide_suggestions(request, c, sugs, body.decision)
+        await audit(request, f"suggestion.bulk_{body.decision}", collection_id, f"{body.type or 'all'} × {n}")
+        return htmx_done(request, {"decided": n, "state": body.decision + "ed"})
+
     @app.post("/api/collections/{collection_id}/suggestions/{sid}/{decision}")
     async def api_decide_suggestion(request: Request, collection_id: str, sid: int, decision: str):
-        """accept → becomes a real pattern (recompute); reject → kept for the record, never applied."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         if decision not in ("accept", "reject"):
@@ -1024,21 +1085,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "suggestion not found")
         if sug["state"] != "pending":
             raise HTTPException(409, f"suggestion already {sug['state']}")
-        if decision == "accept":
-            try:
-                _, ds = await curation(request).add_pattern(
-                    c, PatternCreate(type=sug["type"], match=sug["match"], value=sug["value"]),
-                    actor=actor(request),
-                )
-            except sqlite3.IntegrityError:
-                ds = await curation(request).recompute(c)  # identical pattern already exists
-            await _after_curation_change(request, c, ds)
-        await db(request).set_pattern_suggestion_state(
-            collection_id, sid, "accepted" if decision == "accept" else "rejected", actor=actor(request)
-        )
+        await _decide_suggestions(request, c, [sug], decision)
         await audit(request, f"suggestion.{decision}", collection_id,
                     f"{sug['type']} {sug['match']}" + (f" → {sug['value']}" if sug.get("value") else ""))
         return htmx_done(request, {"id": sid, "state": decision + "ed"})
+
+    @app.post("/api/collections/{collection_id}/ai/bulk")
+    async def api_decide_ai_bulk(request: Request, collection_id: str, body: AiBulk):
+        """Accept every AI suggestion for one field as exact-URL rules (one recompute), or drop them all."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        rows = await db(request).deltas_with_ai(collection_id, body.field)
+        if not rows:
+            raise HTTPException(409, f"no AI {body.field} suggestions to {body.decision}")
+        if body.decision == "accept":
+            ds = await curation(request).replace_exact_patterns(
+                c, [PatternCreate(type=PatternType(body.field), match=url, value=str(v)) for url, v in rows],
+                actor=actor(request),
+            )
+            await _after_curation_change(request, c, ds)
+        await db(request).clear_delta_ai_field(collection_id, body.field)
+        await audit(request, f"ai.bulk_{body.decision}", collection_id, f"{body.field} × {len(rows)}")
+        return htmx_done(request, {"decided": len(rows), "field": body.field, "state": body.decision + "ed"})
 
     @app.post("/api/collections/{collection_id}/ai/{decision}")
     async def api_decide_ai(request: Request, collection_id: str, decision: str, body: AiDecision):
