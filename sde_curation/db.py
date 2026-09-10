@@ -30,6 +30,9 @@ from .models import (
     utcnow,
 )
 
+# Human-readable names for `patterns.source` (SME is the default and reads as no label).
+SOURCE_LABEL = {"sme": "SME", "llm": "AI", "llm_edited": "AI, edited", "global": "global list"}
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -45,6 +48,7 @@ CREATE TABLE IF NOT EXISTS collections (
   status TEXT NOT NULL,
   curation_stage TEXT,
   needs_recuration INTEGER NOT NULL DEFAULT 0,
+  recuration_reason TEXT,
   last_scraped_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -86,6 +90,7 @@ CREATE TABLE IF NOT EXISTS delta_urls (
   document_type TEXT,
   excluded INTEGER NOT NULL DEFAULT 0,
   content_changed INTEGER NOT NULL DEFAULT 0,
+  edited_by TEXT,
   title_ai TEXT,
   division_ai TEXT,
   document_type_ai TEXT,
@@ -106,6 +111,7 @@ CREATE TABLE IF NOT EXISTS curated_urls (
   document_type TEXT,
   excluded INTEGER NOT NULL DEFAULT 0,
   content_hash TEXT,
+  edited_by TEXT,
   PRIMARY KEY (collection_id, url)
 );
 
@@ -117,6 +123,7 @@ CREATE TABLE IF NOT EXISTS patterns (
   value TEXT,
   created_at TEXT NOT NULL,
   created_by TEXT,
+  source TEXT NOT NULL DEFAULT 'sme',
   UNIQUE (collection_id, type, match)
 );
 
@@ -140,6 +147,7 @@ CREATE TABLE IF NOT EXISTS pattern_suggestions (
   source TEXT NOT NULL DEFAULT 'llm',
   created_at TEXT NOT NULL,
   decided_by TEXT,
+  accepted_as TEXT,
   UNIQUE (collection_id, type, match)
 );
 
@@ -249,10 +257,38 @@ class Database:
             # per-field confidence and provenance of AI suggestions
             ("delta_urls", "title_ai_conf"), ("delta_urls", "division_ai_conf"),
             ("delta_urls", "document_type_ai_conf"), ("delta_urls", "ai_model"), ("delta_urls", "ai_content_hash"),
+            # provenance of rules and of the values they set; why a collection needs re-curation
+            ("delta_urls", "edited_by"), ("curated_urls", "edited_by"), ("collections", "recuration_reason"),
+            ("pattern_suggestions", "accepted_as"),
         ):
             await self._add_column(table, col, "TEXT")
         await self._add_column("delta_urls", "content_changed", "INTEGER NOT NULL DEFAULT 0")
         await self._add_column("pattern_suggestions", "source", "TEXT NOT NULL DEFAULT 'llm'")
+        cur = await self._conn.execute("PRAGMA table_info(patterns)")
+        if "source" not in {r[1] for r in await cur.fetchall()}:
+            await self._add_column("patterns", "source", "TEXT NOT NULL DEFAULT 'sme'")
+            # rules that came from an accepted suggestion keep their origin instead of reading as SME
+            await self._conn.execute(
+                """UPDATE patterns SET source = (
+                     SELECT s.source FROM pattern_suggestions s
+                     WHERE s.collection_id = patterns.collection_id AND s.type = patterns.type
+                       AND s.match = patterns.match AND s.state = 'accepted')
+                   WHERE EXISTS (
+                     SELECT 1 FROM pattern_suggestions s
+                     WHERE s.collection_id = patterns.collection_id AND s.type = patterns.type
+                       AND s.match = patterns.match AND s.state = 'accepted')"""
+            )
+        # Per-URL AI accepts from before `source` existed left an exact audit line
+        # ("field url → value"); lift those rules to 'llm'. Idempotent, so it also repairs a database
+        # that got the column from an earlier build. Bulk accepts never named their URLs, so those
+        # rules stay 'sme' (documented limitation).
+        await self._conn.execute(
+            """UPDATE patterns SET source = 'llm'
+               WHERE source = 'sme' AND value IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM audit_log a
+                 WHERE a.collection_id = patterns.collection_id AND a.action = 'ai.accept'
+                   AND a.detail = patterns.type || ' ' || patterns.match || ' → ' || patterns.value)"""
+        )
         # Rows from before last_scraped_at existed: take the last successful scrape job.
         await self._conn.execute(
             """UPDATE collections SET last_scraped_at = (
@@ -369,10 +405,11 @@ class Database:
         )
         await self.conn.commit()
 
-    async def set_flag(self, collection_id: str, needs_recuration: bool) -> None:
+    async def set_flag(self, collection_id: str, needs_recuration: bool, reason: str | None = None) -> None:
+        """Raise or clear the needs-re-curation flag; the reason is kept only while it is up."""
         await self.conn.execute(
-            "UPDATE collections SET needs_recuration=?, updated_at=? WHERE collection_id=?",
-            (int(needs_recuration), _iso(utcnow()), collection_id),
+            "UPDATE collections SET needs_recuration=?, recuration_reason=?, updated_at=? WHERE collection_id=?",
+            (int(needs_recuration), (reason or None) if needs_recuration else None, _iso(utcnow()), collection_id),
         )
         await self.conn.commit()
 
@@ -432,7 +469,8 @@ class Database:
         cur = await self.conn.execute(
             f"""SELECT d.collection_id, d.url, d.scraped_title, d.content_type, d.depth,
                        length(d.full_text) AS text_len,
-                       (c.url IS NOT NULL) AS in_curated, (x.url IS NOT NULL) AS in_deltas
+                       (c.url IS NOT NULL) AS in_curated, (x.url IS NOT NULL) AS in_deltas,
+                       COALESCE(x.excluded, c.excluded, 0) AS excluded, COALESCE(x.edited_by, c.edited_by) AS edited_by
                 FROM dump_urls d
                 LEFT JOIN curated_urls c ON c.collection_id=d.collection_id AND c.url=d.url
                 LEFT JOIN delta_urls x ON x.collection_id=d.collection_id AND x.url=d.url
@@ -450,31 +488,35 @@ class Database:
         return {r[0] for r in await cur.fetchall()}
 
     async def effects_for(self, collection_id: str, urls: list[str]) -> dict[str, dict[str, str]]:
-        """{url: {field: 'type match → value'}} — which pattern produced each effective field."""
+        """{url: {field: 'type match → value (by who · source)'}} — which pattern produced each
+        effective field ("excluded" = the exclude / include rule that decided the row)."""
         if not urls:
             return {}
         marks = ",".join("?" * len(urls))
         cur = await self.conn.execute(
-            f"""SELECT e.url, e.field, p.type, p.match, p.value, p.created_by FROM pattern_effects e
+            f"""SELECT e.url, e.field, p.type, p.match, p.value, p.created_by, p.source FROM pattern_effects e
                 JOIN patterns p ON p.id=e.pattern_id
                 WHERE e.collection_id=? AND e.url IN ({marks})""", [collection_id, *urls],
         )
         out: dict[str, dict[str, str]] = {}
-        for url, field, ptype, match, value, by in await cur.fetchall():
+        for url, field, ptype, match, value, by, source in await cur.fetchall():
             out.setdefault(url, {})[field] = (
                 f"{ptype} {match}" + (f" → {value}" if value else "") + (f" (by {by})" if by else "")
+                + (f" · {SOURCE_LABEL[source]}" if source in SOURCE_LABEL and source != "sme" else "")
             )
         return out
 
     async def list_curated(
         self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None,
-        excluded: bool | None = None,
+        excluded: bool | None = None, edited: str | None = None,
     ) -> tuple[list[CuratedUrl], int]:
         where, args = ["collection_id=?"], [collection_id]
         if q:
             where.append("(url LIKE ? OR title LIKE ? OR scraped_title LIKE ?)"); args += [f"%{q}%"] * 3
         if excluded is not None:
             where.append("excluded=?"); args.append(int(excluded))
+        if edited:
+            where.append("edited_by=?"); args.append(edited)
         w = " AND ".join(where)
         cur = await self.conn.execute(f"SELECT COUNT(*) FROM curated_urls WHERE {w}", args)
         total = (await cur.fetchone())[0]
@@ -527,11 +569,13 @@ class Database:
         self, collection_id: str, *, kind: str | None = None, excluded: bool | None = None,
         q: str | None = None, division: str | None = None, document_type: str | None = None,
         ai_pending: bool = False, ai_conf: str | None = None, content_changed: bool | None = None,
-        limit: int = 100, offset: int = 0,
+        edited: str | None = None, limit: int = 100, offset: int = 0,
     ) -> tuple[list[DeltaUrl], int]:
         where, args = ["collection_id=?"], [collection_id]
         if kind:
             where.append("kind=?"); args.append(kind)
+        if edited:
+            where.append("edited_by=?"); args.append(edited)
         if excluded is not None:
             where.append("excluded=?"); args.append(int(excluded))
         if content_changed is not None:
@@ -559,26 +603,30 @@ class Database:
         return [DeltaUrl(**dict(r)) for r in await cur.fetchall()], total
 
     async def replace_deltas(
-        self, collection_id: str, deltas: list[DeltaUrl], effects: list[tuple[int, str, str]]
+        self, collection_id: str, deltas: list[DeltaUrl], effects: list[tuple[int, str, str]],
+        *, keep_effects: bool = False,
     ) -> None:
+        """Replace the delta URLs (and, unless `keep_effects`, the rule→URL effects). Promote
+        keeps the effects: the rules did not change, and the Curated table still explains its values."""
         await self.conn.execute("DELETE FROM delta_urls WHERE collection_id=?", (collection_id,))
         await self.conn.executemany(
             """INSERT INTO delta_urls (collection_id,url,kind,scraped_title,title,division,document_type,
-               excluded,content_changed,title_ai,division_ai,document_type_ai,title_ai_conf,division_ai_conf,document_type_ai_conf,ai_model,ai_content_hash)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               excluded,content_changed,edited_by,title_ai,division_ai,document_type_ai,title_ai_conf,division_ai_conf,document_type_ai_conf,ai_model,ai_content_hash)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [(d.collection_id, d.url, d.kind, d.scraped_title, d.title, d.division, d.document_type,
-              int(d.excluded), int(d.content_changed), d.title_ai, d.division_ai, d.document_type_ai,
+              int(d.excluded), int(d.content_changed), d.edited_by, d.title_ai, d.division_ai, d.document_type_ai,
               d.title_ai_conf, d.division_ai_conf, d.document_type_ai_conf, d.ai_model,
               d.ai_content_hash)
              for d in deltas],
         )
-        await self.conn.execute(
-            "DELETE FROM pattern_effects WHERE collection_id=?", (collection_id,)
-        )
-        await self.conn.executemany(
-            "INSERT OR IGNORE INTO pattern_effects (pattern_id,collection_id,url,field) VALUES (?,?,?,?)",
-            [(pid, collection_id, url, fld) for pid, url, fld in effects],
-        )
+        if not keep_effects:
+            await self.conn.execute(
+                "DELETE FROM pattern_effects WHERE collection_id=?", (collection_id,)
+            )
+            await self.conn.executemany(
+                "INSERT OR IGNORE INTO pattern_effects (pattern_id,collection_id,url,field) VALUES (?,?,?,?)",
+                [(pid, collection_id, url, fld) for pid, url, fld in effects],
+            )
         await self.conn.execute(
             "UPDATE collections SET delta_count=?, updated_at=? WHERE collection_id=?",
             (len(deltas), _iso(utcnow()), collection_id),
@@ -609,13 +657,21 @@ class Database:
         )
         return [CuratedUrl(**dict(r)) for r in await cur.fetchall()]
 
+    async def set_curated_edited_by(self, collection_id: str, items: list[tuple[str, str | None]]) -> None:
+        """Re-attribute unchanged curated rows (no delta) after a recompute."""
+        await self.conn.executemany(
+            "UPDATE curated_urls SET edited_by=? WHERE collection_id=? AND url=?",
+            [(eb, collection_id, url) for url, eb in items],
+        )
+        await self.conn.commit()
+
     async def replace_curated(self, collection_id: str, rows: list[CuratedUrl]) -> int:
         await self.conn.execute("DELETE FROM curated_urls WHERE collection_id=?", (collection_id,))
         await self.conn.executemany(
             """INSERT INTO curated_urls (collection_id,url,scraped_title,title,division,document_type,excluded,
-               content_hash) VALUES (?,?,?,?,?,?,?,?)""",
+               content_hash,edited_by) VALUES (?,?,?,?,?,?,?,?,?)""",
             [(r.collection_id, r.url, r.scraped_title, r.title, r.division, r.document_type,
-              int(r.excluded), r.content_hash) for r in rows],
+              int(r.excluded), r.content_hash, r.edited_by) for r in rows],
         )
         await self.conn.execute(
             "UPDATE collections SET curated_count=?, updated_at=? WHERE collection_id=?",
@@ -734,9 +790,17 @@ class Database:
         return dict(row) if row else None
 
     async def set_pattern_suggestion_state(
-        self, collection_id: str, sid: int, state: str, *, actor: str | None = None
+        self, collection_id: str, sid: int, state: str, *, actor: str | None = None,
+        accepted_as: str | None = None,
     ) -> None:
+        """`accepted_as` records the glob actually applied when the curator edited it before accepting."""
         await self.set_pattern_suggestions_state(collection_id, [sid], state, actor=actor)
+        if accepted_as:
+            await self.conn.execute(
+                "UPDATE pattern_suggestions SET accepted_as=? WHERE collection_id=? AND id=?",
+                (accepted_as, collection_id, sid),
+            )
+            await self.conn.commit()
 
     async def set_pattern_suggestions_state(
         self, collection_id: str, ids: list[int], state: str, *, actor: str | None = None
@@ -757,6 +821,15 @@ class Database:
     _LLM_WHERE = "d.collection_id=? AND d.kind!='deleted' AND d.excluded=0"
     _LLM_MISSING = (" AND ((d.title_ai IS NULL AND d.division_ai IS NULL AND d.document_type_ai IS NULL)"
                     " OR (d.content_changed=1 AND (d.ai_content_hash IS NULL OR d.ai_content_hash != u.content_hash)))")
+
+    async def pending_urls_for_patterns(self, collection_id: str) -> list[tuple[str, str | None]]:
+        """(url, scraped_title) of every included delta URL — what Suggest exclusions looks at.
+        Same predicate as the metadata job: removed rows are gone anyway and excluded rows are decided."""
+        cur = await self.conn.execute(
+            f"SELECT d.url, d.scraped_title FROM delta_urls d WHERE {self._LLM_WHERE} ORDER BY d.url",
+            (collection_id,),
+        )
+        return [(r[0], r[1]) for r in await cur.fetchall()]
 
     async def count_deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> int:
         q = (f"SELECT COUNT(*) FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id"
@@ -832,8 +905,8 @@ class Database:
 
     async def insert_pattern(self, p: Pattern) -> Pattern:
         cur = await self.conn.execute(
-            "INSERT INTO patterns (collection_id,type,match,value,created_at,created_by) VALUES (?,?,?,?,?,?)",
-            (p.collection_id, p.type, p.match, p.value, _iso(p.created_at), p.created_by),
+            "INSERT INTO patterns (collection_id,type,match,value,created_at,created_by,source) VALUES (?,?,?,?,?,?,?)",
+            (p.collection_id, p.type, p.match, p.value, _iso(p.created_at), p.created_by, p.source),
         )
         await self.conn.commit()
         p.id = cur.lastrowid
@@ -844,8 +917,8 @@ class Database:
         n = 0
         for p in rows:
             cur = await self.conn.execute(
-                "INSERT OR IGNORE INTO patterns (collection_id,type,match,value,created_at,created_by) VALUES (?,?,?,?,?,?)",
-                (p.collection_id, p.type, p.match, p.value, _iso(p.created_at), p.created_by),
+                "INSERT OR IGNORE INTO patterns (collection_id,type,match,value,created_at,created_by,source) VALUES (?,?,?,?,?,?,?)",
+                (p.collection_id, p.type, p.match, p.value, _iso(p.created_at), p.created_by, p.source),
             )
             n += cur.rowcount
         await self.conn.commit()

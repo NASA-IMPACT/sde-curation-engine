@@ -34,18 +34,50 @@
   </header>
   <main>{% block content %}{% endblock %}</main>
   <script>
-    // Per-URL edits = exact-URL patterns (used by the Deltas grid).
-    async function editField(cid, url, type, value) {
-      const r = await fetch(`/api/collections/${encodeURIComponent(cid)}/urls`, {method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(value ? {url, type, value} : {url, type, value: null})});
-      if (!r.ok) { let m = await r.text(); try { m = JSON.parse(m).detail || m; } catch (_) {} alert(m); return; }
-      location.reload();
+    // Per-URL edits = exact-URL rules (Dump / Delta / Curated URL tables). When the field still has an
+    // AI suggestion (`ai` = true) the edit goes through /ai/accept so the suggestion is resolved too:
+    // same value → accepted as AI, a different value → "AI, edited".
+    async function postJson(path, body) {
+      const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      if (!r.ok) { let m = await r.text(); try { m = JSON.parse(m).detail || m; } catch (_) {} alert(m); return false; }
+      return true;
     }
-    function editTitle(cid, url, current) {
+    async function editField(cid, url, type, value, ai) {
+      const base = `/api/collections/${encodeURIComponent(cid)}`;
+      const ok = (ai && value)
+        ? await postJson(`${base}/ai/accept`, {url, field: type, value})
+        : await postJson(`${base}/urls`, value ? {url, type, value} : {url, type, value: null});
+      if (ok) location.reload();
+    }
+    function editTitle(cid, url, current, ai) {
       const v = prompt("Title for\n" + url + "\n\nTip: {title} = scraped title, {collection} = collection name", current);
       if (v === null) return;
       if (!v.trim()) { alert("Title cannot be empty. To fall back to the pattern/curated value, delete the exact-URL title rule under Curate › Rules."); return; }
-      editField(cid, url, "title", v);
+      editField(cid, url, "title", v, !!ai);
+    }
+    // ✎ on an AI division / doc-type badge: preselect the suggested value and hand over to the select.
+    function pickAi(btn, value) {
+      const sel = btn.closest("td").querySelector("select");
+      if (!sel) return;
+      sel.value = value; sel.focus();
+      try { sel.showPicker(); } catch (_) {}
+    }
+    // Edit a pattern suggestion's glob in place, then accept it with the edited match.
+    function editSuggestion(btn, cid, sid, match) {
+      const cell = btn.closest("tr").querySelector("td.match");
+      if (!cell || cell.querySelector("input")) return;
+      cell.dataset.orig = cell.innerHTML;
+      cell.innerHTML = `<span class="inline nowrap"><input size="42" aria-label="edited glob"> <button class="primary mini" type="button">Save &amp; accept</button> <button class="secondary mini" type="button">Cancel</button></span>`;
+      const input = cell.querySelector("input"); input.value = match; input.focus(); input.select();
+      const [save, cancel] = cell.querySelectorAll("button");
+      const restore = () => { cell.innerHTML = cell.dataset.orig; };
+      cancel.onclick = restore;
+      input.onkeydown = (e) => { if (e.key === "Escape") restore(); if (e.key === "Enter") save.click(); };
+      save.onclick = async () => {
+        const v = input.value.trim();
+        if (!v) { alert("The match cannot be empty."); return; }
+        if (await postJson(`/api/collections/${encodeURIComponent(cid)}/suggestions/${sid}/accept`, {match: v})) location.reload();
+      };
     }
     // Hamburger menu: close on outside click or Escape.
     document.addEventListener('click', (e) => { const m = document.getElementById('menu'); if (m && m.open && !m.contains(e.target)) m.open = false; });

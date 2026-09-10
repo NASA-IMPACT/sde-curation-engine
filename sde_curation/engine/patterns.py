@@ -44,7 +44,8 @@ class Resolved:
     title: str | None = None
     division: str | None = None
     document_type: str | None = None
-    # which pattern id produced each field (None = fell back to curated/NULL)
+    # which pattern id produced each field (None = fell back to curated/NULL); the key
+    # "excluded" names the include rule that forced the URL in, else the exclude rule that kept it out
     effects: dict[str, int] = field(default_factory=dict)
 
 
@@ -85,17 +86,20 @@ def resolve_all(
     """Resolve every URL. `base` = curated values per url (title/division/document_type)."""
     compiled = compile_patterns(patterns, urls)
 
-    excluded: set[str] = set()
-    included: set[str] = set()
+    # url -> the (first) rule that excludes / includes it; the include wins for the effect
+    excluded: dict[str, int] = {}
+    included: dict[str, int] = {}
     per_field: dict[str, list[Compiled]] = {t: [] for t in FIELD_TYPES}
     # exact patterns always win (match set of size 1 = most specific; unique per type+match),
     # so they are resolved by dict lookup instead of scanning the glob list per URL
     exact: dict[tuple[str, str], Compiled] = {}
     for c in compiled:
         if c.pattern.type is PatternType.EXCLUDE:
-            excluded |= c.matches
+            for u in c.matches:
+                excluded.setdefault(u, c.pattern.id)  # type: ignore[arg-type]
         elif c.pattern.type is PatternType.INCLUDE:
-            included |= c.matches
+            for u in c.matches:
+                included.setdefault(u, c.pattern.id)  # type: ignore[arg-type]
         elif is_exact(c.pattern.match):
             if c.matches:
                 exact[(c.pattern.type, c.pattern.match)] = c
@@ -109,6 +113,8 @@ def resolve_all(
     out: dict[str, Resolved] = {}
     for u in urls:
         r = Resolved(excluded=(u in excluded) and (u not in included))
+        if u in excluded:  # an include that overrides nothing has no effect worth recording
+            r.effects["excluded"] = included.get(u, excluded[u])
         b = base.get(u, {})
         for t in FIELD_TYPES:
             winner = exact.get((t, u)) or next((c for c in per_field[t] if u in c.matches), None)

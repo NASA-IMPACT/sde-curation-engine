@@ -1,7 +1,7 @@
 {# Curate workspace: one page, three sections in the order the curator works.
    ① Exclusions — decide what must never be indexed (suggested exclude rules, bulk accept)
    ② Metadata — titles / divisions / document types (AI per URL, bulk accept)
-   ③ Promote — apply the pending changes to the curated set
+   ③ Promote — apply the delta URLs to the curated URLs
    Rules — every rule in force (lazy-loaded) #}
 {% from "partials/job_progress.html" import job_progress %}
 {% set cid = c.collection_id %}
@@ -16,13 +16,13 @@
 {% if not curating %}
 <section class="next"><div class="next-inner">
   <div>
-    {% if c.status in ('backlog',) or c.dump_count == 0 %}<b>Nothing to curate yet.</b> Scrape the site first (Overview › step 1).
-    {% elif c.status == 'scraped' %}<b>Crawl ready.</b> Start curating to compute what changed vs. the curated set.
-    {% else %}<b>Nothing pending.</b> The curated set ({{ c.curated_count }} URLs) is up to date with the crawl. Add a rule below or re-scrape to review again.{% endif %}
+    {% if c.status in ('backlog',) or c.dump_count == 0 %}<b>Nothing to curate yet.</b> Scrape the site first (Overview › step 1) to get the dump URLs.
+    {% elif c.status == 'scraped' %}<b>Dump ready.</b> Start curating to compute the delta URLs (dump vs. curated).
+    {% else %}<b>No delta URLs.</b> The curated URLs ({{ c.curated_count }}) are up to date with the dump. Add a rule below, edit a curated URL, or re-scrape to review again.{% endif %}
   </div>
   <div class="inline">
     {% if c.status == 'scraped' and c.dump_count %}<button class="primary" hx-post="/api/collections/{{ cid }}/recompute?then={{ ('/collections/' ~ cid ~ '?tab=curate')|urlencode }}" hx-swap="none" {% if running %}disabled{% endif %}>Start curating</button>
-    {% elif c.status not in ('backlog', 'scraped') %}<button class="secondary" hx-post="/api/collections/{{ cid }}/recompute" hx-swap="none" {% if running %}disabled{% endif %} title="Re-run the diff against the latest crawl">Review / re-curate</button>{% endif %}
+    {% elif c.status not in ('backlog', 'scraped') %}<button class="secondary" hx-post="/api/collections/{{ cid }}/recompute" hx-swap="none" {% if running %}disabled{% endif %} title="Recompute the delta URLs against the latest dump">Review / re-curate</button>{% endif %}
   </div>
 </div></section>
 {% endif %}
@@ -38,14 +38,15 @@
 {# ── ① Exclusions ─────────────────────────────────────────────────────── #}
 <section class="card stage-card {{ s1 }}" id="exclusions">
   <h2><span class="n">1</span> Exclusions <small class="muted">decide what must never be indexed</small> <span class="state-tag {{ s1 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s1] }}</span></h2>
-  <p class="muted">{{ c.dump_count }} crawled URLs → {{ c.delta_count }} pending change{{ 's' if c.delta_count != 1 }}
-    ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.content_changed %} · <a href="/collections/{{ cid }}?tab=urls&set=deltas&changed=true">{{ dc.content_changed }} text changed</a>{% endif %} · {{ dc.deleted }} removed · <b>{{ dc.excluded }} excluded</b> by rules).
+  <p class="muted">{{ c.dump_count }} dump URLs → {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }}
+    ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.content_changed %} · <a href="/collections/{{ cid }}?tab=urls&set=delta&changed=true">{{ dc.content_changed }} text changed</a>{% endif %} · {{ dc.deleted }} removed · <b>{{ dc.excluded }} excluded</b> by rules).
     Exclude what should never be searchable (login, feeds, tag pages…); <code>include</code> always beats <code>exclude</code>.</p>
 
   <div class="next"><div class="next-inner">
     <div>
       <b>✨ Suggest exclusions</b> — checks the global exclude list ({{ global_excludes }} known globs), then asks {{ llm_name }}
-      to draft <b>exclude</b> rules from <b>all {{ c.dump_count }}</b> crawled URLs ({{ pattern_calls }} call{{ 's' if pattern_calls != 1 }} of up to {{ pattern_batch }} URLs each, URL + title only).
+      to draft <b>exclude</b> rules from the <b>{{ pattern_candidates }} included delta URL{{ 's' if pattern_candidates != 1 }}</b> ({{ pattern_calls }} call{{ 's' if pattern_calls != 1 }} of up to {{ pattern_batch }} URLs each, URL + title only).
+      On a first pass that is the whole dump; after a re-crawl only what changed. Match counts are over all {{ c.dump_count }} dump URLs.
       Nothing is applied until you accept; accepted excludes never reach the index.
       <details class="prompt"><summary class="muted small">Show the prompt</summary><pre class="prompt">{{ prompts.patterns.system }}
 
@@ -53,10 +54,10 @@
 {{ prompts.patterns.user }}</pre></details>
       {% if last_patterns_job %}<br><small class="muted">Last run {{ last_patterns_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_patterns_job.state }}">{{ last_patterns_job.state }}</span> · {{ job_progress(last_patterns_job) }}</small>{% endif %}
     </div>
-    <button class="{{ 'primary' if not suggestions and s1 == 'current' else 'secondary' }}" {% if running or c.dump_count == 0 %}disabled{% endif %}
-            title="{% if c.dump_count == 0 %}scrape first{% elif running %}wait for the running job{% else %}all {{ c.dump_count }} URLs in {{ pattern_calls }} call{{ 's' if pattern_calls != 1 }}{% endif %}"
+    <button class="{{ 'primary' if not suggestions and s1 == 'current' else 'secondary' }}" {% if running or c.dump_count == 0 or pattern_candidates == 0 %}disabled{% endif %}
+            title="{% if c.dump_count == 0 %}scrape first{% elif running %}wait for the running job{% elif not c.delta_count %}Start curating first — suggestions are drawn from the delta URLs{% elif pattern_candidates == 0 %}every delta URL is already excluded{% else %}{{ pattern_candidates }} delta URLs in {{ pattern_calls }} call{{ 's' if pattern_calls != 1 }}{% endif %}"
             hx-post="/api/collections/{{ cid }}/suggest/patterns" hx-swap="none"
-            {% if suggestions %}hx-confirm="Re-run? The {{ suggestion_counts.total }} undecided suggestions are replaced."{% endif %}>✨ Suggest exclusions <small>(all {{ c.dump_count }} URLs · {{ pattern_calls }} call{{ 's' if pattern_calls != 1 }})</small></button>
+            {% if suggestions %}hx-confirm="Re-run? The {{ suggestion_counts.total }} undecided suggestions are replaced."{% endif %}>✨ Suggest exclusions <small>({{ pattern_candidates }} delta URL{{ 's' if pattern_candidates != 1 }} · {{ pattern_calls }} call{{ 's' if pattern_calls != 1 }})</small></button>
   </div></div>
 
   {% if suggestions %}
@@ -66,7 +67,7 @@
       {% for t in pattern_types if suggestion_counts.by_type[t] %}
       <span class="nowrap"><span class="ptype {{ t }}">{{ t }} {{ suggestion_counts.by_type[t] }}</span>
         <button class="mini ok" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "accept", "type": t}|tojson }}' hx-swap="none"
-                hx-confirm="Accept all {{ suggestion_counts.by_type[t] }} {{ t }} suggestions? They become rules and pending changes are recomputed.">✓ accept all</button><button class="mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "type": t}|tojson }}' hx-swap="none"
+                hx-confirm="Accept all {{ suggestion_counts.by_type[t] }} {{ t }} suggestions? They become rules and the delta URLs are recomputed.">✓ accept all</button><button class="mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "type": t}|tojson }}' hx-swap="none"
                 hx-confirm="Reject all {{ suggestion_counts.by_type[t] }} {{ t }} suggestions?">✕</button></span>
       {% endfor %}
       <span class="grow"></span>
@@ -74,12 +75,13 @@
       <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/bulk" hx-ext="json-enc" hx-vals='{"decision": "reject"}' hx-swap="none" hx-confirm="Reject all {{ suggestion_counts.total }} suggestions?">Reject all</button>
     </div>
     <table>
-      <thead><tr><th>Type</th><th>Match</th><th title="global = from the shared exclude list; llm = drafted by the model for this collection">Source</th><th title="crawled URLs this rule would match">Matches</th><th>Why</th><th></th></tr></thead>
+      <thead><tr><th>Type</th><th>Match</th><th title="global = from the shared exclude list; llm = drafted by the model for this collection">Source</th><th title="dump URLs this rule would match">Matches</th><th>Why</th><th></th></tr></thead>
       <tbody>{% for sg in suggestions %}
-        <tr><td><span class="ptype {{ sg.type }}">{{ sg.type }}</span></td><td><code>{{ sg.match }}</code></td><td><span class="src src-{{ sg.source }}">{{ sg.source }}</span></td>
-            <td class="num"><a href="/collections/{{ cid }}?tab=urls&set=dump&q={{ sg.match|replace('*','')|urlencode }}" title="show matching crawled URLs">{{ sg.matches }}</a></td><td class="muted">{{ sg.rationale }}</td>
-            <td class="inline nowrap">
-              <button class="primary mini" title="Add as a rule" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/{{ sg.id }}/accept" hx-swap="none">Accept</button>
+        <tr><td><span class="ptype {{ sg.type }}">{{ sg.type }}</span></td><td class="match"><code>{{ sg.match }}</code></td><td><span class="src src-{{ sg.source }}">{{ 'global list' if sg.source == 'global' else 'AI' }}</span></td>
+            <td class="num"><a href="/collections/{{ cid }}?tab=urls&set=dump&q={{ sg.match|replace('*','')|urlencode }}" title="show matching dump URLs">{{ sg.matches }}</a></td><td class="muted why">{{ sg.rationale }}</td>
+            <td class="inline nowrap actions">
+              <button class="primary mini" title="Add as a rule, as suggested" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/{{ sg.id }}/accept" hx-swap="none">Accept</button>
+              <button class="secondary mini" type="button" title="Change the glob first, then accept it (recorded as AI, edited)" {% if running %}disabled{% endif %} onclick='editSuggestion(this, {{ cid|tojson }}, {{ sg.id }}, {{ sg.match|tojson }})'>Edit</button>
               <button class="secondary mini" title="Dismiss" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/{{ sg.id }}/reject" hx-swap="none">Reject</button>
             </td></tr>
       {% endfor %}</tbody>
@@ -99,7 +101,8 @@
   </details>
 
   <div class="inline stage-foot">
-    <a class="small" href="/collections/{{ cid }}?tab=urls&set=deltas">Review pending URLs ↗</a>
+    <a class="small" href="/collections/{{ cid }}?tab=urls&set=delta">Review delta URLs ↗</a>
+    {% if dc.deleted %}<a class="small" href="/collections/{{ cid }}?tab=urls&set=delta&kind=deleted" title="gone from the dump: promote drops them from the curated URLs, the next index run deletes them">{{ dc.deleted }} removed ↗</a>{% endif %}
     <span class="grow"></span>
     {% if stage == 'exclusions' %}
     <button class="primary" hx-post="/api/collections/{{ cid }}/stage" hx-ext="json-enc" hx-vals='{"stage": "metadata"}' hx-swap="none"
@@ -116,7 +119,7 @@
   <div class="next"><div class="next-inner">
     <div>
       <b>✨ Suggest metadata</b> — asks {{ llm_model }} for a title, division and document type
-      for each of the <b>{{ classifiable }}</b> pending, included URL{{ 's' if classifiable != 1 }} not yet classified (or whose text changed since):
+      for each of the <b>{{ classifiable }}</b> included delta URL{{ 's' if classifiable != 1 }} not yet classified (or whose text changed since):
       one call per URL with the <b>full page text</b> (never cut), {{ llm_workers }} in parallel. Each answer carries a confidence per field. Nothing is applied until you accept.
       <details class="prompt"><summary class="muted small">Show the prompt</summary><pre class="prompt">{{ prompts.metadata.system }}
 
@@ -143,9 +146,9 @@
                 hx-confirm="Discard all {{ ai_counts[f] }} AI {{ label }}?">✕</button></span>
       {% endfor %}
       <span class="muted small">confidence:</span>
-      {% for lvl in ['high', 'medium', 'low'] %}<a class="conf conf-{{ lvl }}" href="/collections/{{ cid }}?tab=urls&set=deltas&ai={{ lvl }}" title="review the {{ lvl }}-confidence suggestions">{{ lvl }} {{ ai_counts.by_conf[lvl] }}</a> {% endfor %}
+      {% for lvl in ['high', 'medium', 'low'] %}<a class="conf conf-{{ lvl }}" href="/collections/{{ cid }}?tab=urls&set=delta&ai={{ lvl }}" title="review the {{ lvl }}-confidence suggestions">{{ lvl }} {{ ai_counts.by_conf[lvl] }}</a> {% endfor %}
       <span class="grow"></span>
-      <a class="small" href="/collections/{{ cid }}?tab=urls&set=deltas&ai=pending">Review one by one ↗</a>
+      <a class="small" href="/collections/{{ cid }}?tab=urls&set=delta&ai=pending">Review one by one ↗</a>
     </div>
   </div>
   {% endif %}
@@ -166,21 +169,22 @@
 
 {# ── ③ Promote ───────────────────────────────────────────────────── #}
 <section class="card stage-card {{ s3 }}" id="promote">
-  <h2><span class="n">3</span> Promote <small class="muted">apply the pending changes to the curated set</small> <span class="state-tag {{ s3 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s3] }}</span></h2>
-  <p class="muted">Promoting writes {{ c.delta_count }} pending change{{ 's' if c.delta_count != 1 }} into the curated set
+  <h2><span class="n">3</span> Promote <small class="muted">apply the delta URLs to the curated URLs</small> <span class="state-tag {{ s3 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s3] }}</span></h2>
+  <p class="muted">Promoting writes {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }} into the curated URLs
     ({{ dc.new }} new · {{ dc.modified }} modified · {{ dc.deleted }} removed · {{ dc.excluded }} excluded) and marks the collection <b>Curated</b>, ready to index.</p>
+  {% if removal_warning %}<div class="banner warn">⚠ {{ removal_warning }}</div>{% endif %}
   {% if ai_pending_total and curating %}<div class="banner info">⚠ {{ ai_pending_total }} AI suggestion{{ 's are' if ai_pending_total != 1 else ' is' }} still undecided — promoting discards them. Accept or reject them in step 2 first.</div>{% endif %}
   <div class="inline">
     <button class="{{ 'primary' if s3 == 'current' else 'secondary' }}" hx-post="/api/collections/{{ cid }}/promote" hx-swap="none"
             {% if not curating or running %}disabled title="requires status curating and no running job"{% endif %}
-            {% if c.delta_count %}hx-confirm="Promote {{ c.delta_count }} pending changes to the curated set?"{% endif %}>{% if c.delta_count %}Promote {{ c.delta_count }} change{{ 's' if c.delta_count != 1 }} → curated{% else %}Mark curated (nothing pending){% endif %}</button>
-    <button class="secondary" title="Re-run the diff against the latest crawl (safe to repeat)" {% if running or not c.dump_count %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/recompute" hx-swap="none">Recompute pending changes</button>
-    <a class="small" href="/collections/{{ cid }}?tab=urls&set=deltas">Review pending URLs ↗</a>
+            {% if c.delta_count %}hx-confirm="Promote {{ c.delta_count }} delta URLs to the curated URLs?"{% endif %}>{% if c.delta_count %}Promote {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }} → curated{% else %}Mark curated (no delta URLs){% endif %}</button>
+    <button class="secondary" title="Re-run the diff of the dump URLs against the curated URLs (safe to repeat)" {% if running or not c.dump_count %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/recompute" hx-swap="none">Recompute delta URLs</button>
+    <a class="small" href="/collections/{{ cid }}?tab=urls&set=delta">Review delta URLs ↗</a>
   </div>
 </section>
 
 {# ── Rules ───────────────────────────────────────────────────────── #}
 <details class="card rules" id="rules" {% if not curating %}open{% endif %}>
-  <summary><b>Rules</b> <span class="count">{{ stats.pattern_count }}</span> <small class="muted">every rule in force · the most specific wins · include beats exclude · per-URL edits are exact-URL rules</small></summary>
+  <summary><b>Rules</b> <span class="count">{{ stats.pattern_count }}</span> <small class="muted">every rule in force for <b>this collection only</b> · the most specific wins · include beats exclude · per-URL edits are exact-URL rules</small></summary>
   <div hx-get="/collections/{{ cid }}/rules" hx-trigger="load" hx-swap="innerHTML"><p class="muted small"><span class="spinner"></span> loading…</p></div>
 </details>

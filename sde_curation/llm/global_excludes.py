@@ -25,12 +25,16 @@ def load_global_excludes(path: Path | None = None) -> GlobalExcludeList:
     return _load(str(p), p.stat().st_mtime)
 
 
-def global_exclude_hits(excludes: GlobalExcludeList, all_urls: list[str]) -> list[dict[str, Any]]:
-    """Every global glob that matches at least one crawled URL, as pending-suggestion rows."""
+def global_exclude_hits(
+    excludes: GlobalExcludeList, urls: list[str], *, count_over: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """Every global glob that matches at least one of `urls`, as pending-suggestion rows. The
+    `matches` figure is counted over `count_over` (the whole crawl) when given."""
     pats = [Pattern(id=i, collection_id="-", type=PatternType.EXCLUDE, match=g.match)
             for i, g in enumerate(excludes.patterns)]
-    counts = match_counts(pats, all_urls)
+    hits = match_counts(pats, urls)
+    counts = match_counts(pats, count_over) if count_over is not None else hits
     return [
         {"type": "exclude", "match": g.match, "rationale": g.rationale, "matches": counts[i], "source": "global"}
-        for i, g in enumerate(excludes.patterns) if counts.get(i, 0)
+        for i, g in enumerate(excludes.patterns) if hits.get(i, 0)
     ]

@@ -87,7 +87,7 @@ Click **Start curating** → status **Curating**, step 3. The **Deltas** tab now
 URL as a `new` delta (nothing is applied until promoted).
 
 Patterns (tab **Patterns**, form **Add a pattern**). Add one of each type and watch the effect
-on the Deltas tab after **Recompute deltas** (recompute also runs automatically after each change):
+on the Delta URLs tab after **Recompute delta URLs** (recompute also runs automatically after each change):
 
 | Type | Example value | Expect |
 |---|---|---|
@@ -128,7 +128,7 @@ Click **Promote N deltas → curated** (or **Mark curated** if there are no delt
 | Expect | Check |
 |---|---|
 | status **Curated**, step 4; **Curated** count = number of included URLs; excluded URLs are listed as "excluded from indexing"; status history row **By** = you | collection page |
-| Deltas tab is empty ("0 deltas pending") | Deltas |
+| Delta URLs tab is empty ("No delta URLs") | Delta URLs |
 | trying to promote again is a no-op / 409 "promote requires status 'curating'" | button gone |
 
 ## 7. Index to test (indexer over ECS) and validation
@@ -164,7 +164,7 @@ Click **Re-scrape** on the live collection.
 | Expect | Check |
 |---|---|
 | status back to **Scraped**, a "needs re-curation" flag/banner on the row and page | dashboard + page |
-| **Start curating** → deltas are now relative to the previous dump: `new`, `modified` (changed title), `deleted` (gone from the crawl) | Deltas tab, kind column |
+| **Start curating** → the delta URLs are now relative to the previous dump: `new`, `modified` (changed title), `deleted` (gone from the crawl) | Deltas tab, kind column |
 | curated URLs that disappeared show as `deleted` deltas; promoting removes them from the curated set | promote, then Curated count |
 | Index to test again → the indexer reports `changed` / `deleted` counts instead of all-new | Indexer line |
 

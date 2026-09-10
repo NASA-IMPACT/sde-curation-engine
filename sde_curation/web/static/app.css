@@ -272,3 +272,39 @@ details.rules summary { cursor: pointer; }
   .manual .pipeline { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .manual .defs { grid-template-columns: 1fr; }
 }
+
+/* ── wrapping rules (2026-09-10): a chip / pill / tag never breaks inside itself; cells wrap
+   BETWEEN chips; long URLs and globs wrap anywhere instead of forcing a horizontal scroll. ── */
+.status, .chip, .kind, .ptype, .src, .edited, .flag, .job, .conf, .state-tag { white-space: nowrap; }
+.chip, .edited, .src { display: inline-flex; align-items: center; gap: .3rem; vertical-align: middle; }
+#collections td.status-cell { white-space: normal; }
+#collections td.status-cell > * { margin: 0 .25rem .25rem 0; }
+#collections td.status-cell .flag { font-size: 1rem; }
+.badges { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+td.match, td.match code, .rules code, .suggestions code { overflow-wrap: anywhere; word-break: break-word; }
+td.why { max-width: 28rem; overflow-wrap: anywhere; }
+.suggestions table, .rules table { table-layout: auto; width: 100%; }
+.suggestions td.actions, .rules td:last-child { white-space: nowrap; }
+.wb-name { overflow-wrap: anywhere; }
+.job_progress, .pipeline li .stage { white-space: nowrap; }
+.banner { overflow-wrap: anywhere; }
+.banner.warn { background: color-mix(in srgb, #d97706 14%, transparent); color: #92400e; border-left: 3px solid #d97706; }
+@media (prefers-color-scheme: dark) { .banner.warn { color: #fde68a; } }
+table.urls select.cell { max-width: 13rem; }
+table.urls th, .rules th, .suggestions th, #collections th { white-space: nowrap; }
+table.urls td { vertical-align: top; }
+.ai { overflow-wrap: anywhere; white-space: normal; display: inline; }
+
+/* ── provenance chips: who set a value ──────────────────────── */
+.edited { font-size: .72rem; padding: .05rem .45rem; border-radius: 999px; border: 1px solid var(--line); font-weight: 600; letter-spacing: .02em; }
+.e-ai, .e-src-llm { background: #ede9fe; color: #4c1d95; border-color: #c4b5fd; }
+.e-src-llm_edited { background: #ede9fe; color: #4c1d95; border-color: #7c3aed; border-style: dashed; }
+.e-sme, .e-src-sme { background: #dcfce7; color: #166534; border-color: #86efac; }
+.e-mixed { background: linear-gradient(90deg, #ede9fe 50%, #dcfce7 50%); color: #1f2937; border-color: #a78bfa; }
+.e-src-global { background: #e0f2fe; color: #075985; border-color: #7dd3fc; }
+@media (prefers-color-scheme: dark) {
+  .e-ai, .e-src-llm, .e-src-llm_edited { background: #3b0764; color: #e9d5ff; border-color: #7c3aed; }
+  .e-sme, .e-src-sme { background: #14532d; color: #bbf7d0; border-color: #22c55e; }
+  .e-mixed { background: linear-gradient(90deg, #3b0764 50%, #14532d 50%); color: #f3f4f6; border-color: #a78bfa; }
+  .e-src-global { background: #0c4a6e; color: #bae6fd; border-color: #0ea5e9; }
+}

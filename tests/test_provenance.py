@@ -47,7 +47,7 @@ async def test_curation_actions_are_attributed(authed_crawler_client):
     pats = (await a.get("/api/collections/ex.org/patterns")).json()
     assert {p["created_by"] for p in pats} == {"alice"}
     assert {p["created_by"] for p in _yaml(c, "patterns.yaml")} == {"alice"}
-    page = (await a.get("/collections/ex.org?tab=urls&set=deltas")).text
+    page = (await a.get("/collections/ex.org?tab=urls&set=delta")).text
     assert 'title="division */p2 → Earth Science (by alice)"' in page
     page = (await a.get("/collections/ex.org?tab=patterns")).text
     assert ">alice<" in page
