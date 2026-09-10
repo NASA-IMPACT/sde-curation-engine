@@ -22,6 +22,7 @@ class OpenAIProvider:
         from openai import AsyncOpenAI
 
         self.model = settings.openai_model
+        self.temperature = settings.llm_temperature
         self.timeout = settings.llm_timeout_s
         self.max_retries = settings.llm_max_retries
         # The SDK retries 429 / 5xx / connection errors itself with exponential backoff and
@@ -51,7 +52,7 @@ class OpenAIProvider:
                     model=use_model,
                     messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                     response_format=schema,
-                    temperature=0,
+                    **({"temperature": self.temperature} if self.temperature is not None else {}),
                 ),
                 timeout=self.timeout * (self.max_retries + 1) + 5,
             )

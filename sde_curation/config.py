@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-5.6-luna"  # 1.05M-token window: every page fits, whole
     openai_base_url: str | None = None  # any OpenAI-compatible endpoint
+    # Sent only when set. Reasoning models (gpt-5 family, o-series) reject any value but their
+    # default and fail every call with 400; leave unset unless the model is known to accept it.
+    llm_temperature: float | None = Field(default=None, ge=0, le=2)
     llm_timeout_s: float = 60.0  # per attempt
     llm_max_retries: int = Field(default=5, ge=0, le=10)  # SDK retries on 429 / 5xx / timeouts
     llm_workers: int = Field(default=24, ge=1, le=64)  # concurrent calls inside one LLM job

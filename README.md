@@ -253,7 +253,7 @@ are in flight — the ceilings come from the systems behind it.
 | `SCRAPE_POLL_INTERVAL_S` | `ssm` backend: how often to look at the crawler host. A queued job waits indefinitely (the UI shows for how long); only a dead `watch_inbox.sh` fails it |
 | `VALIDATION_DELAY_S`, `VALIDATION_TITLE_MATCH_THRESHOLD`, `VALIDATION_ASSUME_ROLE_ARN` | validation gate |
 | `NOTIFY_WEBHOOK_URL`, `PUBLIC_BASE_URL` | Slack-compatible notifications on every status change |
-| `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.6-luna`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` (per attempt), `LLM_MAX_RETRIES` | LLM assist; any OpenAI-compatible endpoint |
+| `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.6-luna`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` (per attempt), `LLM_MAX_RETRIES`, `LLM_TEMPERATURE` (unset = model default; reasoning models reject any other value) | LLM assist; any OpenAI-compatible endpoint |
 | `LLM_WORKERS` (24), `LLM_PATTERN_BATCH_URLS` (1000), `GLOBAL_EXCLUDES_PATH` | calls in flight per LLM job; URLs per Suggest-patterns call; override the packaged global exclude YAML |
 | `APP_PASSWORD`, `SESSION_SECRET`, `SESSION_TTL_S`, `AUTH_COOKIE_SECURE` | login with local accounts (off when `APP_PASSWORD` is empty; the value seeds the bootstrap `admin`); `/health` stays open |
 | `DB_LOCKING_MODE` (`normal`\|`exclusive`) | `exclusive` when `engine.db` lives on EFS/NFS |
