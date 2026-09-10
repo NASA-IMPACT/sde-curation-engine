@@ -153,6 +153,13 @@ button.link { background: none; border: 0; color: inherit; text-decoration: unde
 .filters .f-opt:has(input:checked) { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .filters .f-opt:has(input:checked) .cnt { color: var(--fg); font-weight: 600; }
 @media (max-width: 860px) { .dash { grid-template-columns: 1fr; } .filters { position: static; } }
+/* collections table: keep pills, timestamps and the action button on one line; the last-job
+   error truncates instead of squeezing its neighbours (full text lives in the title tooltip). */
+#collections .status, #collections time, #collections td.actions { white-space: nowrap; }
+#collections td.actions { text-align: right; }
+#collections td.actions button.primary { padding: .3rem .6rem; font-size: .85rem; }
+#collections td.lastjob { width: 38%; max-width: 0; }
+#collections .err { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── header hamburger menu ──────────────────────────────────── */
 .menu { margin-left: auto; position: relative; }

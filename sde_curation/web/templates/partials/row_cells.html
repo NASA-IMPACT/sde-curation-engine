@@ -6,7 +6,7 @@
   <td title="URLs in the latest crawl">{{ c.dump_count }}</td>
   <td title="Pending changes to review"><a href="/collections/{{ c.collection_id }}?tab=urls&set=deltas">{{ c.delta_count }}</a></td>
   <td title="Approved URLs">{{ c.curated_count }}</td>
-  <td>{% if job %}<span class="job j-{{ job.state }}" title="{{ job.error or '' }}">{{ job.kind }} · {{ 'queued' if job.state == 'running' and job.progress.queued else job.state }}</span>
+  <td class="lastjob">{% if job %}<span class="job j-{{ job.state }}" title="{{ job.error or '' }}">{{ job.kind }} · {{ 'queued' if job.state == 'running' and job.progress.queued else job.state }}</span>
       {% if job.state == 'failed' %}<br><small class="err">{{ (job.error or '')[:90] }}</small>{% else %}<small class="muted"> {{ job_progress(job) }}</small>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
   <td><time datetime="{{ c.updated_at.isoformat() }}">{{ c.updated_at.strftime('%m-%d %H:%M') }}</time></td>
   <td class="actions">{% with in_row=True %}{% include "partials/action.html" %}{% endwith %}</td>
