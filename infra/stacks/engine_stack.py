@@ -149,6 +149,7 @@ class CurationEngineStack(Stack):
             "CRAWLER_INSTANCE_ID": p["crawler_instance_id"],
             "CRAWLER_S3_BUCKET": p["crawler_bucket"],
             "CRAWLER_REMOTE_INBOX": cfg.crawler_inbox,
+            "CRAWLER_S3_PREFIX": cfg.crawler_s3_prefix,
             "COSMOS_INDEX_BUCKET": p["cosmos_index_bucket"],
             "INDEXING_ECS_CLUSTER": p["indexing_cluster_name"],
             "INDEXING_TASK_FAMILY": p["indexing_task_family"],
@@ -297,6 +298,7 @@ class CurationEngineStack(Stack):
         cfg, a, r = self.cfg, self.account, self.region
         cosmos = f"arn:aws:s3:::{p['cosmos_index_bucket']}"
         crawler = f"arn:aws:s3:::{p['crawler_bucket']}"
+        crawler_dir = f"{crawler}/{cfg.crawler_s3_prefix.strip('/')}" if cfg.crawler_s3_prefix.strip("/") else crawler
         cluster_arn = f"arn:aws:ecs:{r}:{a}:cluster/{p['indexing_cluster_name']}"
         role.add_to_policy(iam.PolicyStatement(
             sid="CosmosHandoffBucket", actions=["s3:ListBucket"], resources=[cosmos],
@@ -310,7 +312,7 @@ class CurationEngineStack(Stack):
         ))
         role.add_to_policy(iam.PolicyStatement(
             sid="CrawlerObjectsRead", actions=["s3:GetObject"],
-            resources=[f"{crawler}/scraped_collections/*", f"{crawler}/failure_logs/*"],
+            resources=[f"{crawler_dir}/scraped_collections/*", f"{crawler_dir}/failure_logs/*"],
         ))
         role.add_to_policy(iam.PolicyStatement(
             sid="CrawlerSsmSend", actions=["ssm:SendCommand"],

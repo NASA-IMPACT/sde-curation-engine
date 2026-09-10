@@ -194,7 +194,8 @@ unapply (next most specific → curated → NULL). Diff + apply run as one idemp
 | `CRAWLER_ROOT`, `CRAWLER_PYTHON` | crawl4ai repo and its interpreter |
 | `INDEXER_ROOT`, `INDEXER_PYTHON` | sde-api-scrapers repo (Phase 5) |
 | `SCRAPE_BACKEND` | `local` (subprocess) or `ssm` (drop the job on the EC2 inbox via SSM; the job shows as *queued* until the crawler rewrites its log, then S3 is polled for the documents object) |
-| `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET` | needed for `ssm` |
+| `AWS_PROFILE` | local runs only: the AWS CLI/SSO profile boto3 uses (the app exports it); unset in ECS |
+| `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET`, `CRAWLER_S3_PREFIX` | needed for `ssm`; the prefix is the folder inside the bucket the crawler writes to (`<prefix>/scraped_collections/…`), empty = bucket root |
 | `INDEX_BACKEND` (`local`\|`ecs`), `COSMOS_INDEX_BUCKET`, `WEB_INDEX_NAME` | indexing target bucket / index |
 | `INDEXING_ECS_CLUSTER`, `INDEXING_TASK_FAMILY`, `INDEXING_CONTAINER_NAME`, `INDEXING_SUBNETS`, `INDEXING_SECURITY_GROUPS`, `INDEXING_DISPATCH_ROLE_ARN` | `ecs` backend |
 | `OPENSEARCH_ENDPOINT_TEST`, `OPENSEARCH_ENDPOINT_PROD`, `SAGEMAKER_ENDPOINT_NAME` | `local` backend (the ECS task def already carries these) |

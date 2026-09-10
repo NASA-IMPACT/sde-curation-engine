@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -34,7 +35,13 @@ class Settings(BaseSettings):
 
     # ── AWS ────────────────────────────────────────────────────────────
     aws_region: str = "us-east-1"
+    # Local runs: the named AWS CLI/SSO profile every boto3 client uses (unset in ECS, where the
+    # task role applies). Exported to the process environment once, because .env values are not.
+    aws_profile: str | None = None
     crawler_s3_bucket: str | None = None  # SDE_S3_BUCKET of the crawler stack
+    # Folder inside that bucket the crawler writes to ("" = bucket root): keys are
+    # <prefix>/scraped_collections/<id>.json and <prefix>/failure_logs/<id>_failures_summary.json
+    crawler_s3_prefix: str = ""
     crawler_instance_id: str | None = None  # EC2 instance running watch_inbox.sh
     crawler_remote_inbox: str = "/opt/sde-crawler/jobs/incoming"
     cosmos_index_bucket: str | None = None  # sde-cosmos-indexing-{env}
@@ -128,6 +135,8 @@ def get_settings() -> Settings:
     global _settings
     if _settings is None:
         _settings = Settings()
+        if _settings.aws_profile and not os.environ.get("AWS_PROFILE"):
+            os.environ["AWS_PROFILE"] = _settings.aws_profile
     return _settings
 
 

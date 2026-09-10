@@ -354,8 +354,12 @@ class SsmRemoteScraper:
             return None
         return r["ETag"], r["LastModified"]
 
+    def _key(self, rel: str) -> str:
+        prefix = self.s.crawler_s3_prefix.strip("/")
+        return f"{prefix}/{rel}" if prefix else rel
+
     def _docs_key(self, cid: str) -> str:
-        return f"scraped_collections/{cid}.json"
+        return self._key(f"scraped_collections/{cid}.json")
 
     async def existing(self, collection: Collection) -> ExistingCrawl | None:
         key = self._docs_key(collection.collection_id)
@@ -376,7 +380,7 @@ class SsmRemoteScraper:
         return result
 
     async def _download(self, cid: str) -> ScrapeResult:
-        docs_key, summary_key = self._docs_key(cid), f"failure_logs/{cid}_failures_summary.json"
+        docs_key, summary_key = self._docs_key(cid), self._key(f"failure_logs/{cid}_failures_summary.json")
         local = self.s.data_dir / "scrapes" / f"{cid}.json"
         local.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(

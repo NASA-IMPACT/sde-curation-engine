@@ -65,3 +65,27 @@ async def test_ssm_existing_and_fetch(ssm_env, tmp_path):  # noqa: F811
     assert json.loads(res.documents_path.read_text())[0]["url"] == "https://ex.org/a"
     assert res.summary["documents_scraped"] == 1
     assert s.ssm.commands == []  # no SSM command was issued
+
+
+async def test_ssm_reads_from_the_configured_bucket_folder(ssm_env, tmp_path):  # noqa: F811
+    """CRAWLER_S3_PREFIX: the prototype crawler writes under a folder, not at the bucket root."""
+    import boto3
+
+    _host, make, _upload = ssm_env
+    s = make(crawler_s3_prefix="/sde-curation-engine-prototype/")
+    assert s._docs_key("ex.org") == "sde-curation-engine-prototype/scraped_collections/ex.org.json"
+    assert await s.existing(COLL) is None  # nothing under the folder yet
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.put_object(Bucket="crawl-bkt", Key="sde-curation-engine-prototype/scraped_collections/ex.org.json",
+                  Body=json.dumps([{"url": "https://ex.org/a", "title": "A", "full_text": "t"}]))
+    s3.put_object(Bucket="crawl-bkt", Key="sde-curation-engine-prototype/failure_logs/ex.org_failures_summary.json",
+                  Body=json.dumps({"documents_scraped": 1}))
+    ex = await s.existing(COLL)
+    assert ex and ex.where == "s3://crawl-bkt/sde-curation-engine-prototype/scraped_collections/ex.org.json"
+
+    async def cb(p):
+        pass
+
+    res = await s.fetch_existing(COLL, cb)
+    assert json.loads(res.documents_path.read_text())[0]["url"] == "https://ex.org/a"
+    assert res.summary == {"documents_scraped": 1}
