@@ -16,10 +16,10 @@
     </div>
   </div>
   <div class="wb-chips">
-    <a class="chip {% if not c.dump_count %}zero{% endif %}" href="/collections/{{ cid }}?tab=urls&set=dump" title="URLs found by the last crawl{% if c.last_scraped_at %} ({{ c.last_scraped_at.strftime('%Y-%m-%d %H:%M') }}Z){% endif %}">Crawl <b>{{ c.dump_count }}</b></a>
-    <a class="chip {% if not c.delta_count %}zero{% endif %}" href="/collections/{{ cid }}?tab=urls&set=deltas" title="Pending changes to review">Pending <b>{{ c.delta_count }}</b>
+    <a class="chip {% if not c.dump_count %}zero{% endif %}" href="/collections/{{ cid }}?tab=urls&set=dump" title="Dump URLs: every URL the last crawl found{% if c.last_scraped_at %} ({{ c.last_scraped_at.strftime('%Y-%m-%d %H:%M') }}Z){% endif %}">Dump URLs <b>{{ c.dump_count }}</b></a>
+    <a class="chip {% if not c.delta_count %}zero{% endif %}" href="/collections/{{ cid }}?tab=urls&set=delta" title="Delta URLs: what will change in the curated URLs when you promote">Delta URLs <b>{{ c.delta_count }}</b>
       {% if c.delta_count %}<small>{{ stats.delta_counts.new }} new · {{ stats.delta_counts.modified }} mod · {{ stats.delta_counts.deleted }} removed{% if stats.delta_counts.excluded %} · {{ stats.delta_counts.excluded }} excl{% endif %}</small>{% endif %}</a>
-    <a class="chip {% if not c.curated_count %}zero{% endif %}" href="/collections/{{ cid }}?tab=urls&set=curated" title="Approved set; included rows are exported to the index">Curated <b>{{ c.curated_count }}</b>
+    <a class="chip {% if not c.curated_count %}zero{% endif %}" href="/collections/{{ cid }}?tab=urls&set=curated" title="Curated URLs: the approved set; included rows are exported to the index">Curated URLs <b>{{ c.curated_count }}</b>
       {% if stats.curated_excluded %}<small>{{ stats.curated_excluded }} excl</small>{% endif %}</a>
     <a class="chip {% if not stats.pattern_count %}zero{% endif %}" href="/collections/{{ cid }}?tab=curate" title="Curation rules">Rules <b>{{ stats.pattern_count }}</b></a>
   </div>

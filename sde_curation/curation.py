@@ -7,7 +7,7 @@ import asyncio
 from .db import Database
 from .engine.diff import DeltaSet, promote, recompute
 from .engine.patterns import match_counts
-from .models import Collection, Pattern, PatternCreate, Status
+from .models import Collection, Pattern, PatternCreate, RuleSource, Status
 
 
 class CurationService:
@@ -38,28 +38,33 @@ class CurationService:
             previous=previous,
         )
         await self.db.replace_deltas(c.collection_id, ds.deltas, ds.effects)
+        if ds.curated_edited_by:
+            await self.db.set_curated_edited_by(c.collection_id, ds.curated_edited_by)
         return ds
 
     async def add_pattern(
-        self, c: Collection, body: PatternCreate, *, actor: str | None = None
+        self, c: Collection, body: PatternCreate, *, actor: str | None = None,
+        source: RuleSource = RuleSource.SME,
     ) -> tuple[Pattern, DeltaSet]:
         p = await self.db.insert_pattern(
-            Pattern(collection_id=c.collection_id, created_by=actor, **body.model_dump())
+            Pattern(collection_id=c.collection_id, created_by=actor, source=source, **body.model_dump())
         )
         return p, await self.recompute(c)
 
     async def add_patterns(
-        self, c: Collection, bodies: list[PatternCreate], *, actor: str | None = None
+        self, c: Collection, bodies: list[tuple[PatternCreate, RuleSource]], *, actor: str | None = None
     ) -> tuple[int, DeltaSet]:
-        """Bulk accept: insert every pattern (duplicates skipped), recompute once."""
+        """Bulk accept: insert every pattern with its own source (duplicates skipped), recompute once."""
         async with self._lock_for(c.collection_id):
             n = await self.db.insert_patterns(
-                [Pattern(collection_id=c.collection_id, created_by=actor, **b.model_dump()) for b in bodies]
+                [Pattern(collection_id=c.collection_id, created_by=actor, source=src, **b.model_dump())
+                 for b, src in bodies]
             )
             return n, await self._recompute(c)
 
     async def replace_exact_patterns(
-        self, c: Collection, bodies: list[PatternCreate], *, actor: str | None = None
+        self, c: Collection, bodies: list[PatternCreate], *, actor: str | None = None,
+        source: RuleSource = RuleSource.SME,
     ) -> DeltaSet:
         """Bulk per-URL edits of one field: drop the previous exact-URL rule for each URL, insert
         the new value, recompute once."""
@@ -70,20 +75,21 @@ class CurationService:
             for t, matches in by_type.items():
                 await self.db.delete_exact_patterns(c.collection_id, t, matches)
             await self.db.insert_patterns(
-                [Pattern(collection_id=c.collection_id, created_by=actor, **b.model_dump()) for b in bodies]
+                [Pattern(collection_id=c.collection_id, created_by=actor, source=source, **b.model_dump())
+                 for b in bodies]
             )
             return await self._recompute(c)
 
     async def replace_exact_pattern(
-        self, c: Collection, body: PatternCreate, *, old_id: int | None, actor: str | None = None
+        self, c: Collection, body: PatternCreate, *, old_id: int | None, actor: str | None = None,
+        source: RuleSource = RuleSource.SME,
     ) -> DeltaSet:
-        """Per-URL edit: insert the new value first, then drop the previous one, so a failed
-        insert never loses the curator's earlier edit."""
+        """Per-URL edit: drop the previous exact-URL rule for that field, insert the new value."""
         async with self._lock_for(c.collection_id):
             if old_id is not None:
                 await self.db.delete_pattern(c.collection_id, old_id)
             await self.db.insert_pattern(
-                Pattern(collection_id=c.collection_id, created_by=actor, **body.model_dump())
+                Pattern(collection_id=c.collection_id, created_by=actor, source=source, **body.model_dump())
             )
             return await self._recompute(c)
 
@@ -109,8 +115,9 @@ class CurationService:
             content_hashes=await self.db.dump_content_hashes(c.collection_id),
         )
         n = await self.db.replace_curated(c.collection_id, curated)
-        await self.db.replace_deltas(c.collection_id, [], [])
+        # the rules did not change: keep the rule→URL effects so the Curated table can still say why
+        await self.db.replace_deltas(c.collection_id, [], [], keep_effects=True)
         await self.db.set_flag(c.collection_id, False)
-        note = f"promoted {len(deltas)} deltas → {n} curated" if deltas else "nothing pending → curated"
+        note = f"promoted {len(deltas)} delta URLs → {n} curated URLs" if deltas else "no delta URLs → curated"
         await self.db.set_status(c.collection_id, Status.CURATED, note=note, force=True, actor=actor)
         return n

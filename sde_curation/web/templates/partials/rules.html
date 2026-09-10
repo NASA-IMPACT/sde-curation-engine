@@ -2,12 +2,14 @@
 {% set cid = c.collection_id %}
 {% set running = job and job.state == 'running' %}
 {% if patterns %}
+<p class="muted small">Rules belong to this collection only. {% for src, n in source_counts.items() %}<span class="edited e-src-{{ src }}">{{ source_label.get(src, src) }} {{ n }}</span> {% endfor %}</p>
 <table>
-  <thead><tr><th>Type</th><th>Match</th><th>Value</th><th title="URLs in the current crawl this rule matches">Matches</th><th>Added</th><th>By</th><th></th></tr></thead>
+  <thead><tr><th>Type</th><th>Match</th><th>Value</th><th title="dump URLs this rule matches">Matches</th><th title="AI = accepted suggestion · AI, edited = suggestion changed before accepting · SME = typed or toggled by a curator · global list = shared exclude list">Source</th><th>Added</th><th>By</th><th></th></tr></thead>
   <tbody>{% for p in patterns %}
-    <tr><td><span class="ptype {{ p.type }}">{{ p.type }}</span></td><td><code>{{ p.match }}</code></td><td>{{ p.value or '' }}</td>
-        <td class="num"><a href="/collections/{{ cid }}?tab=urls&set=deltas&q={{ p.match|replace('*','')|urlencode }}" title="show matching pending URLs">{{ p.matches }}</a></td>
-        <td class="muted small">{{ p.created_at[:16]|replace('T',' ') }}</td>
+    <tr><td><span class="ptype {{ p.type }}">{{ p.type }}</span></td><td class="match"><code>{{ p.match }}</code></td><td>{{ p.value or '' }}</td>
+        <td class="num"><a href="/collections/{{ cid }}?tab=urls&set=delta&q={{ p.match|replace('*','')|urlencode }}" title="show matching delta URLs">{{ p.matches }}</a></td>
+        <td class="nowrap"><span class="edited e-src-{{ p.source }}">{{ source_label.get(p.source, p.source) }}</span></td>
+        <td class="muted small nowrap">{{ p.created_at[:16]|replace('T',' ') }}</td>
         <td class="small">{{ p.created_by or '' }}</td>
         <td><button class="danger" aria-label="delete rule" {% if running %}disabled{% endif %} hx-delete="/api/collections/{{ cid }}/patterns/{{ p.id }}" hx-swap="none" hx-confirm="Delete this rule? Its effects are unapplied (next most specific rule → curated value → empty).">×</button></td></tr>
   {% endfor %}</tbody>

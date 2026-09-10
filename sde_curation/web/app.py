@@ -28,7 +28,7 @@ from ..backends.index import IndexError_, make_index_backend
 from ..backends.scrape import make_scrape_backend
 from ..config import Settings, get_settings
 from ..curation import CurationService
-from ..db import Database
+from ..db import SOURCE_LABEL, Database
 from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
 from ..llm.base import LLMError, make_llm
@@ -41,9 +41,11 @@ from ..models import (
     CurationStage,
     Division,
     DocumentType,
+    EditedBy,
     PatternCreate,
     PatternType,
     Role,
+    RuleSource,
     Status,
     User,
     utcnow,
@@ -147,7 +149,7 @@ def status_invariant_problem(c: Collection, new: Status) -> str | None:
         if c.curated_count == 0:
             return f"cannot be '{new}': nothing has been promoted to the curated set"
         if c.delta_count and c.status is not new:
-            return f"cannot be '{new}': {c.delta_count} deltas are pending — promote (or discard) them first"
+            return f"cannot be '{new}': {c.delta_count} delta URLs are waiting — promote (or discard) them first"
     return None
 
 
@@ -201,6 +203,12 @@ class AiBulk(BaseModel):
     field: Literal["title", "division", "document_type"]
 
 
+class SuggestionAccept(BaseModel):
+    """Optional body for accepting a pattern suggestion: `match` = the glob as edited by the curator."""
+
+    match: str | None = Field(default=None, min_length=1)
+
+
 class UrlEdit(BaseModel):
     """Per-URL curator edit = an exact-URL pattern (the most specific pattern possible)."""
 
@@ -240,6 +248,7 @@ def tri_bool(v: str | None) -> bool | None:
 class AiDecision(BaseModel):
     url: str
     field: Literal["title", "division", "document_type"]
+    value: str | None = None  # accept only: the value as edited by the curator (None = as suggested)
 
 
 def _is_htmx(request: Request) -> bool:
@@ -485,7 +494,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def norm_tab(tab: str | None) -> str:
         tab = TAB_ALIASES.get(tab or "", tab or "")
         return tab if tab in TABS else "overview"
-    SETS = ("dump", "deltas", "curated")
+    # The three URL sets, named the same everywhere: dump_urls / delta_urls / curated_urls tables,
+    # dump_count / delta_count / curated_count, ?set=dump|delta|curated, and the labels
+    # "Dump URLs" / "Delta URLs" / "Curated URLs". ("deltas" is accepted for old links.)
+    SETS = ("dump", "delta", "curated")
+    SET_ALIASES = {"deltas": "delta"}
+
+    def norm_set(s: str | None) -> str | None:
+        s = SET_ALIASES.get(s or "", s or "")
+        return s if s in SETS else None
 
     def list_params(request: Request) -> dict[str, Any]:
         qp = request.query_params
@@ -503,18 +520,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "document_type": qp.get("document_type") or None, "page": page, "per": per,
             "ai": qp.get("ai") if qp.get("ai") in ("pending", "high", "medium", "low") else None,
             "changed": "true" if qp.get("changed") == "true" else None,
+            "edited": qp.get("edited") if qp.get("edited") in {e.value for e in EditedBy} else None,
         }
 
     async def urls_context(request: Request, c: Collection, set_: str) -> dict[str, Any]:
         d, lp = db(request), list_params(request)
         off = (lp["page"] - 1) * lp["per"]
-        effects: dict[str, dict[str, str]] = {}
         has_delta: set[str] = set()
         if set_ == "dump":
             rows, total = await d.list_dump(c.collection_id, limit=lp["per"], offset=off, q=lp["q"])
         elif set_ == "curated":
             rows, total = await d.list_curated(
-                c.collection_id, limit=lp["per"], offset=off, q=lp["q"], excluded=lp["excluded"]
+                c.collection_id, limit=lp["per"], offset=off, q=lp["q"], excluded=lp["excluded"],
+                edited=lp["edited"],
             )
             has_delta = await d.urls_with_deltas(c.collection_id, [r.url for r in rows])
         else:
@@ -522,13 +540,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 c.collection_id, kind=lp["kind"], excluded=lp["excluded"], q=lp["q"],
                 division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending",
                 ai_conf=lp["ai"] if lp["ai"] in ("high", "medium", "low") else None,
-                content_changed=True if lp["changed"] else None, limit=lp["per"], offset=off,
+                content_changed=True if lp["changed"] else None, edited=lp["edited"],
+                limit=lp["per"], offset=off,
             )
-            effects = await d.effects_for(c.collection_id, [r.url for r in rows])
+        # every row can be edited in place, so every table explains which rule set what
+        effects = await d.effects_for(c.collection_id, [r["url"] if isinstance(r, dict) else r.url for r in rows])
         return {
             **lp, "set": set_, "rows": rows, "total": total, "pages": max(1, -(-total // lp["per"])),
             "effects": effects, "has_delta": has_delta, "divisions": list(Division),
             "doc_types": list(DocumentType), "kinds": ["new", "modified", "deleted"],
+            "edited_values": list(EditedBy), "source_label": SOURCE_LABEL,
         }
 
     async def tab_context(request: Request, c: Collection, tab: str) -> dict[str, Any]:
@@ -540,9 +561,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             sel = Status(step) if step in {s.value for s in Status} else c.status
             ctx.update(await step_context(request, c, sel)); ctx["selected"] = sel
         elif tab == "urls":
-            set_ = request.query_params.get("set") or ("deltas" if c.delta_count else "curated" if c.curated_count else "dump")
-            if set_ not in SETS:
-                set_ = "deltas"
+            set_ = norm_set(request.query_params.get("set")) or (
+                "delta" if c.delta_count else "curated" if c.curated_count else "dump")
             ctx.update(await urls_context(request, c, set_))
         elif tab == "curate":
             ctx.update(await curate_context(request, c))
@@ -551,6 +571,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                        audit=await d.list_audit(c.collection_id, 100))
         return ctx
 
+    def removal_warning(c: Collection, dc: dict[str, int]) -> str | None:
+        """A crawl that lost a large share of the curated set is more likely a bad crawl than a
+        site that shrank; say so before the curator promotes the removals."""
+        gone, ratio = dc.get("deleted", 0), settings.promote_removal_warn_ratio
+        if c.curated_count and gone >= 5 and gone >= ratio * c.curated_count:
+            return (f"{gone} of {c.curated_count} curated URLs are gone from this dump ({gone / c.curated_count:.0%})."
+                    " If the crawl was partial or failed part-way, re-scrape instead of promoting:"
+                    " promoting removes them from the curated URLs and the next index run deletes them.")
+        return None
+
     async def curate_context(request: Request, c: Collection) -> dict[str, Any]:
         """The guided workspace: ① exclusions (suggested exclude rules) → ② metadata (AI per URL) → ③ promote."""
         d = db(request)
@@ -558,6 +588,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         suggestions = await d.list_pattern_suggestions(cid, "pending")
         ai_counts = await d.delta_ai_counts(cid)
         step = await step_context(request, c, Status.CURATING)
+        candidates = await d.count_deltas_for_llm(cid, only_missing=False)  # included delta URLs
         return {
             "stats": step["stats"],
             "suggestions": suggestions,
@@ -571,8 +602,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "llm_model": settings.openai_model if settings.llm_provider == "openai" else settings.llm_provider,
             "llm_workers": settings.llm_workers,
             "prompts": llm_prompts(settings),
-            "pattern_calls": -(-c.dump_count // settings.llm_pattern_batch_urls) if c.dump_count else 0,
+            "pattern_candidates": candidates,
+            "pattern_calls": -(-candidates // settings.llm_pattern_batch_urls) if candidates else 0,
             "pattern_batch": settings.llm_pattern_batch_urls,
+            "removal_warning": removal_warning(c, step["stats"]["delta_counts"]),
             "global_excludes": len(load_global_excludes(settings.global_excludes_path).patterns),
             "llm_name": settings.llm_provider, "divisions": list(Division), "doc_types": list(DocumentType),
             "pattern_types": list(PatternType),
@@ -583,8 +616,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """The rules (patterns) table, loaded lazily: match counting scans every dump URL."""
         c = await must_get(request, collection_id)
         job = await db(request).latest_job(collection_id)
+        patterns = await curation(request).pattern_stats(c)
         return templates.TemplateResponse(request, "partials/rules.html", {
-            "c": c, "job": job, "patterns": await curation(request).pattern_stats(c),
+            "c": c, "job": job, "patterns": patterns, "source_label": SOURCE_LABEL,
+            "source_counts": Counter(p["source"] for p in patterns),
         })
 
     async def header_context(request: Request, c: Collection) -> dict[str, Any]:
@@ -616,6 +651,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/collections/{collection_id}/urls/{set_}")
     async def collection_urls(request: Request, collection_id: str, set_: str, format: str | None = None):
         c = await must_get(request, collection_id)
+        set_ = norm_set(set_)  # type: ignore[assignment]
         if set_ not in SETS:
             raise HTTPException(404, "unknown set")
         if format == "csv":
@@ -633,17 +669,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cols = ["url", "scraped_title", "content_type", "depth", "text_len", "in_curated"]
             data = [[r[k] for k in cols] for r in rows]
         elif set_ == "curated":
-            rows, _ = await d.list_curated(c.collection_id, limit=1_000_000, q=lp["q"], excluded=lp["excluded"])
-            cols = ["url", "excluded", "scraped_title", "title", "division", "document_type"]
+            rows, _ = await d.list_curated(c.collection_id, limit=1_000_000, q=lp["q"], excluded=lp["excluded"],
+                                           edited=lp["edited"])
+            cols = ["url", "excluded", "scraped_title", "title", "division", "document_type", "edited_by"]
             data = [[getattr(r, k) for k in cols] for r in rows]
         else:
             rows, _ = await d.list_deltas(
                 c.collection_id, kind=lp["kind"], excluded=lp["excluded"], q=lp["q"],
                 division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending",
                 ai_conf=lp["ai"] if lp["ai"] in ("high", "medium", "low") else None,
-                content_changed=True if lp["changed"] else None, limit=1_000_000,
+                content_changed=True if lp["changed"] else None, edited=lp["edited"], limit=1_000_000,
             )
-            cols = ["kind", "url", "excluded", "content_changed", "scraped_title", "title", "division",
+            cols = ["kind", "url", "excluded", "content_changed", "edited_by", "scraped_title", "title", "division",
                     "document_type", "title_ai", "title_ai_conf", "division_ai", "division_ai_conf",
                     "document_type_ai", "document_type_ai_conf", "ai_model"]
             data = [[getattr(r, k) for k in cols] for r in rows]
@@ -882,7 +919,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return request.app.state.curation
 
     async def _after_curation_change(request: Request, c: Collection, ds) -> Collection:
-        """A diff/pattern change that produces pending deltas puts the collection in
+        """A diff/pattern change that produces delta URLs puts the collection in
         'curating'. A recompute with nothing to review never demotes a curated/live
         collection (otherwise it would be stuck: nothing to promote, no way forward)."""
         n = len(ds.deltas)
@@ -891,20 +928,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # re-crawl identical to the curated set: nothing to review
             await db(request).set_flag(c.collection_id, False)
             c = await db(request).set_status(
-                c.collection_id, Status.CURATED, note="re-crawl matches curated set: no changes",
+                c.collection_id, Status.CURATED, note="re-crawl matches the curated URLs: no changes",
                 force=True, actor=actor(request),
             )
         elif (pre and n) or (
             n and c.status in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE)
         ):
             c = await db(request).set_status(
-                c.collection_id, Status.CURATING, note=f"deltas recomputed: {n} pending", force=True,
+                c.collection_id, Status.CURATING, note=f"delta URLs recomputed: {n}", force=True,
                 actor=actor(request),
             )
         elif n == 0 and c.status is Status.CURATING and c.curated_count:
             # nothing left to review on an already-promoted set → it is curated
             c = await db(request).set_status(
-                c.collection_id, Status.CURATED, note="recomputed: no pending deltas", force=True,
+                c.collection_id, Status.CURATED, note="recomputed: no delta URLs", force=True,
                 actor=actor(request),
             )
         c = await must_get(request, c.collection_id)
@@ -922,7 +959,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "no dump ingested yet — scrape first")
         ds = await curation(request).recompute(c)
         await _after_curation_change(request, c, ds)
-        await audit(request, "recompute", collection_id, f"{len(ds.deltas)} pending")
+        await audit(request, "recompute", collection_id, f"{len(ds.deltas)} delta URLs")
         return htmx_done(request, ds.counts)
 
     @app.get("/api/collections/{collection_id}/patterns")
@@ -977,7 +1014,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     f"{body.type} {body.url}" + (f" → {body.value}" if body.value else ""))
         return htmx_done(request, ds.counts)
 
-    @app.get("/api/collections/{collection_id}/deltas")
+    @app.get("/api/collections/{collection_id}/delta")
+    @app.get("/api/collections/{collection_id}/deltas", include_in_schema=False)  # old spelling
     async def api_deltas(
         request: Request, collection_id: str, kind: str | None = None,
         excluded: str | None = None, q: str | None = None, content_changed: str | None = None,
@@ -1033,7 +1071,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await must_get(request, collection_id)
         qs = str(request.url.query)
         return RedirectResponse(
-            f"/collections/{collection_id}?tab=urls&set=deltas" + (f"&{qs}" if qs else ""), status_code=302
+            f"/collections/{collection_id}?tab=urls&set=delta" + (f"&{qs}" if qs else ""), status_code=302
         )
 
     # ── indexing ───────────────────────────────────────────────────────
@@ -1046,7 +1084,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if c.status not in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE):
             raise HTTPException(409, f"indexing requires a promoted (curated) set — status is '{c.status}'")
         if c.delta_count:
-            raise HTTPException(409, f"{c.delta_count} deltas are pending — promote them first")
+            raise HTTPException(409, f"{c.delta_count} delta URLs are waiting — promote them first")
         if await db(request).curated_export_count(collection_id) == 0:
             raise HTTPException(409, "nothing to export: every curated URL is excluded")
         if target == "prod":
@@ -1102,15 +1140,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c = await must_get(request, collection_id)
         if c.dump_count == 0:
             raise HTTPException(409, "no crawl dump yet — scrape first")
+        if c.delta_count == 0:
+            raise HTTPException(409, "no delta URLs — Start curating first, then suggest exclusions for the delta URLs")
         return await _start_llm(request, collection_id, "suggest.patterns",
                                 lambda j, c, who: j.start_llm_patterns(c, actor=who))
 
     @app.post("/api/collections/{collection_id}/suggest/metadata", status_code=202, response_model=None)
     async def api_suggest_metadata(request: Request, collection_id: str, all: bool = False):
-        """LLM suggests title/division/doc type per pending URL → *_ai fields (never the effective values)."""
+        """LLM suggests title/division/doc type per delta URL → *_ai fields (never the effective values)."""
         c = await must_get(request, collection_id)
         if c.delta_count == 0:
-            raise HTTPException(409, "no pending changes — recompute first")
+            raise HTTPException(409, "no delta URLs — Start curating (recompute) first")
         pending = await db(request).list_pattern_suggestions(collection_id, "pending")
         if pending:  # exclusions first: excluded URLs are never classified, and titles depend on them
             raise HTTPException(
@@ -1119,7 +1159,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         if not await db(request).count_deltas_for_llm(collection_id, only_missing=not all):
             raise HTTPException(
-                409, "nothing to classify: every pending (non-excluded) URL already has suggestions"
+                409, "nothing to classify: every included delta URL already has suggestions"
                      " — use ?all=true to redo them",
             )
         resp = await _start_llm(request, collection_id, "suggest.metadata",
@@ -1143,7 +1183,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         record, never applied. Returns how many suggestions were decided."""
         if decision == "accept":
             _, ds = await curation(request).add_patterns(
-                c, [PatternCreate(type=s["type"], match=s["match"], value=s.get("value")) for s in sugs],
+                c, [(PatternCreate(type=s["type"], match=s["match"], value=s.get("value")),
+                     RuleSource.GLOBAL if s.get("source") == "global" else RuleSource.LLM) for s in sugs],
                 actor=actor(request),
             )
             await _after_curation_change(request, c, ds)
@@ -1166,7 +1207,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return htmx_done(request, {"decided": n, "state": body.decision + "ed"})
 
     @app.post("/api/collections/{collection_id}/suggestions/{sid}/{decision}")
-    async def api_decide_suggestion(request: Request, collection_id: str, sid: int, decision: str):
+    async def api_decide_suggestion(
+        request: Request, collection_id: str, sid: int, decision: str, body: SuggestionAccept | None = None
+    ):
+        """Accept / reject one pattern suggestion. Accept may carry `{"match": …}`: the glob as the
+        curator edited it — the rule is created with that glob (source "AI, edited") and the
+        suggestion records what was actually applied."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         if decision not in ("accept", "reject"):
@@ -1176,6 +1222,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "suggestion not found")
         if sug["state"] != "pending":
             raise HTTPException(409, f"suggestion already {sug['state']}")
+        if body and body.match is not None and not body.match.strip():
+            raise HTTPException(422, "the match cannot be blank")
+        edited = body.match.strip() if body and body.match and body.match.strip() != sug["match"] else None
+        if decision == "accept" and edited:
+            try:
+                pc = PatternCreate(type=sug["type"], match=edited, value=sug.get("value"))
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            try:
+                _, ds = await curation(request).add_pattern(c, pc, actor=actor(request), source=RuleSource.LLM_EDITED)
+            except Exception as e:
+                if "UNIQUE" in str(e):
+                    raise HTTPException(409, f"a {sug['type']} rule for {edited} already exists") from e
+                raise
+            await _after_curation_change(request, c, ds)
+            await db(request).set_pattern_suggestion_state(collection_id, sid, "accepted", actor=actor(request),
+                                                           accepted_as=edited)
+            await audit(request, "suggestion.accept_edited", collection_id,
+                        f"{sug['type']} {sug['match']} → edited to {edited}")
+            return htmx_done(request, {"id": sid, "state": "accepted", "accepted_as": edited})
         await _decide_suggestions(request, c, [sug], decision)
         await audit(request, f"suggestion.{decision}", collection_id,
                     f"{sug['type']} {sug['match']}" + (f" → {sug['value']}" if sug.get("value") else ""))
@@ -1192,7 +1258,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body.decision == "accept":
             ds = await curation(request).replace_exact_patterns(
                 c, [PatternCreate(type=PatternType(body.field), match=url, value=str(v)) for url, v in rows],
-                actor=actor(request),
+                actor=actor(request), source=RuleSource.LLM,
             )
             await _after_curation_change(request, c, ds)
         await db(request).clear_delta_ai_field(collection_id, body.field)
@@ -1208,21 +1274,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, "decision must be accept or reject")
         row = await db(request).get_delta(collection_id, body.url)
         if row is None:
-            raise HTTPException(404, "URL not in deltas")
+            raise HTTPException(404, "URL not in the delta URLs")
         value = getattr(row, f"{body.field}_ai")
         if value is None:
             raise HTTPException(409, "no suggestion for that field")
+        edited = body.value.strip() if decision == "accept" and body.value and body.value.strip() != str(value) else None
         if decision == "accept":
+            try:
+                pc = PatternCreate(type=PatternType(body.field), match=body.url, value=edited or str(value))
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
             existing = [p for p in await db(request).list_patterns(collection_id)
                         if p.match == body.url and p.type == body.field]
             ds = await curation(request).replace_exact_pattern(
-                c, PatternCreate(type=PatternType(body.field), match=body.url, value=str(value)),
-                old_id=existing[0].id if existing else None, actor=actor(request),
+                c, pc, old_id=existing[0].id if existing else None, actor=actor(request),
+                source=RuleSource.LLM_EDITED if edited else RuleSource.LLM,
             )
             await _after_curation_change(request, c, ds)
         await db(request).clear_delta_ai(collection_id, body.url, body.field)
-        await audit(request, f"ai.{decision}", collection_id, f"{body.field} {body.url} → {value}")
-        return htmx_done(request, {"url": body.url, "field": body.field, "state": decision + "ed"})
+        action = "ai.accept_edited" if edited else f"ai.{decision}"
+        await audit(request, action, collection_id,
+                    f"{body.field} {body.url} → {value}" + (f" edited to {edited}" if edited else ""))
+        return htmx_done(request, {"url": body.url, "field": body.field, "state": decision + "ed",
+                                   **({"value": edited} if edited else {})})
 
     # ── login + accounts (only mounted when APP_PASSWORD is set) ───────
 

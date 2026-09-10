@@ -40,7 +40,7 @@
   {% if c.last_scraped_at or sj %}
   <dl class="meta"><dt>Last crawl</dt><dd>{% if c.last_scraped_at %}{{ c.last_scraped_at.strftime('%Y-%m-%d %H:%M') }}Z{% endif %}
       {% if sj %}<span class="job j-{{ sj.state }}">{{ sj.state }}</span>{% if sj.progress.reused %} <span class="muted">(loaded from existing crawl)</span>{% endif %}{% if sj.error %} <span class="err">{{ sj.error }}</span>{% endif %}{% endif %}</dd>
-      <dt>URLs</dt><dd>{{ c.dump_count }} crawled{% if sj and sj.progress.failed %}, {{ sj.progress.failed }} failed to fetch{% endif %}</dd>
+      <dt>Dump URLs</dt><dd>{{ c.dump_count }}{% if sj and sj.progress.failed %}, {{ sj.progress.failed }} failed to fetch{% endif %}</dd>
       {% if sj and sj.progress.summary and sj.progress.summary.failures_by_reason %}<dt>Failures</dt><dd>{{ sj.progress.summary.failures_by_reason }}</dd>{% endif %}
       {% if ex and not ex.already_loaded %}<dt>Newer crawl</dt><dd>{{ ex.modified.strftime('%Y-%m-%d %H:%M') }}Z <small class="muted">{{ ex.where }}</small></dd>{% endif %}</dl>
   {% else %}<p class="muted">Not scraped yet.</p>{% endif %}
@@ -52,16 +52,16 @@
   </div>
 
 {% elif step == 'curating' %}
-  <dl class="meta"><dt>Deltas</dt><dd>{{ c.delta_count }} pending ({{ stats.delta_counts.new }} new, {{ stats.delta_counts.modified }} modified, {{ stats.delta_counts.deleted }} deleted, {{ stats.delta_counts.excluded }} excluded)</dd>
+  <dl class="meta"><dt>Delta URLs</dt><dd>{{ c.delta_count }} ({{ stats.delta_counts.new }} new, {{ stats.delta_counts.modified }} modified, {{ stats.delta_counts.deleted }} removed, {{ stats.delta_counts.excluded }} excluded)</dd>
       <dt>Patterns</dt><dd>{{ stats.pattern_count }}</dd></dl>
   <div class="inline">
     {% if info.state == 'todo' %}
       {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute',
-             'Scrape first' if c.dump_count == 0 else 'Compute what changed vs. the curated set and open the curation workspace',
+             'Scrape first' if c.dump_count == 0 else 'Compute the delta URLs (dump vs. curated) and open the curation workspace',
              primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=curate') }}
     {% else %}
       <a class="button primary" href="/collections/{{ cid }}?tab=curate">Open curation</a>
-      {{ btn('Recompute deltas', '/api/collections/' ~ cid ~ '/recompute', 'Re-run the diff against the latest crawl (safe to repeat)', disabled=(c.dump_count == 0)) }}
+      {{ btn('Recompute delta URLs', '/api/collections/' ~ cid ~ '/recompute', 'Re-run the diff of the dump URLs against the curated URLs (safe to repeat)', disabled=(c.dump_count == 0)) }}
       {% if c.status == 'curating' %}<span class="muted small">Promote from the Curate tab once exclusions and metadata are reviewed.</span>{% endif %}
     {% endif %}
   </div>
@@ -75,8 +75,8 @@
              'Export ' ~ stats.exportable ~ ' curated URLs to S3 and run the WEB_COSMOS indexer against the test index',
              primary=True, disabled=(not stats.exportable or c.delta_count > 0),
              confirm='Export ' ~ stats.exportable ~ ' URLs and index them into the TEST index?') }}
-      {{ btn('Review / re-curate', '/api/collections/' ~ cid ~ '/recompute', 'Recompute deltas against the current crawl and open the curation workspace (status changes only if something differs)', then='/collections/' ~ cid ~ '?tab=curate') }}
-      {% if c.delta_count %}<span class="muted small">{{ c.delta_count }} deltas pending — promote before indexing.</span>{% endif %}
+      {{ btn('Review / re-curate', '/api/collections/' ~ cid ~ '/recompute', 'Recompute the delta URLs against the current dump and open the curation workspace (status changes only if something differs)', then='/collections/' ~ cid ~ '?tab=curate') }}
+      {% if c.delta_count %}<span class="muted small">{{ c.delta_count }} delta URLs — promote before indexing.</span>{% endif %}
     {% endif %}
   </div>
 

@@ -121,6 +121,36 @@ class DeltaKind(StrEnum):
     DELETED = "deleted"
 
 
+class RuleSource(StrEnum):
+    """Where a rule came from. `sme` = typed or toggled by a curator; `llm` = an AI suggestion
+    accepted as-is; `llm_edited` = an AI suggestion the curator changed before accepting;
+    `global` = the shared global exclude list, accepted for this collection."""
+
+    SME = "sme"
+    LLM = "llm"
+    LLM_EDITED = "llm_edited"
+    GLOBAL = "global"
+
+
+class EditedBy(StrEnum):
+    """Who set the effective values of one URL: every winning rule is AI, every one is SME, or a mix."""
+
+    AI = "ai"
+    SME = "sme"
+    MIXED = "mixed"
+
+
+def edited_by_of(sources: list[str]) -> EditedBy | None:
+    """Summarise the sources of the rules that set a URL's fields (None = no rule touched it)."""
+    if not sources:
+        return None
+    ai = {s for s in sources if s in (RuleSource.LLM, RuleSource.GLOBAL)}
+    sme = {s for s in sources if s in (RuleSource.SME, RuleSource.LLM_EDITED)}
+    if ai and sme:
+        return EditedBy.MIXED
+    return EditedBy.AI if ai else EditedBy.SME
+
+
 # ── collection ─────────────────────────────────────────────────────────
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
@@ -189,6 +219,7 @@ class Collection(BaseModel):
     status: Status = Status.BACKLOG
     curation_stage: CurationStage | None = None  # only while status == curating
     needs_recuration: bool = False
+    recuration_reason: str | None = None  # why the flag is up (re-crawl / validation failure)
     last_scraped_at: datetime | None = None  # when the current dump was crawled (or loaded)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -244,6 +275,7 @@ class DeltaUrl(BaseModel):
     document_type: DocumentType | None = None
     excluded: bool = False
     content_changed: bool = False  # page text differs from the promoted (curated) version
+    edited_by: EditedBy | None = None  # ai / sme / mixed — from the rules that set the fields
     # AI suggestions never overwrite manual values; each carries the model's own confidence
     title_ai: str | None = None
     division_ai: Division | None = None
@@ -264,6 +296,7 @@ class CuratedUrl(BaseModel):
     document_type: DocumentType | None = None
     excluded: bool = False
     content_hash: str | None = None  # hash of the text that was promoted (NULL = before hashing existed)
+    edited_by: EditedBy | None = None  # carried over from the delta row at promote time
 
 
 # ── patterns ───────────────────────────────────────────────────────────
@@ -291,6 +324,7 @@ class Pattern(PatternCreate):
     collection_id: str
     created_at: datetime = Field(default_factory=utcnow)
     created_by: str | None = None
+    source: RuleSource = RuleSource.SME  # never settable through the API body (PatternCreate)
 
 
 # ── jobs ───────────────────────────────────────────────────────────────

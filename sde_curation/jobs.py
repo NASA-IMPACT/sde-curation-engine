@@ -179,8 +179,11 @@ class JobManager:
                     c.collection_id, Status.SCRAPED, note=note, force=True, actor=SYSTEM_ACTOR,
                 )
                 if c.curated_count:  # anything already promoted must be re-reviewed
-                    await self.db.set_flag(c.collection_id, True)
-                    updated.needs_recuration = True
+                    reason = (f"{'loaded existing crawl' if reuse else 're-crawled'} on {crawled_at:%Y-%m-%d %H:%M}Z"
+                              f" ({n} documents) after {c.curated_count} URLs were promoted — Start curating"
+                              " shows what changed")
+                    await self.db.set_flag(c.collection_id, True, reason)
+                    updated.needs_recuration, updated.recuration_reason = True, reason
                 await self.db.finish_job(job, JobState.SUCCEEDED)
                 self._emit(updated, job)
             except asyncio.CancelledError:
@@ -255,27 +258,32 @@ class JobManager:
                 self._emit(c, job)
 
     async def _run_llm_patterns(self, c: Collection, job: JobRun) -> None:
-        """Exclude-only suggestions over the whole dump: the global exclude list first
-        (deterministic), then one model call per batch of URLs, merged by (type, match)."""
+        """Exclude-only suggestions over the included delta URLs (on a first pass that is the
+        whole crawl; after a promote only what changed): the global exclude list first
+        (deterministic), then one model call per batch of URLs, merged by (type, match). Match
+        counts are still taken over the whole crawl so the impact of a glob is visible."""
         async def body():
-            dump = await self.db.load_dump(c.collection_id)
-            if not dump:
-                raise LLMError("no crawl dump to sample — scrape first")
             cid = c.collection_id
-            all_urls = [d.url for d in dump]
-            titles = {d.url: d.scraped_title for d in dump}
+            all_urls = await self.db.dump_urls(cid)
+            if not all_urls:
+                raise LLMError("no crawl dump to sample — scrape first")
+            pending = await self.db.pending_urls_for_patterns(cid)
+            if not pending:
+                raise LLMError("no delta URLs to look at — Start curating first (or every delta URL is already excluded)")
+            cand_urls = [u for u, _ in pending]
+            titles = dict(pending)
             await self.db.clear_pending_pattern_suggestions(cid)
-            gl = global_exclude_hits(load_global_excludes(self.s.global_excludes_path), all_urls)
+            gl = global_exclude_hits(load_global_excludes(self.s.global_excludes_path), cand_urls, count_over=all_urls)
             n_global = await self.db.add_pattern_suggestions(cid, gl)
             examples = [g["match"] for g in sorted(gl, key=lambda g: -g["matches"])[:15]]
             if not examples:  # nothing matched: still show the style
                 examples = [g.match for g in load_global_excludes(self.s.global_excludes_path).patterns[:10]]
-            unique = dedupe_variants(all_urls)
+            unique = dedupe_variants(cand_urls)
             chunks = batches([{"url": u, "scraped_title": titles.get(u)} for u in unique],
                              self.s.llm_pattern_batch_urls)
             progress = self._progress_cb(c, job)
-            await progress({"llm": "patterns", "urls": len(all_urls), "unique": len(unique), "calls": len(chunks),
-                            "total": len(chunks), "done": 0, "failed": 0, "global": n_global,
+            await progress({"llm": "patterns", "urls": len(all_urls), "candidates": len(cand_urls), "unique": len(unique),
+                            "calls": len(chunks), "total": len(chunks), "done": 0, "failed": 0, "global": n_global,
                             "suggestions": n_global, "tokens_in": 0, "tokens_out": 0})
             llm = self.llm()
 
@@ -302,14 +310,14 @@ class JobManager:
         await self._guarded(c, job, body)
 
     async def _run_llm_metadata(self, c: Collection, job: JobRun, only_missing: bool) -> None:
-        """One call per pending, included URL with the full page text, LLM_WORKERS at a time.
+        """One call per included delta URL with the full page text, LLM_WORKERS at a time.
         Results are written in small chunks as they arrive, so a cancel keeps what finished and
         a re-run (only_missing) resumes with the rest. One bad URL never fails the job."""
         async def body():
             cid = c.collection_id
             total = await self.db.count_deltas_for_llm(cid, only_missing=only_missing)
             if not total:
-                raise LLMError("no pending URLs to classify — recompute deltas first (or all already have suggestions)")
+                raise LLMError("no delta URLs to classify — Start curating (recompute) first (or all already have suggestions)")
             progress = self._progress_cb(c, job)
             await progress({"llm": "metadata", "total": total, "done": 0, "failed": 0, "inflight": 0,
                             "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
@@ -474,7 +482,9 @@ class JobManager:
                 note=f"validated ({run.validated_by}): {report['indexed_count']}/{report['expected_count']}, titles {report['title_match_rate']:.1%}",
             )
         else:
-            await self.db.set_flag(c.collection_id, True)
+            reason = (f"test-index validation failed ({run.validated_by}): {report['indexed_count']}/{report['expected_count']}"
+                      f" indexed, titles {report['title_match_rate']:.1%} — fix and re-index, or Re-validate")
+            await self.db.set_flag(c.collection_id, True, reason)
             await self.db.set_status(
                 c.collection_id, Status.CURATING, force=True, actor=SYSTEM_ACTOR,
                 note=f"validation FAILED ({run.validated_by}): {report['indexed_count']}/{report['expected_count']} indexed, titles {report['title_match_rate']:.1%} — needs re-curation",

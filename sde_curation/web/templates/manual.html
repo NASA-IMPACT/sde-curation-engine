@@ -50,9 +50,9 @@
 
 <p>Three ideas carry the whole app:</p>
 <ul>
-  <li><b>The crawl is raw.</b> You never edit crawled pages. You decide what to do with them.</li>
-  <li><b>Everything is a rule.</b> Excluding a URL, fixing a title, picking a division: each is a rule you can see, filter by, and delete. Even a one-off edit on a single row is a rule that matches exactly that URL.</li>
-  <li><b>Pending changes are computed, not typed.</b> The engine diffs the crawl against what was last approved and applies your rules. You review the result and promote it.</li>
+  <li><b>Three URL sets, always called the same thing.</b> <b>Dump URLs</b> is what the crawler found, raw. <b>Delta URLs</b> is what will change in the curated URLs when you promote. <b>Curated URLs</b> is the approved set; its included rows go to the index. You never edit dump pages. You decide what to do with them.</li>
+  <li><b>Everything is a rule.</b> Excluding a URL, fixing a title, picking a division: each is a rule you can see, filter by, and delete. Even a one-off edit on a single row is a rule that matches exactly that URL. Rules belong to the collection they were made in; nothing you accept here touches another collection. The only shared input is the global exclude list, and it only ever <em>suggests</em>.</li>
+  <li><b>Delta URLs are computed, not typed.</b> The engine diffs the dump URLs against the curated URLs and applies your rules. You review the result and promote it.</li>
 </ul>
 
 <h2 id="quick">The quick path</h2>
@@ -62,11 +62,11 @@
   <ol>
     <li><b>Add collection</b> on the dashboard: seed URL, name, division, max pages.</li>
     <li><b>Scrape</b>, or <b>load existing</b> if the crawler already has output.</li>
-    <li><b>Start curating</b> to compute the pending changes.</li>
+    <li><b>Start curating</b> to compute the delta URLs.</li>
     <li><b>Suggest exclusions</b>, then accept or reject every suggestion.</li>
     <li><b>Continue to metadata</b>.</li>
     <li><b>Suggest metadata</b>, then accept all titles, divisions, and types, or review one by one.</li>
-    <li><b>Promote</b> the pending changes to the curated set.</li>
+    <li><b>Promote</b> the delta URLs into the curated URLs.</li>
     <li><b>Index to test</b> and wait for validation to pass.</li>
     <li><b>Index to prod</b>. The collection is Live.</li>
   </ol>
@@ -79,7 +79,7 @@
 <ol class="steps">
   <li id="s-dashboard">
     <h3>Find or add the collection on the dashboard</h3>
-    <p>The home page lists every collection with its status, the crawl / pending / curated counts, its last job, and the one button for the next step. The filter pane narrows by status, the curating sub-stage, the needs re-curation flag, division, and curator. Press <kbd>/</kbd> to jump to search. The jobs strip above the table shows everything running anywhere.</p>
+    <p>The home page lists every collection with its status, the dump / delta / curated URL counts, its last job, and the one button for the next step. The filter pane narrows by status, the curating sub-stage, the needs re-curation flag, division, and curator. Press <kbd>/</kbd> to jump to search. The jobs strip above the table shows everything running anywhere.</p>
     <figure><img src="{{ static_url('manual/01-dashboard.png') }}" alt="Dashboard with the filter pane, add-collection form, jobs strip, and four collections at different statuses, each with a next-step button">
     <figcaption><b>Dashboard.</b> Four collections at different stages. The status badge on a curating collection also shows which sub-stage it is in. Each row ends in exactly one action.</figcaption></figure>
     <p>To add a site, fill in the seed URL, a display name, the division, and a page cap, then press <b>Add collection</b>. The collection id is derived from the seed host.</p>
@@ -98,38 +98,38 @@
 
   <li id="s-exclusions">
     <h3>Exclusions: decide what must never be indexed</h3>
-    <p>Press <b>Start curating</b>. The engine computes the pending changes and opens the Curate tab at section 1. Press <b>✨ Suggest exclusions</b>. It first applies the team's global exclude list, then sends every crawled URL and title to the model in batches and asks for exclude globs. The button tells you how many URLs and how many calls before you press it.</p>
+    <p>Press <b>Start curating</b>. The engine computes the delta URLs and opens the Curate tab at section 1. Press <b>✨ Suggest exclusions</b>. It first applies the team's global exclude list, then sends the <b>included delta URLs</b> and titles to the model in batches and asks for exclude globs. On a first pass that is the whole dump; after a re-crawl only what changed, so 90 delta URLs on a 100k-page site cost one call. The button tells you how many URLs and how many calls before you press it; it stays disabled until you have started curating.</p>
     <figure><img src="{{ static_url('manual/03-exclusions.png') }}" alt="Curate tab, Exclusions section, with eight suggested exclude rules listed with their source, match count, and rationale, plus Accept and Reject buttons">
-    <figcaption><b>Exclusion suggestions.</b> Each row is a glob, where it came from (<i>global</i> list or the model), how many crawled URLs it matches, and why. Match counts link to the URLs. Accept one, accept all of a type, or accept all.</figcaption></figure>
-    <p>Accepting a suggestion creates a real exclude rule and recomputes the pending changes. Reject dismisses it. You can also add an exclude or include rule by hand: a glob with <code>*</code>, or an exact URL. When every suggestion is decided, press <b>Continue to metadata</b>.</p>
+    <figcaption><b>Exclusion suggestions.</b> Each row is a glob, where it came from (<i>global list</i> or <i>AI</i>), how many dump URLs it matches, and why. Match counts link to the URLs. Accept one, edit one, accept all of a type, or accept all.</figcaption></figure>
+    <p>Every suggestion has three options. <b>Accept</b> creates a real exclude rule and recomputes the delta URLs. <b>Edit</b> turns the glob into a text box so you can narrow or widen it (say <code>*/tag/*</code> to <code>*/blog/tag/*</code>) and then <b>Save &amp; accept</b>: the rule is created with your glob and recorded as <i>AI, edited</i>. <b>Reject</b> dismisses it. You can also add an exclude or include rule by hand: a glob with <code>*</code>, or an exact URL. When every suggestion is decided, press <b>Continue to metadata</b>.</p>
     <div class="know"><span class="eyebrow">Know this</span><p>Re-running Suggest exclusions <b>replaces</b> any suggestions you have not yet decided.</p><p>The Metadata section is locked until every exclusion suggestion is decided. If you skipped Suggest exclusions entirely, metadata is allowed with a hint.</p></div>
   </li>
 
   <li id="s-metadata">
     <h3>Metadata: titles, divisions, and document types</h3>
-    <p>Press <b>✨ Suggest metadata</b>. It makes one model call per pending, included URL that has not been classified yet, sending the full page text. Each answer carries a title, a division, and a document type, each with a confidence: <b>high</b> means explicit in the text, <b>medium</b> a strong inference, <b>low</b> a guess. Answers are saved as they arrive, so cancelling keeps what finished.</p>
+    <p>Press <b>✨ Suggest metadata</b>. It makes one model call per included delta URL that has not been classified yet, sending the full page text. Each answer carries a title, a division, and a document type, each with a confidence: <b>high</b> means explicit in the text, <b>medium</b> a strong inference, <b>low</b> a guess. Answers are saved as they arrive, so cancelling keeps what finished.</p>
     <figure><img src="{{ static_url('manual/05-metadata.png') }}" alt="Curate tab at the Metadata step: Exclusions marked done, the Suggest metadata card with its last run, and a review bar showing 66 AI suggestions with accept-all buttons per field and confidence counts">
     <figcaption><b>Metadata section after a run.</b> The review bar counts suggestions by field and by confidence, with an accept-all per field. Section 3 below already warns that promoting now would discard the undecided suggestions.</figcaption></figure>
-    <p>To see the suggestions on the rows themselves, press <b>Review one by one</b> or open <b>URLs › Pending</b>. Each AI badge shows the proposed value and its confidence, with ✓ to accept and ✕ to dismiss. Filter the table by confidence to review only the medium and low ones by hand and accept the rest in bulk.</p>
-    <figure><img src="{{ static_url('manual/06-urls-pending.png') }}" alt="URLs tab, Pending set, with AI badges under the title, division, and document type cells showing the proposed value, its confidence, and accept and dismiss buttons">
-    <figcaption><b>Pending URLs with AI badges.</b> The title column shows the scraped title above the effective one. Division and type are dropdowns you can set directly. Every edit here becomes an exact-URL rule.</figcaption></figure>
+    <p>To see the suggestions on the rows themselves, press <b>Review one by one</b> or open <b>URLs › Delta URLs</b>. Each AI badge shows the proposed value and its confidence, with ✓ to accept, ✎ to edit it first (the title opens in an editor prefilled with the suggestion; for division and type the dropdown jumps to the suggested value so you can pick another), and ✕ to dismiss. A value you change before accepting is recorded as <i>AI, edited</i>. Filter the table by confidence to review only the medium and low ones by hand and accept the rest in bulk.</p>
+    <figure><img src="{{ static_url('manual/06-urls-pending.png') }}" alt="URLs tab, Delta URLs set, with AI badges under the title, division, and document type cells showing the proposed value, its confidence, and accept and dismiss buttons">
+    <figcaption><b>Delta URLs with AI badges.</b> The title column shows the scraped title above the effective one. Division and type are dropdowns you can set directly. Every edit here becomes an exact-URL rule. The <b>Edited by</b> column says who set the row's values: <b>AI</b> (accepted suggestions), <b>SME</b> (typed or toggled by a curator), or <b>AI + SME</b>; hover it to see the rule behind each field. The same column, and the same filter, exist on the Curated URLs and Dump URLs tables.</figcaption></figure>
     <div class="tip"><span class="eyebrow">Why the Rules count jumps</span><p>Accepting 22 titles, 22 divisions, and 22 types adds 66 rules, one exact-URL rule per accepted value. That is expected. It is what makes every accepted value visible and reversible in the rules table. Exclude suggestions are globs and stay few.</p></div>
     <figure><img src="{{ static_url('manual/07-rules.png') }}" alt="The Rules table: eight exclude globs followed by exact-URL title rules, each with its match count, when it was added, who added it, and a delete button">
     <figcaption><b>The Rules table</b> at the bottom of the Curate tab, after a bulk accept. Glob excludes first, then one exact-URL title rule per accepted suggestion. The ✕ deletes a rule, which recomputes the affected URLs.</figcaption></figure>
   </li>
 
   <li id="s-promote">
-    <h3>Promote the pending changes</h3>
-    <p>Section 3 of the Curate tab. <b>Promote</b> writes the pending changes into the curated set and marks the collection Curated. If nothing is pending, the button reads <b>Mark curated</b>. <b>Recompute pending changes</b> re-applies the rules without promoting, useful after hand-editing several rules.</p>
+    <h3>Promote the delta URLs</h3>
+    <p>Section 3 of the Curate tab. <b>Promote</b> writes the delta URLs into the curated URLs and marks the collection Curated. If there are no delta URLs, the button reads <b>Mark curated</b>. <b>Recompute delta URLs</b> re-applies the rules without promoting, useful after hand-editing several rules.</p>
     <div class="know"><span class="eyebrow">Know this</span><p>Promoting <b>discards</b> any AI suggestions still undecided. The Promote section warns you with the count. Accept or reject them first.</p></div>
     <figure><img src="{{ static_url('manual/08-curated-overview.png') }}" alt="Overview tab of a curated collection: step 4 highlighted, its panel showing 31 curated URLs with 9 excluded, and the Index to test button">
-    <figcaption><b>After promoting.</b> Pending drops to zero, Curated shows the approved set with its excluded count, and the next action becomes Index to test.</figcaption></figure>
+    <figcaption><b>After promoting.</b> Delta URLs drops to zero, Curated URLs shows the approved set with its excluded count, and the next action becomes Index to test.</figcaption></figure>
   </li>
 
   <li id="s-index">
     <h3>Index to test, validate, then index to prod</h3>
     <p><b>Index to test</b> exports the included curated rows and dispatches an indexing run against the test index. The step-5 panel shows exported, indexed, changed, and deleted counts as it progresses, then the validation result.</p>
-    <p>The engine validates on its own. About thirty seconds after the run succeeds it queries the index directly for this collection and compares counts and titles against the curated set. If it lacks access to query the index, it dispatches a second pass of the same export purely to get a fresh validation file. Nothing is re-vectorised on that pass.</p>
+    <p>The engine validates on its own. About thirty seconds after the run succeeds it queries the index directly for this collection and compares counts and titles against the curated URLs. If it lacks access to query the index, it dispatches a second pass of the same export purely to get a fresh validation file. Nothing is re-vectorised on that pass.</p>
     <dl class="defs">
       <dt>Pass</dt><dd>Counts match and at least 99% of titles match. Status becomes Test index and <b>Index to prod</b> is enabled.</dd>
       <dt>Fail</dt><dd>Back to Curating with the needs re-curation flag and the mismatches listed. Fix and re-index, or press <b>Re-validate</b> if you believe the index only needed more time.</dd>
@@ -142,34 +142,34 @@
 <h3>The workbench header</h3>
 <p>Sticky on every tab. Name, seed link, status badge, the running job with a cancel button, and four count chips that are also links:</p>
 <dl class="defs">
-  <dt>Crawl</dt><dd>Every URL the last crawl found. Raw and read-only.</dd>
-  <dt>Pending</dt><dd>What will change in the curated set when you promote: new · modified · removed · excluded.</dd>
-  <dt>Curated</dt><dd>The approved set. Included rows are what gets exported to the index.</dd>
-  <dt>Rules</dt><dd>Every rule in force, including exact-URL rules from per-row edits and accepted AI suggestions.</dd>
+  <dt>Dump URLs</dt><dd>Every URL the last crawl found. Raw, but you can exclude or include a row right there.</dd>
+  <dt>Delta URLs</dt><dd>What will change in the curated URLs when you promote: new · modified · removed · excluded.</dd>
+  <dt>Curated URLs</dt><dd>The approved set. Included rows are what gets exported to the index. Every field is still editable; an edit becomes a delta URL.</dd>
+  <dt>Rules</dt><dd>Every rule in force for this collection, including exact-URL rules from per-row edits and accepted AI suggestions, each with its source (AI, AI edited, SME, global list).</dd>
 </dl>
 <h3>The four tabs</h3>
 <dl class="defs">
   <dt>Overview</dt><dd>The clickable pipeline with a panel per step, details, the last job, and Advanced (Re-scrape, manual status override, Delete for admins).</dd>
   <dt>Curate</dt><dd>Exclusions, Metadata, Promote, in the order you work them, with the full rules table underneath.</dd>
-  <dt>URLs</dt><dd>Three sets: Crawl, Pending, Curated. Search, filter by change kind, exclusion, division, type, AI confidence, and text changed. Download the filtered rows as CSV.</dd>
+  <dt>URLs</dt><dd>Three sets: Dump URLs, Delta URLs, Curated URLs. Search, filter by change kind, exclusion, division, type, AI confidence, and text changed. Download the filtered rows as CSV.</dd>
   <dt>Activity</dt><dd>Every job, the status history, and the audit trail.</dd>
 </dl>
-<figure><img src="{{ static_url('manual/04-urls-crawl.png') }}" alt="URLs tab, Crawl set: the raw crawl with title, content type, depth, text size and state per URL, read-only">
-<figcaption><b>URLs › Crawl.</b> The raw crawl, read-only. Use it to check what the crawler actually found before deciding anything.</figcaption></figure>
+<figure><img src="{{ static_url('manual/04-urls-crawl.png') }}" alt="URLs tab, Dump URLs set: the raw crawl with title, content type, depth, text size and state per URL, read-only">
+<figcaption><b>URLs › Dump URLs.</b> The raw crawl. Use it to check what the crawler actually found before deciding anything; ✗/✓ on a row excludes or includes it.</figcaption></figure>
 <h3>The Jobs page</h3>
 <p><code>/jobs</code> lists every running or queued job across all collections, who started it, and live progress, with the recent history underneath. The dashboard carries a compact version of the same strip.</p>
 <figure><img src="{{ static_url('manual/09-jobs.png') }}" alt="Jobs page: one running scrape with a cancel button, and a table of six recent jobs with kind, state, who started them, start time, duration and result">
 <figcaption><b>Jobs.</b> Running jobs on top with cancel. The result column reads the same as the progress chip on the collection: docs, suggestions, classified counts, tokens.</figcaption></figure>
 
 <h2 id="rules">How rules resolve</h2>
-<p>Every URL's effective title, division, document type, and included or excluded state is computed from the rules. When several rules match the same URL:</p>
+<p>Every URL's effective title, division, document type, and included or excluded state is computed from the rules of its own collection; a rule never reaches another collection. When several rules match the same URL:</p>
 <ul>
   <li><b>The most specific rule wins.</b> Specific means the rule with the smallest number of matching URLs. On a tie, the longer pattern string wins. An exact-URL rule matches one URL, so it is always the most specific.</li>
   <li><b>Include always beats exclude</b>, regardless of specificity. Use include rules to carve exceptions out of broad excludes.</li>
   <li><b>No rule, then the curated value, then nothing.</b> Deleting a rule falls back to the next most specific rule, then to whatever was last promoted, then to blank. Deleting <em>is</em> the undo.</li>
 </ul>
 <p>Title rules are templates. <code>{title}</code> is the scraped title, <code>{url}</code> the URL, <code>{collection}</code> the collection name. A rule with value <code>{title} | GES DISC</code> appends a suffix to every matching page.</p>
-<p>Hover any field on the Pending set to see which rule set it. Match counts in the rules table link to the matching rows.</p>
+<p>Hover any field on the Delta, Curated or Dump URLs to see which rule set it, and who made that rule. The <b>Edited by</b> column summarises it per row: a row whose values all come from accepted AI suggestions reads <b>AI</b>; one you typed or toggled reads <b>SME</b>; both, <b>AI + SME</b>. A broad rule you typed (say a <code>*</code> title template) marks every row it wins as SME, which is correct: you decided it. Match counts in the rules table link to the matching rows.</p>
 <div class="know"><span class="eyebrow">Know this</span><p>A URL excluded by a rule never reaches the export, the index, or the metadata model. Exclude early to save model calls and review time.</p></div>
 
 <h2 id="jobs">Jobs</h2>
@@ -194,19 +194,20 @@
 <h2 id="quirks">Things to know</h2>
 <p>The list people wish they had read first. Some repeat points from above, gathered in one place.</p>
 <ul>
-  <li><b>A re-scrape clears pending changes</b> and, if anything was ever promoted, raises the needs re-curation flag. Your rules survive. Undecided suggestions do not.</li>
+  <li><b>A re-scrape replaces the dump URLs and clears the delta URLs</b> and, if anything was ever promoted, raises the needs re-curation flag. Your rules survive. Undecided suggestions do not.</li>
+  <li id="disappear"><b>When pages disappear from the crawl.</b> Say the first crawl found 100 dump URLs and the next one 90. Start curating lists the 10 as <b>removed</b> delta URLs. Promote drops them from the curated URLs, and the next index run deletes them from the index. That is the right outcome for pages a site took down. It is the wrong outcome for a crawl that stopped early, so Promote warns you when a large share of the curated URLs vanished at once: re-scrape instead. To keep a page out of the index while it is still on the site, <b>exclude</b> it; that is the "delete from the index" action.</li>
   <li><b>An identical re-crawl returns straight to Curated.</b> Recompute never demotes a collection when nothing changed.</li>
   <li><b>Modified includes "text changed".</b> Each page carries a hash of its text. A page whose title and metadata did not move but whose body did shows as modified with a text changed badge, and Suggest metadata re-classifies it. Pages promoted before this existed compare as unchanged the first time.</li>
-  <li><b>Max pages caps the crawl.</b> If the Crawl count sits exactly at the cap, the site is bigger than the crawl. Raise the cap and re-scrape.</li>
+  <li><b>Max pages caps the crawl.</b> If the Dump URLs count sits exactly at the cap, the site is bigger than the crawl. Raise the cap and re-scrape.</li>
   <li><b>The Curator filter means who created the collection</b>, not who is working on it. There is no assignment field.</li>
-  <li><b>The manual status override still obeys the data.</b> Advanced › Set status will not put a collection in Scraped without a crawl, or in Curated with pending changes outstanding.</li>
+  <li><b>The manual status override still obeys the data.</b> Advanced › Set status will not put a collection in Scraped without a crawl, or in Curated with delta URLs outstanding.</li>
   <li><b>Suggest exclusions sees URLs and titles only.</b> It cannot know what a page says. Suggest metadata reads the whole page and never truncates it. A page beyond the model's window fails that single URL, is counted, and is retried on the next run.</li>
   <li><b>The prompts are inspectable.</b> Both suggestion cards have a "Show the prompt" toggle. If suggestions look off, read what the model was asked.</li>
   <li><b>A malformed model reply fails the job and writes nothing.</b> A bad API key or model name aborts after ten consecutive errors. Per-URL failures never abort.</li>
   <li><b>Validation waits on purpose.</b> The thirty-second pause after a test run is the index refresh window, not a stall.</li>
   <li><b>Prod indexing is gated on the latest test run.</b> A new test run after a passed one resets the gate until it passes too.</li>
   <li><b>CSV export follows your filters.</b> The download on the URLs tab contains exactly the rows you are looking at.</li>
-  <li><b>Old curation links still work.</b> Links to the previous curate page redirect into URLs › Pending.</li>
+  <li><b>Old links still work.</b> Links to the previous curate page, and <code>set=deltas</code> links, redirect into URLs › Delta URLs.</li>
   <li><b>Delete is admin only and permanent.</b> It removes the collection, its crawl, its rules, and its history from the engine. Crawler output in S3 is untouched.</li>
 </ul>
 
@@ -227,16 +228,19 @@
 <div class="tbl"><table>
   <thead><tr><th>Word</th><th>Meaning</th></tr></thead>
   <tbody>
-    <tr><td>Pending</td><td>A URL whose effective values differ from the curated set, or which is new or gone. Promoting applies it.</td></tr>
-    <tr><td>New</td><td>In the crawl, not in the curated set.</td></tr>
+    <tr><td>Dump URL</td><td>A URL the last crawl found, with its scraped title and text. Replaced wholesale by the next scrape.</td></tr>
+    <tr><td>Delta URL</td><td>A URL whose effective values differ from the curated URLs, or which is new or gone. Promoting applies it.</td></tr>
+    <tr><td>Curated URL</td><td>A URL in the approved set. Included curated URLs are what the index receives.</td></tr>
+    <tr><td>New</td><td>In the dump URLs, not in the curated URLs.</td></tr>
     <tr><td>Modified</td><td>In both, and title, division, type, inclusion, or page text changed.</td></tr>
-    <tr><td>Removed</td><td>In the curated set, not in the crawl. Promoting drops it from the index.</td></tr>
+    <tr><td>Removed</td><td>In the curated URLs, not in the dump URLs. Promoting drops it from the curated URLs; the next index run deletes it from the index. Cannot be edited: there is no page to keep.</td></tr>
     <tr><td>Excluded</td><td>Matched by an exclude rule and no include rule. Never exported, never classified.</td></tr>
     <tr><td>Included</td><td>Not excluded. What the index receives.</td></tr>
     <tr><td>Rule</td><td>A glob or exact URL plus a type (exclude, include, title, division, document_type) and, for the last three, a value.</td></tr>
     <tr><td>Suggestion</td><td>A proposed exclude rule awaiting your decision. Nothing is applied until you accept.</td></tr>
-    <tr><td>AI badge</td><td>A proposed title, division, or type for one URL, with a confidence. ✓ makes it an exact-URL rule, ✕ dismisses it.</td></tr>
-    <tr><td>Needs re-curation</td><td>Something promoted is now stale: a re-crawl happened or validation failed. Review and promote again.</td></tr>
+    <tr><td>AI badge</td><td>A proposed title, division, or type for one URL, with a confidence. ✓ makes it an exact-URL rule, ✎ lets you change it first, ✕ dismisses it.</td></tr>
+    <tr><td>Edited by</td><td>Who set a row's effective values: AI (accepted suggestions), SME (a curator's edit or hand-written rule), or AI + SME. Hover for the rule behind each field.</td></tr>
+    <tr><td>Needs re-curation</td><td>Something promoted is now stale. Exactly two things raise it: a scrape or "load existing" finished after a promote (even an identical one; Start curating clears it if nothing changed), or the test-index validation failed. Hover the badge to see which.</td></tr>
   </tbody>
 </table></div>
 

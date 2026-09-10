@@ -133,7 +133,7 @@ async def test_pattern_suggestions_flow(crawler_client):
     assert r.status_code == 200
     pats = (await c.get("/api/collections/ex.org/patterns")).json()
     assert len(pats) == 1 and pats[0]["type"] == "exclude" and pats[0]["matches"] == 1
-    d = (await c.get("/api/collections/ex.org/deltas?q=p9")).json()["items"][0]
+    d = (await c.get("/api/collections/ex.org/delta?q=p9")).json()["items"][0]
     assert d["excluded"] is True
     assert (await c.post(f"/api/collections/ex.org/suggestions/{ex['id']}/accept")).status_code == 409  # already decided
     # reject leaves nothing behind
@@ -187,26 +187,26 @@ async def test_metadata_suggestions_flow(crawler_client):
     p = job["progress"]
     assert job["state"] == "succeeded" and p["classified"] == 8 and p["done"] == 8 and p["failed"] == 0, job
     assert p["llm"] == "metadata" and p["tokens_in"] > 0 and p["inflight"] == 0
-    d = (await c.get("/api/collections/ex.org/deltas?q=p2")).json()["items"][0]
+    d = (await c.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["title_ai"] == "Page 2" and d["document_type_ai"] == "Documentation"
     assert d["title_ai_conf"] == "high" and d["document_type_ai_conf"] == "low" and d["ai_model"] == "fake"
     assert len(d["ai_content_hash"]) == 64
     assert d["title"] is None and d["document_type"] is None  # effective fields untouched
-    page = (await c.get("/collections/ex.org?tab=urls&set=deltas")).text
+    page = (await c.get("/collections/ex.org?tab=urls&set=delta")).text
     assert "AI: Page 2" in page and 'class="ai conf-high"' in page and 'class="ai conf-low"' in page
-    assert (await c.get("/api/collections/ex.org/deltas?q=p2")).json()["total"] == 1
-    low = (await c.get("/collections/ex.org?tab=urls&set=deltas&ai=low")).text
+    assert (await c.get("/api/collections/ex.org/delta?q=p2")).json()["total"] == 1
+    low = (await c.get("/collections/ex.org?tab=urls&set=delta&ai=low")).text
     assert "AI: Documentation" in low
     curate = (await c.get("/collections/ex.org?tab=curate")).text
     assert "conf-high" in curate and "8 classified" in curate and "tokens in" in curate
     # accept title → exact-URL pattern; ml cleared
     r = await c.post("/api/collections/ex.org/ai/accept", json={"url": "https://ex.org/p2", "field": "title"})
     assert r.status_code == 200
-    d = (await c.get("/api/collections/ex.org/deltas?q=p2")).json()["items"][0]
+    d = (await c.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["title"] == "Page 2" and d["title_ai"] is None
     # reject doc type → cleared, effective untouched
     await c.post("/api/collections/ex.org/ai/reject", json={"url": "https://ex.org/p2", "field": "document_type"})
-    d = (await c.get("/api/collections/ex.org/deltas?q=p2")).json()["items"][0]
+    d = (await c.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["document_type_ai"] is None and d["document_type"] is None
     assert (await c.post("/api/collections/ex.org/ai/accept", json={"url": "https://ex.org/p2", "field": "division"})).status_code == 409  # none
     assert (await c.post("/api/collections/ex.org/ai/accept", json={"url": "https://ex.org/p2", "field": "bogus"})).status_code == 422
@@ -231,7 +231,7 @@ async def test_malformed_llm_output_fails_job_and_writes_nothing(crawler_client,
     await c.post("/api/collections/ex.org/suggest/metadata")
     job = await wait_job(c, "ex.org")
     assert job["state"] == "failed" and "did not match" in job["error"] and job["progress"]["failed"] == 8
-    d = (await c.get("/api/collections/ex.org/deltas?q=p2")).json()["items"][0]
+    d = (await c.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["division_ai"] is None
 
 
@@ -269,7 +269,7 @@ async def test_metadata_partial_failure_succeeds_and_resumes(crawler_client):
     p = job["progress"]
     assert job["state"] == "succeeded" and p["classified"] == 7 and p["failed"] == 1 and "429" in p["last_error"]
     assert "7 classified · 1 failed" in (await c.get("/collections/ex.org?tab=curate")).text
-    d = (await c.get("/api/collections/ex.org/deltas?q=p3")).json()["items"][0]
+    d = (await c.get("/api/collections/ex.org/delta?q=p3")).json()["items"][0]
     assert d["title_ai"] is None
     # the next run only picks up the one that failed
     c.app.state.jobs._llm = FakeProvider()
@@ -293,7 +293,7 @@ async def test_metadata_cancel_keeps_finished_rows(crawler_client):
     await asyncio.sleep(0.5)
     r = await c.post("/api/collections/ex.org/jobs/cancel")
     assert r.status_code == 200 and r.json()["state"] == "failed" and "cancelled" in r.json()["error"]
-    items = (await c.get("/api/collections/ex.org/deltas?limit=100")).json()["items"]
+    items = (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]
     done = [d for d in items if d["title_ai"]]
     assert 2 <= len(done) < 32
     c.app.state.jobs._llm = FakeProvider()
@@ -321,7 +321,7 @@ async def test_content_changed_rows_are_reclassified(crawler_client):
     await c.post("/api/collections/ex.org/suggest/metadata")
     job = await wait_job(c, "ex.org")
     assert job["progress"]["classified"] == 1
-    d = (await c.get("/api/collections/ex.org/deltas?q=p2")).json()["items"][0]
+    d = (await c.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["division_ai"] == "Heliophysics" and d["division_ai_conf"] == "medium"  # from the new text
     assert d["ai_content_hash"] == next(x.content_hash for x in await db.load_dump("ex.org") if x.url.endswith("/p2"))
     assert await db.count_deltas_for_llm("ex.org") == 0  # classified against the current text: done
@@ -345,7 +345,7 @@ async def test_metadata_classified_count_survives_concurrent_flushes(crawler_cli
     await c.post("/api/collections/ex.org/suggest/metadata")
     job = await wait_job(c, "ex.org", timeout=30)
     assert job["progress"]["classified"] == 32 == job["progress"]["done"]
-    items = (await c.get("/api/collections/ex.org/deltas?limit=100")).json()["items"]
+    items = (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]
     assert sum(1 for d in items if d["title_ai"]) == 32
 
 

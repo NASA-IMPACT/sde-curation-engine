@@ -41,9 +41,9 @@ async def test_hash_flows_from_dump_to_curated_and_flags_changed_text(crawler_cl
     assert r.json()["total"] == 1 and r.json()["items"][0]["url"].endswith("/p2")
     assert r.json()["items"][0]["content_changed"] is True and r.json()["items"][0]["kind"] == "modified"
 
-    html = (await c.get(f"/collections/{CID}?tab=urls&set=deltas&changed=true")).text
+    html = (await c.get(f"/collections/{CID}?tab=urls&set=delta&changed=true")).text
     assert "text changed" in html and "/p2" in html
-    csv = (await c.get(f"/collections/{CID}/urls/deltas?format=csv&changed=true")).text
+    csv = (await c.get(f"/collections/{CID}/urls/delta?format=csv&changed=true")).text
     assert csv.splitlines()[0].split(",")[3] == "content_changed" and len(csv.splitlines()) == 2
     scope = (await c.get(f"/collections/{CID}?tab=curate")).text
     assert "1 text changed" in scope

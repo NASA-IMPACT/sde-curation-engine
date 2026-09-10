@@ -12,7 +12,7 @@ high / medium / low, so the low tail is measured too). Ten rows are far too few:
 classes and document type five.
 
 - Run **Suggest metadata** on 3–5 representative collections.
-- In URLs › Deltas filter `AI · high confidence` / `medium` / `low` and export the CSV
+- In URLs › Delta URLs filter `AI · high confidence` / `medium` / `low` and export the CSV
   (`⇩ CSV`): the columns `title_ai`, `title_ai_conf`, `division_ai`, `division_ai_conf`,
   `document_type_ai`, `document_type_ai_conf`, `ai_model` are all there.
 - Give the SME the rows; they accept (✓) or reject (✕) in the UI. Every decision is audited

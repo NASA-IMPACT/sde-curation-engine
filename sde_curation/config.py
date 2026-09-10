@@ -80,10 +80,12 @@ class Settings(BaseSettings):
     llm_temperature: float | None = Field(default=None, ge=0, le=2)
     llm_timeout_s: float = 60.0  # per attempt
     llm_max_retries: int = Field(default=5, ge=0, le=10)  # SDK retries on 429 / 5xx / timeouts
-    llm_workers: int = Field(default=24, ge=1, le=64)  # concurrent calls inside one LLM job
+    llm_workers: int = Field(default=16, ge=1, le=64)  # concurrent calls inside one LLM job
     # Suggest metadata always sends the FULL page text (no budget, no truncation, one model).
     # Suggest patterns sends every crawled URL (+ title) in batches of this size, one call each.
     llm_pattern_batch_urls: int = Field(default=1000, ge=50, le=10_000)
+    # Warn before promoting when this share (or more) of the curated set vanished from the crawl.
+    promote_removal_warn_ratio: float = Field(default=0.25, ge=0.0, le=1.0)
     # Exclude globs applied deterministically before the model's own suggestions.
     global_excludes_path: Path | None = None  # default: the packaged sde_curation/data/global_excludes.yaml
 

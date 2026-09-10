@@ -1,15 +1,15 @@
 {% set cid = c.collection_id %}
 <nav class="subtabs" role="tablist" aria-label="URL sets">
-  {% for s, label, n, hint in [('dump','Crawl', c.dump_count, 'Every URL the last crawl found (raw)'),
-                                ('deltas','Pending', c.delta_count, 'What will change in the curated set when you promote'),
-                                ('curated','Curated', c.curated_count, 'The approved set; included rows are exported to the index')] %}
+  {% for s, label, n, hint in [('dump','Dump URLs', c.dump_count, 'Every URL the last crawl found (raw)'),
+                                ('delta','Delta URLs', c.delta_count, 'What will change in the curated URLs when you promote'),
+                                ('curated','Curated URLs', c.curated_count, 'The approved set; included rows are exported to the index')] %}
   <a role="tab" aria-selected="{{ 'true' if set == s else 'false' }}" class="tab {% if set == s %}active{% endif %}" title="{{ hint }}"
      href="/collections/{{ cid }}?tab=urls&set={{ s }}">{{ label }} <span class="count {% if not n %}zero{% endif %}">{{ n }}</span></a>
   {% endfor %}
   <span class="subtab-hint muted">
-    {% if set == 'dump' %}Raw crawl output, read-only. Decisions are made in <a href="/collections/{{ cid }}?tab=curate">Curate</a> and reviewed under <b>Pending</b>.
-    {% elif set == 'deltas' %}Per-URL edits: ✗/✓ excludes / includes a URL, click a title, pick division/type. Each edit becomes an exact-URL rule.
-    {% else %}Read-only snapshot of what was promoted. A row with a newer change waiting shows <b>pending change · Curate ↗</b>.{% endif %}
+    {% if set == 'dump' %}Raw crawl output. ✗/✓ excludes / includes a URL right here; the edit becomes an exact-URL rule and shows up under <b>Delta URLs</b>.
+    {% elif set == 'delta' %}What will change when you promote. ✗/✓ excludes / includes a URL, click a title, pick division/type; ✎ on an AI badge edits the suggestion before accepting it. Each edit becomes an exact-URL rule.
+    {% else %}What was promoted. Every field can still be edited here: the edit becomes an exact-URL rule and a delta URL to promote. A row with a delta already waiting shows <b>delta URL ↗</b>.{% endif %}
   </span>
 </nav>
 <div id="urls-table">{% include "partials/urls_table.html" %}</div>

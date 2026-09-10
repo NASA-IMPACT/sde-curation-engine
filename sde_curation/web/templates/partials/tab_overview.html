@@ -32,7 +32,7 @@
 <details class="advanced">
   <summary>Advanced</summary>
   <div class="inline">
-    <form hx-post="/api/collections/{{ c.collection_id }}/scrape" hx-swap="none" hx-confirm="Re-run the crawl? The existing dump and pending deltas are replaced." class="inline">
+    <form hx-post="/api/collections/{{ c.collection_id }}/scrape" hx-swap="none" hx-confirm="Re-run the crawl? The dump URLs are replaced and the delta URLs cleared." class="inline">
       <button class="secondary" {% if job and job.state == 'running' %}disabled{% endif %}>Re-scrape</button>
     </form>
     <form hx-post="/api/collections/{{ c.collection_id }}/status" hx-ext="json-enc" hx-swap="none" class="inline"

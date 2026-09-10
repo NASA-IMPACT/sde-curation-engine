@@ -2,9 +2,9 @@
 <nav class="tabs" role="tablist" aria-label="collection sections">
   {% for t, label in [('overview','Overview'), ('curate','Curate'), ('urls','URLs'), ('activity','Activity')] %}
   <a role="tab" aria-selected="{{ 'true' if tab == t else 'false' }}" class="tab {% if tab == t %}active{% endif %}"
-     href="/collections/{{ cid }}?tab={{ t }}{% if t == 'urls' %}&set={{ 'deltas' if c.delta_count else 'curated' if c.curated_count else 'dump' }}{% endif %}">
+     href="/collections/{{ cid }}?tab={{ t }}{% if t == 'urls' %}&set={{ 'delta' if c.delta_count else 'curated' if c.curated_count else 'dump' }}{% endif %}">
     {{ label }}
-    {% if t == 'urls' %}<span class="count" title="crawled">{{ c.dump_count }}</span>{% if c.delta_count %}<span class="count warn" title="pending changes">{{ c.delta_count }}</span>{% endif %}{% if c.curated_count %}<span class="count ok" title="curated">{{ c.curated_count }}</span>{% endif %}
+    {% if t == 'urls' %}<span class="count" title="dump URLs">{{ c.dump_count }}</span>{% if c.delta_count %}<span class="count warn" title="delta URLs">{{ c.delta_count }}</span>{% endif %}{% if c.curated_count %}<span class="count ok" title="curated URLs">{{ c.curated_count }}</span>{% endif %}
     {% elif t == 'curate' and stats and stats.pattern_count %}<span class="count">{{ stats.pattern_count }}</span>{% endif %}
   </a>
   {% endfor %}

@@ -44,25 +44,25 @@ async def test_full_flow(crawler_client):
     y = yaml.safe_load((crawler_client.app.state.settings.collections_dir / "ex.org" / "patterns.yaml").read_text())
     assert len(y) == 4
 
-    d = (await crawler_client.get("/api/collections/ex.org/deltas?q=p2")).json()
+    d = (await crawler_client.get("/api/collections/ex.org/delta?q=p2")).json()
     assert d["total"] == 1 and d["items"][0]["title"] == "Page 2 | Ex" and d["items"][0]["division"] == "Heliophysics"
-    assert (await crawler_client.get("/api/collections/ex.org/deltas?excluded=true")).json()["total"] == 1
+    assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 1
 
     # per-URL edit = exact pattern, most specific → wins over "*"
     r = await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p2", "type": "division", "value": "Earth Science"})
     assert r.status_code == 200
-    d = (await crawler_client.get("/api/collections/ex.org/deltas?q=p2")).json()["items"][0]
+    d = (await crawler_client.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["division"] == "Earth Science"
     # toggling exclude twice on one URL removes it again
     await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "exclude"})
-    assert (await crawler_client.get("/api/collections/ex.org/deltas?excluded=true")).json()["total"] == 2
+    assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 2
     await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "exclude"})
-    assert (await crawler_client.get("/api/collections/ex.org/deltas?excluded=true")).json()["total"] == 1
+    assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 1
 
     # old curate URL redirects into the workbench (filters preserved); URLs tab renders the deltas
     r = await crawler_client.get("/collections/ex.org/curate?excluded=true")
-    assert r.status_code == 302 and r.headers["location"] == "/collections/ex.org?tab=urls&set=deltas&excluded=true"
-    page = await crawler_client.get("/collections/ex.org?tab=urls&set=deltas&excluded=true")
+    assert r.status_code == 302 and r.headers["location"] == "/collections/ex.org?tab=urls&set=delta&excluded=true"
+    page = await crawler_client.get("/collections/ex.org?tab=urls&set=delta&excluded=true")
     assert page.status_code == 200 and "https://ex.org/p1" in page.text and "https://ex.org/p2" not in page.text
     assert "Promote" in (await crawler_client.get("/collections/ex.org?tab=patterns")).text
 
@@ -91,7 +91,7 @@ async def test_full_flow(crawler_client):
     div_all = next(p["id"] for p in pats if p["type"] == "division")
     r = await crawler_client.delete(f"/api/collections/ex.org/patterns/{div_all}")
     assert r.status_code == 200 and r.json()["modified"] == 0  # curated value == pattern value, so no delta
-    d = (await crawler_client.get("/api/collections/ex.org/deltas?q=p2")).json()
+    d = (await crawler_client.get("/api/collections/ex.org/delta?q=p2")).json()
     assert d["total"] == 0
 
 
@@ -141,7 +141,7 @@ async def test_url_edit_validation_and_replace(crawler_client):
         assert (await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p2", "type": "division", "value": v})).status_code == 200
     pats = [p for p in (await crawler_client.get("/api/collections/ex.org/patterns")).json() if p["type"] == "division"]
     assert len(pats) == 1 and pats[0]["value"] == "Heliophysics"  # replaced, not duplicated
-    d = (await crawler_client.get("/api/collections/ex.org/deltas?q=p2")).json()["items"][0]
+    d = (await crawler_client.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["division"] == "Heliophysics"
 
 
@@ -161,7 +161,7 @@ async def test_manual_status_cannot_skip_promote(crawler_client):
     await crawler_client.post("/api/collections/ex.org/promote")
     await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": "*/p4"})
     r = await crawler_client.post("/api/collections/ex.org/status", json={"status": "live"})
-    assert r.status_code == 409 and "pending" in r.text
+    assert r.status_code == 409 and "delta URLs" in r.text
 
 
 async def test_delete_removes_files_and_bad_step_param(crawler_client):

@@ -1,21 +1,56 @@
-{# One table component for dump / deltas / curated. Filters are GET params so URLs are shareable. #}
+{# One table component for the three URL sets: dump / delta / curated. Filters are GET params so
+   URLs are shareable. Every set is editable in place: each edit is an exact-URL rule, recompute
+   turns the row into a delta URL (see the cell macros). #}
 {% set cid = c.collection_id %}
 {% set running = job and job.state == 'running' %}
 {% set base = '/collections/' ~ cid ~ '?tab=urls&set=' ~ set %}
 {% macro qs(extra) -%}
-{{ base }}&q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is none else ('true' if excluded else 'false') }}&division={{ (division or '')|urlencode }}&document_type={{ (document_type or '')|urlencode }}&ai={{ ai or '' }}&changed={{ changed or '' }}&per={{ per }}{{ extra }}
+{{ base }}&q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is none else ('true' if excluded else 'false') }}&division={{ (division or '')|urlencode }}&document_type={{ (document_type or '')|urlencode }}&ai={{ ai or '' }}&changed={{ changed or '' }}&edited={{ edited or '' }}&per={{ per }}{{ extra }}
+{%- endmacro %}
+
+{# ── shared cells ─────────────────────────────────────────────────────────── #}
+{% macro edited_chip(r, why) -%}
+  {%- if r.edited_by -%}
+  <span class="edited e-{{ r.edited_by }}" title="{% for f, w in why.items() %}{{ f }}: {{ w }}&#10;{% endfor %}{% if not why %}set by rules that no longer apply to the current crawl{% endif %}">{{ {'ai': 'AI', 'sme': 'SME', 'mixed': 'AI + SME'}[r.edited_by] }}</span>
+  {%- else -%}<span class="muted small" title="no rule touches this URL: scraped title, no division / type">—</span>{%- endif -%}
+{%- endmacro %}
+
+{% macro toggle_cell(r, why, editable) -%}
+  {% if r.excluded %}<span class="kind k-excluded" title="{{ why.excluded or 'excluded' }}">excluded</span>{% else %}<span class="kind k-included" title="{{ why.excluded or 'included: no exclude rule matches' }}">included</span>{% endif %}
+  <button class="mini {% if r.excluded %}ok{% endif %}" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/urls" hx-ext="json-enc"
+          hx-vals='{{ {"url": r.url, "type": ("include" if r.excluded else "exclude")}|tojson }}' hx-swap="none"
+          aria-label="{{ 'force include' if r.excluded else 'exclude' }}" title="{{ 'excluded — click to force include (exact-URL include rule)' if r.excluded else 'included — click to exclude (exact-URL exclude rule)' }}">{{ '✓ include' if r.excluded else '✗ exclude' }}</button>
+{%- endmacro %}
+
+{% macro title_cell(r, why, editable) -%}
+  <small class="muted">{{ r.scraped_title or '' }}</small><br>
+  <button type="button" class="linkish" {% if not editable %}disabled{% endif %} title="{{ why.title or 'click to set a title (creates an exact-URL title rule)' }}"
+          onclick='editTitle({{ cid|tojson }}, {{ r.url|tojson }}, {{ (r.title or r.scraped_title or "")|tojson }}, {{ 'true' if (r.title_ai is defined and r.title_ai) else 'false' }})'>{{ r.title or '—' }}</button>
+  {% if r.title_ai is defined and r.title_ai %}<br><span class="ai conf-{{ r.title_ai_conf }}" title="AI suggestion · {{ r.title_ai_conf or '?' }} confidence · {{ r.ai_model or '' }}">AI: {{ r.title_ai }} <small>{{ r.title_ai_conf }}</small></span>
+    <span class="nowrap"><button class="mini ok" title="accept this title" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "title"}|tojson }}' hx-swap="none">✓</button><button class="mini" type="button" title="edit this title, then accept" {% if not editable %}disabled{% endif %} onclick='editTitle({{ cid|tojson }}, {{ r.url|tojson }}, {{ r.title_ai|tojson }}, true)'>✎</button><button class="mini" title="dismiss" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "title"}|tojson }}' hx-swap="none">✕</button></span>{% endif %}
+{%- endmacro %}
+
+{% macro select_cell(r, why, editable, field, values) -%}
+  {% set ai_val = r[field ~ '_ai'] if r[field ~ '_ai'] is defined else none %}
+  {% set ai_conf = r[field ~ '_ai_conf'] if r[field ~ '_ai_conf'] is defined else none %}
+  <select class="cell" {% if not editable %}disabled{% endif %} title="{{ why[field] or ('set ' ~ field|replace('_', ' ') ~ ' for this URL (exact-URL rule)') }}"
+          onchange='editField({{ cid|tojson }}, {{ r.url|tojson }}, {{ field|tojson }}, this.value, {{ (ai_val is not none)|tojson }})'>
+    <option value="">—</option>{% for v in values %}<option {% if r[field] == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+  {% if ai_val %}<br><span class="ai conf-{{ ai_conf }}" title="AI suggestion · {{ ai_conf or '?' }} confidence · {{ r.ai_model or '' }}">AI: {{ ai_val }} <small>{{ ai_conf }}</small></span>
+    <span class="nowrap"><button class="mini ok" title="accept" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✓</button><button class="mini" type="button" title="pick a different value, then it is accepted as edited" {% if not editable %}disabled{% endif %} onclick='pickAi(this, {{ ai_val|tojson }})'>✎</button><button class="mini" title="dismiss" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✕</button></span>{% endif %}
 {%- endmacro %}
 
 <form method="get" action="/collections/{{ cid }}" class="tbl-toolbar" hx-boost="true" hx-target="#tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-push-url="true">
   <input type="hidden" name="tab" value="urls"><input type="hidden" name="set" value="{{ set }}">
   <input type="search" name="q" value="{{ q or '' }}" placeholder="search url / title" size="28" aria-label="search">
-  {% if set == 'deltas' %}
-  <select name="kind" aria-label="kind"><option value="">any kind</option>{% for k in kinds %}<option {% if kind == k %}selected{% endif %}>{{ k }}</option>{% endfor %}</select>
+  {% if set == 'delta' %}
+  <select name="kind" aria-label="kind"><option value="">any kind</option>{% for k in kinds %}<option value="{{ k }}" {% if kind == k %}selected{% endif %}>{{ 'removed' if k == 'deleted' else k }}</option>{% endfor %}</select>
   {% endif %}
   {% if set != 'dump' %}
   <select name="excluded" aria-label="exclusion"><option value="">included + excluded</option><option value="false" {% if excluded == False %}selected{% endif %}>included only</option><option value="true" {% if excluded %}selected{% endif %}>excluded only</option></select>
+  <select name="edited" aria-label="edited by"><option value="">edited by anyone</option><option value="ai" {% if edited == 'ai' %}selected{% endif %}>edited by AI</option><option value="sme" {% if edited == 'sme' %}selected{% endif %}>edited by SME</option><option value="mixed" {% if edited == 'mixed' %}selected{% endif %}>AI + SME</option></select>
   {% endif %}
-  {% if set == 'deltas' %}
+  {% if set == 'delta' %}
   <select name="division" aria-label="division"><option value="">any division</option>{% for v in divisions %}<option {% if division == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
   <select name="document_type" aria-label="document type"><option value="">any type</option>{% for v in doc_types %}<option {% if document_type == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
   <select name="ai" aria-label="AI suggestions"><option value="">with or without AI suggestions</option><option value="pending" {% if ai == 'pending' %}selected{% endif %}>has AI suggestions</option><option value="high" {% if ai == 'high' %}selected{% endif %}>AI · high confidence</option><option value="medium" {% if ai == 'medium' %}selected{% endif %}>AI · medium confidence</option><option value="low" {% if ai == 'low' %}selected{% endif %}>AI · low confidence</option></select>
@@ -23,90 +58,71 @@
   {% endif %}
   <select name="per" aria-label="rows per page">{% for n in [25, 50, 100, 250] %}<option {% if per == n %}selected{% endif %}>{{ n }}</option>{% endfor %}</select>
   <button class="secondary">Filter</button>
-  {% if q or kind or excluded is not none or division or document_type or ai or changed %}<a class="muted" href="{{ base }}">clear</a>{% endif %}
+  {% if q or kind or excluded is not none or division or document_type or ai or changed or edited %}<a class="muted" href="{{ base }}">clear</a>{% endif %}
   <span class="grow"></span>
-  <span class="muted small">{% if total %}{{ (page - 1) * per + 1 }}–{{ [page * per, total]|min }} of {{ total }}{% else %}0 rows{% endif %}</span>
+  <span class="muted small nowrap">{% if total %}{{ (page - 1) * per + 1 }}–{{ [page * per, total]|min }} of {{ total }}{% else %}0 rows{% endif %}</span>
   <a class="page {% if page <= 1 %}off{% endif %}" href="{{ qs('&page=' ~ (page - 1)) }}" aria-label="previous page">‹</a>
-  <span class="small">page {{ page }} / {{ pages }}</span>
+  <span class="small nowrap">page {{ page }} / {{ pages }}</span>
   <a class="page {% if page >= pages %}off{% endif %}" href="{{ qs('&page=' ~ (page + 1)) }}" aria-label="next page">›</a>
-  <a class="muted small" href="/collections/{{ cid }}/urls/{{ set }}?format=csv&q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is none else ('true' if excluded else 'false') }}&division={{ (division or '')|urlencode }}&document_type={{ (document_type or '')|urlencode }}&ai={{ ai or '' }}&changed={{ changed or '' }}" title="download the filtered rows as CSV">⇩ CSV</a>
+  <a class="muted small nowrap" href="/collections/{{ cid }}/urls/{{ set }}?format=csv&q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is none else ('true' if excluded else 'false') }}&division={{ (division or '')|urlencode }}&document_type={{ (document_type or '')|urlencode }}&ai={{ ai or '' }}&changed={{ changed or '' }}&edited={{ edited or '' }}" title="download the filtered rows as CSV">⇩ CSV</a>
 </form>
 
-{% if running and set == 'deltas' %}<div class="banner info"><span class="spinner"></span> {{ job.kind }} running — editing is locked until it finishes.</div>{% endif %}
+{% if running %}<div class="banner info"><span class="spinner"></span> {{ job.kind }} running — editing is locked until it finishes.</div>{% endif %}
 
 <div class="tbl-wrap">
 <table class="urls {{ set }}">
   <thead>
   {% if set == 'dump' %}
-    <tr><th class="num">#</th><th>URL</th><th>Scraped title</th><th>Type</th><th>Depth</th><th>Text</th><th title="how this URL relates to the curated set">vs curated</th></tr>
-  {% elif set == 'deltas' %}
-    <tr><th class="num">#</th><th title="new: not in the curated set · modified: differs from curated · removed: gone from the crawl">Change</th><th>URL</th><th title="included rows are exported to the index; excluded rows are kept out">In index</th><th>Title <small class="muted">scraped → effective</small></th><th>Division</th><th>Doc type</th></tr>
+    <tr><th class="num">#</th><th>URL</th><th title="included rows are exported to the index; excluded rows are kept out. Click to change: the edit shows up under Delta URLs">In index</th><th>Scraped title</th><th>Type</th><th>Depth</th><th>Text</th><th title="how this URL relates to the curated URLs">vs curated</th></tr>
+  {% elif set == 'delta' %}
+    <tr><th class="num">#</th><th title="new: not in the curated URLs · modified: differs from the curated URLs · removed: gone from the dump (promote drops it from the curated URLs; the next index run deletes it)">Change</th><th>URL</th><th title="included rows are exported to the index; excluded rows are kept out">In index</th><th>Title <small class="muted">scraped → effective</small></th><th>Division</th><th>Doc type</th><th title="who set the effective values: AI (accepted suggestions), SME (typed or toggled by a curator), or both">Edited by</th></tr>
   {% else %}
-    <tr><th class="num">#</th><th>URL</th><th title="included rows are exported to the index; excluded rows are kept out">In index</th><th>Scraped title</th><th>Title</th><th>Division</th><th>Doc type</th></tr>
+    <tr><th class="num">#</th><th>URL</th><th title="included rows are exported to the index; excluded rows are kept out. Click to change: the edit shows up under Delta URLs">In index</th><th>Title <small class="muted">scraped → effective</small></th><th>Division</th><th>Doc type</th><th title="who set the effective values: AI (accepted suggestions), SME (typed or toggled by a curator), or both">Edited by</th></tr>
   {% endif %}
   </thead>
   <tbody>
   {% for r in rows %}
     {% set n = (page - 1) * per + loop.index %}
+    {% set why = effects.get(r.url, {}) %}
     {% if set == 'dump' %}
-    <tr>
+    <tr{% if r.excluded %} class="excluded"{% endif %}>
       <td class="num muted">{{ n }}</td>
       <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a></td>
+      <td class="nowrap">{{ toggle_cell(r, why, not running) }}</td>
       <td>{{ r.scraped_title or '' }}</td>
       <td class="muted small">{{ (r.content_type or '')|replace('text/','') }}</td>
       <td class="num">{{ r.depth if r.depth is not none else '' }}</td>
       <td class="num muted small">{{ '{:,}'.format(r.text_len or 0) }}</td>
-      <td>{% if r.in_deltas %}<span class="kind k-modified" title="has a pending change">pending change</span>{% elif r.in_curated %}<span class="kind k-ok" title="in the curated set, unchanged">in curated</span>{% else %}<span class="kind k-new" title="not in the curated set yet">new</span>{% endif %}</td>
+      <td class="nowrap">{% if r.in_deltas %}<a class="kind k-modified" href="{{ base|replace('set=dump','set=delta') }}&q={{ r.url|urlencode }}" title="this URL is a delta — open it under Delta URLs">delta URL ↗</a>{% elif r.in_curated %}<span class="kind k-ok" title="in the curated URLs, unchanged">in curated</span>{% else %}<span class="kind k-new" title="not in the curated URLs yet">new</span>{% endif %}</td>
     </tr>
-    {% elif set == 'deltas' %}
+    {% elif set == 'delta' %}
     {% set editable = r.kind != 'deleted' and not running %}
-    {% set why = effects.get(r.url, {}) %}
     <tr class="{% if r.excluded %}excluded{% endif %} row-{{ r.kind }}">
       <td class="num muted">{{ n }}</td>
-      <td><span class="kind k-{{ r.kind }}">{{ 'removed' if r.kind == 'deleted' else r.kind }}</span>{% if r.content_changed %} <span class="kind k-modified" title="the page text differs from the promoted version">text changed</span>{% endif %}</td>
+      <td class="nowrap"><span class="kind k-{{ r.kind }}" title="{% if r.kind == 'deleted' %}gone from the dump — promote drops it from the curated URLs and the next index run deletes it from the index{% elif r.kind == 'new' %}not in the curated URLs yet{% else %}differs from the curated version{% endif %}">{{ 'removed' if r.kind == 'deleted' else r.kind }}</span>{% if r.content_changed %} <span class="kind k-modified" title="the page text differs from the promoted version">text changed</span>{% endif %}</td>
       <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a></td>
-      <td class="nowrap">{% if r.kind != 'deleted' %}
-        {% if r.excluded %}<span class="kind k-excluded">excluded</span>{% else %}<span class="kind k-included">included</span>{% endif %}
-        <button class="mini {% if r.excluded %}ok{% endif %}" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/urls" hx-ext="json-enc"
-                hx-vals='{{ {"url": r.url, "type": ("include" if r.excluded else "exclude")}|tojson }}' hx-swap="none"
-                aria-label="{{ 'force include' if r.excluded else 'exclude' }}" title="{{ 'excluded — click to force include' if r.excluded else 'included — click to exclude' }}">{{ '✓ include' if r.excluded else '✗ exclude' }}</button>
-      {% else %}<span class="muted small">—</span>{% endif %}</td>
-      <td>
-        <small class="muted">{{ r.scraped_title or '' }}</small><br>
-        <button type="button" class="linkish" {% if not editable %}disabled{% endif %} title="{{ why.title or 'click to set a title (creates an exact-URL title pattern)' }}"
-                onclick='editTitle({{ cid|tojson }}, {{ r.url|tojson }}, {{ (r.title or r.scraped_title or "")|tojson }})'>{{ r.title or '—' }}</button>
-        {% if r.title_ai %}<br><span class="ai conf-{{ r.title_ai_conf }}" title="AI suggestion · {{ r.title_ai_conf or '?' }} confidence · {{ r.ai_model or '' }}">AI: {{ r.title_ai }} <small>{{ r.title_ai_conf }}</small></span>
-          <button class="mini ok" title="use this title" hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "title"}|tojson }}' hx-swap="none">✓</button><button class="mini" title="dismiss" hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "title"}|tojson }}' hx-swap="none">✕</button>{% endif %}
-      </td>
-      <td>
-        <select class="cell" {% if not editable %}disabled{% endif %} title="{{ why.division or 'set division for this URL' }}" onchange='editField({{ cid|tojson }}, {{ r.url|tojson }}, "division", this.value)'>
-          <option value="">—</option>{% for v in divisions %}<option {% if r.division == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
-        {% if r.division_ai %}<br><span class="ai conf-{{ r.division_ai_conf }}" title="AI suggestion · {{ r.division_ai_conf or '?' }} confidence · {{ r.ai_model or '' }}">AI: {{ r.division_ai }} <small>{{ r.division_ai_conf }}</small></span>
-          <button class="mini ok" title="use" hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "division"}|tojson }}' hx-swap="none">✓</button><button class="mini" title="dismiss" hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "division"}|tojson }}' hx-swap="none">✕</button>{% endif %}
-      </td>
-      <td>
-        <select class="cell" {% if not editable %}disabled{% endif %} title="{{ why.document_type or 'set document type for this URL' }}" onchange='editField({{ cid|tojson }}, {{ r.url|tojson }}, "document_type", this.value)'>
-          <option value="">—</option>{% for v in doc_types %}<option {% if r.document_type == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
-        {% if r.document_type_ai %}<br><span class="ai conf-{{ r.document_type_ai_conf }}" title="AI suggestion · {{ r.document_type_ai_conf or '?' }} confidence · {{ r.ai_model or '' }}">AI: {{ r.document_type_ai }} <small>{{ r.document_type_ai_conf }}</small></span>
-          <button class="mini ok" title="use" hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "document_type"}|tojson }}' hx-swap="none">✓</button><button class="mini" title="dismiss" hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "document_type"}|tojson }}' hx-swap="none">✕</button>{% endif %}
-      </td>
+      <td class="nowrap">{% if r.kind != 'deleted' %}{{ toggle_cell(r, why, editable) }}{% else %}<span class="muted small">—</span>{% endif %}</td>
+      <td>{{ title_cell(r, why, editable) }}</td>
+      <td>{{ select_cell(r, why, editable, 'division', divisions) }}</td>
+      <td>{{ select_cell(r, why, editable, 'document_type', doc_types) }}</td>
+      <td class="nowrap">{{ edited_chip(r, why) }}</td>
     </tr>
     {% else %}
-    <tr class="{% if r.excluded %}excluded{% endif %}">
+    <tr{% if r.excluded %} class="excluded"{% endif %}>
       <td class="num muted">{{ n }}</td>
       <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a>{% if r.url in has_delta %}
-        <br><a class="kind k-modified nowrap" href="{{ base|replace('set=curated','set=deltas') }}&q={{ r.url|urlencode }}" title="a newer change to this URL is waiting under Pending — open it in Curate">pending change · Curate ↗</a>{% endif %}</td>
-      <td>{% if r.excluded %}<span class="kind k-excluded" title="kept out of the index">excluded</span>{% else %}<span class="kind k-included" title="exported to the index">included</span>{% endif %}</td>
-      <td class="muted small">{{ r.scraped_title or '' }}</td>
-      <td>{{ r.title or '' }}</td>
-      <td>{{ r.division or '' }}</td>
-      <td>{{ r.document_type or '' }}</td>
+        <br><a class="kind k-modified nowrap" href="{{ base|replace('set=curated','set=delta') }}&q={{ r.url|urlencode }}" title="a newer version of this URL is waiting under Delta URLs — open it there">delta URL ↗</a>{% endif %}</td>
+      <td class="nowrap">{{ toggle_cell(r, why, not running) }}</td>
+      <td>{{ title_cell(r, why, not running) }}</td>
+      <td>{{ select_cell(r, why, not running, 'division', divisions) }}</td>
+      <td>{{ select_cell(r, why, not running, 'document_type', doc_types) }}</td>
+      <td class="nowrap">{{ edited_chip(r, why) }}</td>
     </tr>
     {% endif %}
   {% else %}
     <tr><td colspan="8" class="empty">
-      {% if set == 'dump' %}{% if c.dump_count %}No crawled URLs match this filter.{% else %}No crawl yet — <b>Scrape</b> from the header to fill this.{% endif %}
-      {% elif set == 'deltas' %}{% if c.delta_count %}No pending changes match this filter.{% elif not c.dump_count %}Scrape first, then <b>Start curating</b>.{% elif c.curated_count %}Nothing pending — the curated set is up to date with the crawl. Add a rule in <a href="/collections/{{ cid }}?tab=curate">Curate</a> to change it.{% else %}Click <b>Start curating</b> in the header to compute what changed.{% endif %}
+      {% if set == 'dump' %}{% if c.dump_count %}No dump URLs match this filter.{% else %}No dump yet — <b>Scrape</b> from the header to fill this.{% endif %}
+      {% elif set == 'delta' %}{% if c.delta_count %}No delta URLs match this filter.{% elif not c.dump_count %}Scrape first, then <b>Start curating</b>.{% elif c.curated_count %}No delta URLs — the curated URLs are up to date with the dump. Edit a row under <b>Curated URLs</b> or add a rule in <a href="/collections/{{ cid }}?tab=curate">Curate</a> to change it.{% else %}Click <b>Start curating</b> in the header to compute what changed.{% endif %}
       {% else %}{% if c.curated_count %}No curated URLs match this filter.{% else %}Nothing promoted yet — review <a href="/collections/{{ cid }}?tab=curate">Curate</a> and promote.{% endif %}{% endif %}
     </td></tr>
   {% endfor %}
