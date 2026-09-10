@@ -357,3 +357,32 @@ async def test_prompts_are_visible(crawler_client):
     await setup(c)
     page = (await c.get("/collections/ex.org?tab=curate")).text
     assert page.count("Show the prompt") == 2 and "search result" in page
+
+
+async def test_openai_provider_sends_temperature_only_when_configured():
+    """gpt-5 / o-series reject any temperature but the default (400 unsupported_value): the
+    request must omit it unless LLM_TEMPERATURE is set explicitly."""
+    from types import SimpleNamespace
+
+    from sde_curation.llm.openai import OpenAIProvider
+
+    class Stub:
+        def __init__(self):
+            self.calls = []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(parse=self.parse))
+
+        async def parse(self, **kw):
+            self.calls.append(kw)
+            answer = MetadataSuggestion(title="T", title_confidence="high", division_confidence="low",
+                                        document_type_confidence="low")
+            msg = SimpleNamespace(parsed=answer, refusal=None, content=None)
+            return SimpleNamespace(choices=[SimpleNamespace(message=msg)], model=kw["model"], usage=None)
+
+    async def run(**over):
+        p = OpenAIProvider(Settings(openai_api_key="k", llm_provider="openai", **over))
+        p.client = Stub()
+        await p.complete(system="s", user="u", schema=MetadataSuggestion)
+        return p.client.calls[0]
+
+    assert "temperature" not in await run()
+    assert (await run(llm_temperature=0))["temperature"] == 0
