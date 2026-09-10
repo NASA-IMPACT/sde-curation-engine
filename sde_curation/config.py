@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -34,7 +35,13 @@ class Settings(BaseSettings):
 
     # ── AWS ────────────────────────────────────────────────────────────
     aws_region: str = "us-east-1"
+    # Local runs: the named AWS CLI/SSO profile every boto3 client uses (unset in ECS, where the
+    # task role applies). Exported to the process environment once, because .env values are not.
+    aws_profile: str | None = None
     crawler_s3_bucket: str | None = None  # SDE_S3_BUCKET of the crawler stack
+    # Folder inside that bucket the crawler writes to ("" = bucket root): keys are
+    # <prefix>/scraped_collections/<id>.json and <prefix>/failure_logs/<id>_failures_summary.json
+    crawler_s3_prefix: str = ""
     crawler_instance_id: str | None = None  # EC2 instance running watch_inbox.sh
     crawler_remote_inbox: str = "/opt/sde-crawler/jobs/incoming"
     cosmos_index_bucket: str | None = None  # sde-cosmos-indexing-{env}
@@ -66,9 +73,16 @@ class Settings(BaseSettings):
     # ── LLM ────────────────────────────────────────────────────────────
     llm_provider: Literal["openai", "fake"] = "openai"
     openai_api_key: str | None = None
-    openai_model: str = "gpt-5.4-mini"
+    openai_model: str = "gpt-5.6-luna"  # 1.05M-token window: every page fits, whole
     openai_base_url: str | None = None  # any OpenAI-compatible endpoint
-    llm_timeout_s: float = 60.0
+    llm_timeout_s: float = 60.0  # per attempt
+    llm_max_retries: int = Field(default=5, ge=0, le=10)  # SDK retries on 429 / 5xx / timeouts
+    llm_workers: int = Field(default=24, ge=1, le=64)  # concurrent calls inside one LLM job
+    # Suggest metadata always sends the FULL page text (no budget, no truncation, one model).
+    # Suggest patterns sends every crawled URL (+ title) in batches of this size, one call each.
+    llm_pattern_batch_urls: int = Field(default=1000, ge=50, le=10_000)
+    # Exclude globs applied deterministically before the model's own suggestions.
+    global_excludes_path: Path | None = None  # default: the packaged sde_curation/data/global_excludes.yaml
 
     # ── notifications ──────────────────────────────────────────────────
     notify_webhook_url: str | None = None
@@ -121,6 +135,8 @@ def get_settings() -> Settings:
     global _settings
     if _settings is None:
         _settings = Settings()
+        if _settings.aws_profile and not os.environ.get("AWS_PROFILE"):
+            os.environ["AWS_PROFILE"] = _settings.aws_profile
     return _settings
 
 

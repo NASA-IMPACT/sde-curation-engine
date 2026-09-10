@@ -1,0 +1,74 @@
+# Exclude globs that apply to (almost) every web collection. Applied deterministically before
+# the model's own suggestions: every glob that matches at least one crawled URL becomes a pending
+# suggestion tagged "global", with its match count, for the curator to accept or reject.
+#
+# match:     URL glob, * is the wildcard; write host-agnostic globs (*/login*) so http/https and
+#            trailing-slash variants are all covered.
+# rationale: one sentence shown to the curator.
+# source:    sme    — written by a subject-matter expert
+#            cosmos — mined from COSMOS production exclude patterns (script to come)
+version: 1
+patterns:
+  - match: "*/login*"
+    rationale: sign-in pages carry no science content
+    source: sme
+  - match: "*/logout*"
+    rationale: sign-out pages carry no science content
+    source: sme
+  - match: "*/signin*"
+    rationale: sign-in pages carry no science content
+    source: sme
+  - match: "*/search?*"
+    rationale: search result pages duplicate content that is indexed at its own URL
+    source: sme
+  - match: "*/search/*"
+    rationale: search result pages duplicate content that is indexed at its own URL
+    source: sme
+  - match: "*/tag/*"
+    rationale: tag listing pages are navigation, not content
+    source: sme
+  - match: "*/tags/*"
+    rationale: tag listing pages are navigation, not content
+    source: sme
+  - match: "*/category/*"
+    rationale: category listing pages are navigation, not content
+    source: sme
+  - match: "*/author/*"
+    rationale: author archive pages duplicate the posts they list
+    source: sme
+  - match: "*/feed*"
+    rationale: RSS/Atom feeds are machine formats, not pages
+    source: sme
+  - match: "*/rss*"
+    rationale: RSS feeds are machine formats, not pages
+    source: sme
+  - match: "*.rss"
+    rationale: RSS feeds are machine formats, not pages
+    source: sme
+  - match: "*/sitemap*"
+    rationale: sitemaps are crawler aids, not content
+    source: sme
+  - match: "*/privacy*"
+    rationale: privacy policy pages are site chrome
+    source: sme
+  - match: "*/terms*"
+    rationale: terms-of-use pages are site chrome
+    source: sme
+  - match: "*/accessibility*"
+    rationale: accessibility statements are site chrome
+    source: sme
+  - match: "*/wp-admin/*"
+    rationale: WordPress administration pages are never public content
+    source: sme
+  - match: "*/wp-json/*"
+    rationale: WordPress REST API endpoints are not pages
+    source: sme
+  - match: "*?replytocom=*"
+    rationale: comment-reply permalinks duplicate the post
+    source: sme
+  - match: "*?share=*"
+    rationale: social sharing links duplicate the post
+    source: sme
+  - match: "*/print/*"
+    rationale: print views duplicate the page
+    source: sme

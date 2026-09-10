@@ -31,7 +31,7 @@ def test_new_modified_deleted_unchanged():
     assert by["https://x/b"].kind is DeltaKind.MODIFIED and by["https://x/b"].title == "B"  # curated kept
     assert "https://x/c" not in by
     assert by["https://x/gone"].kind is DeltaKind.DELETED
-    assert ds.counts == {"new": 1, "modified": 1, "deleted": 1, "excluded": 0}
+    assert ds.counts == {"new": 1, "modified": 1, "deleted": 1, "excluded": 0, "content_changed": 0}
 
 
 def test_pattern_change_on_curated_row_creates_modified_delta_and_effects():
@@ -77,3 +77,35 @@ def test_100k_urls_under_5s():
     dt = time.perf_counter() - t0
     assert len(ds.deltas) == n  # every row changed (title pattern)
     assert dt < 5, f"took {dt:.1f}s"
+
+
+# ── content-aware deltas ───────────────────────────────────────────────
+
+
+def test_content_hash_change_is_a_modified_delta_with_flag():
+    d = [DumpUrl(collection_id="x", url="https://x/a", scraped_title="A", content_hash="h2")]
+    c = cur({"url": "https://x/a", "scraped_title": "A", "content_hash": "h1"})
+    ds = rc(d, c)
+    assert ds.deltas[0].kind is DeltaKind.MODIFIED and ds.deltas[0].content_changed is True
+    assert ds.counts["content_changed"] == 1 and ds.counts["modified"] == 1
+
+
+def test_null_hash_on_either_side_is_not_a_change():
+    d = [DumpUrl(collection_id="x", url="https://x/a", scraped_title="A", content_hash="h2")]
+    assert rc(d, cur({"url": "https://x/a", "scraped_title": "A"})).deltas == []  # promoted before hashing
+    d = [DumpUrl(collection_id="x", url="https://x/a", scraped_title="A")]
+    assert rc(d, cur({"url": "https://x/a", "scraped_title": "A", "content_hash": "h1"})).deltas == []
+    d = [DumpUrl(collection_id="x", url="https://x/a", scraped_title="A", content_hash="h1")]
+    assert rc(d, cur({"url": "https://x/a", "scraped_title": "A", "content_hash": "h1"})).deltas == []
+
+
+def test_new_rows_are_never_content_changed_and_promote_carries_the_dump_hash():
+    d = [DumpUrl(collection_id="x", url="https://x/a", scraped_title="A", content_hash="h1")]
+    ds = rc(d, [])
+    assert ds.deltas[0].kind is DeltaKind.NEW and ds.deltas[0].content_changed is False
+    out = promote([], ds.deltas, content_hashes={"https://x/a": "h1"})
+    assert out[0].content_hash == "h1"
+    # an unchanged curated row (no delta) also takes the current dump hash
+    kept = cur({"url": "https://x/b", "scraped_title": "B"})
+    out = {r.url: r for r in promote(kept, [], content_hashes={"https://x/b": "hb"})}
+    assert out["https://x/b"].content_hash == "hb"

@@ -1,0 +1,4 @@
+{# Workflow status pill + the sub-tags that qualify it (curation stage, needs re-curation). context: c #}
+<span class="status s-{{ c.status }}" title="workflow status">{{ status_icon(c.status) }} {{ status_label(c.status) }}</span>
+{%- if c.status == 'curating' and c.curation_stage %} <span class="chip stage" title="curation stage: {{ 'deciding the exclusions' if c.curation_stage == 'exclusions' else 'setting titles, divisions and document types' }}">{{ '① Exclusions' if c.curation_stage == 'exclusions' else '② Metadata' }}</span>{% endif %}
+{%- if c.needs_recuration %} <span class="chip warn" title="A newer crawl exists — review pending changes and re-index">⚠ needs re-curation</span>{% endif %}

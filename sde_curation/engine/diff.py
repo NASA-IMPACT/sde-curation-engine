@@ -2,7 +2,8 @@
 
 recompute(dump, curated, patterns) -> deltas
   new       url in dump, not in curated
-  modified  url in both and (scraped title changed OR effective curation values changed)
+  modified  url in both and (scraped title changed OR effective curation values changed OR
+            the page text changed — `content_changed` overlay flag, only when both sides have a hash)
   deleted   url in curated, not in dump (tombstone; promoted as a removal)
   (no delta) url in both and nothing changed
 """
@@ -14,6 +15,10 @@ from typing import Any
 
 from ..models import CuratedUrl, DeltaKind, DeltaUrl, DumpUrl, Pattern
 from .patterns import resolve_all
+
+# AI suggestions (and their provenance) survive a recompute: copied from the previous delta row.
+_AI_FIELDS = ("title_ai", "division_ai", "document_type_ai", "title_ai_conf", "division_ai_conf",
+              "document_type_ai_conf", "ai_model", "ai_content_hash")
 
 
 @dataclass
@@ -27,6 +32,7 @@ class DeltaSet:
         for d in self.deltas:
             c[d.kind.value] += 1
         c["excluded"] = sum(1 for d in self.deltas if d.excluded and d.kind is not DeltaKind.DELETED)
+        c["content_changed"] = sum(1 for d in self.deltas if d.content_changed)
         return c
 
 
@@ -64,9 +70,14 @@ def recompute(
             effects.append((pid, u, fld))
         # curated excluded flag is only kept if it came from a pattern; otherwise not excluded
         eff = (d.scraped_title, r.title, r.division, r.document_type, r.excluded)
+        # A NULL hash on either side means "unknown", never "changed": rows promoted before
+        # hashing existed do not all become deltas on the first recompute after it lands.
+        content_changed = bool(
+            c is not None and c.content_hash and d.content_hash and c.content_hash != d.content_hash
+        )
         if c is None:
             kind = DeltaKind.NEW
-        elif eff != (c.scraped_title, c.title, c.division, c.document_type, c.excluded):
+        elif content_changed or eff != (c.scraped_title, c.title, c.division, c.document_type, c.excluded):
             kind = DeltaKind.MODIFIED
         else:
             continue
@@ -81,9 +92,8 @@ def recompute(
                 division=r.division,
                 document_type=r.document_type,
                 excluded=r.excluded,
-                title_ai=prev.title_ai if prev else None,
-                division_ai=prev.division_ai if prev else None,
-                document_type_ai=prev.document_type_ai if prev else None,
+                content_changed=content_changed,
+                **({k: getattr(prev, k) for k in _AI_FIELDS} if prev else {}),
             )
         )
     for u, c in cur_by.items():
@@ -103,8 +113,13 @@ def recompute(
     return DeltaSet(deltas, effects)
 
 
-def promote(curated: list[CuratedUrl], deltas: list[DeltaUrl]) -> list[CuratedUrl]:
-    """Apply deltas to the curated set: tombstones remove, everything else upserts."""
+def promote(
+    curated: list[CuratedUrl], deltas: list[DeltaUrl], content_hashes: dict[str, str | None] | None = None
+) -> list[CuratedUrl]:
+    """Apply deltas to the curated set: tombstones remove, everything else upserts. Every
+    surviving row takes the current dump text hash (`content_hashes`): the export always ships
+    the current dump text, so after a promote that is what the index holds."""
+    hashes = content_hashes or {}
     by = {c.url: c for c in curated}
     for d in deltas:
         if d.kind is DeltaKind.DELETED:
@@ -119,4 +134,8 @@ def promote(curated: list[CuratedUrl], deltas: list[DeltaUrl]) -> list[CuratedUr
                 document_type=d.document_type,
                 excluded=d.excluded,
             )
+    if hashes:
+        for u, c in by.items():
+            if u in hashes:
+                by[u] = c.model_copy(update={"content_hash": hashes[u]})
     return list(by.values())

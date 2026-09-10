@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import logging
 import re
 import secrets
 import sqlite3
@@ -31,10 +32,13 @@ from ..db import Database
 from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
 from ..llm.base import LLMError, make_llm
+from ..llm.global_excludes import load_global_excludes
+from ..llm.tasks import METADATA_SYSTEM, PATTERN_SYSTEM
 from ..models import (
     ANONYMOUS_ACTOR,
     Collection,
     CollectionCreate,
+    CurationStage,
     Division,
     DocumentType,
     PatternCreate,
@@ -49,6 +53,7 @@ from ..store import remove_collection_files, write_collection_yaml, write_patter
 from . import auth
 
 _HERE = Path(__file__).parent
+log = logging.getLogger(__name__)
 templates = Jinja2Templates(directory=_HERE / "templates")
 
 
@@ -90,15 +95,22 @@ def static_url(name: str) -> str:
 
 templates.env.globals["static_url"] = static_url
 
+# (status, label, what to do while this is the current/upcoming step, what it means once done)
 PIPELINE = [
-    (Status.BACKLOG, "Backlog", "Collection registered"),
-    (Status.SCRAPED, "Scraped", "Crawl finished, dump ingested"),
-    (Status.CURATING, "Curating", "Deltas computed, patterns being applied"),
-    (Status.CURATED, "Curated", "Deltas promoted to the curated set"),
-    (Status.CONFIG_GENERATED, "Test index", "Exported and indexed to the test index"),
-    (Status.LIVE, "Live", "Validated and indexed to production"),
+    (Status.BACKLOG, "Backlog", "Run the crawler on the seed URL, or load an existing crawl.", "Registered"),
+    (Status.SCRAPED, "Scraped", "Click Start curating to compute what changed vs. the curated set.", "Crawl ingested"),
+    (Status.CURATING, "Curating", "Settle the exclusions, set metadata, then promote.", "Reviewed and promoted"),
+    (Status.CURATED, "Curated", "Index the curated set to the test index.", "Curated set promoted"),
+    (Status.CONFIG_GENERATED, "Test index", "Check the validation result, then index to production.", "Indexed to test and validated"),
+    (Status.LIVE, "Live", "Live. Re-scrape to start a new cycle.", "Indexed to production"),
 ]
-_ORDER = {st: i for i, (st, _, _) in enumerate(PIPELINE)}
+_ORDER = {st: i for i, (st, _, _, _) in enumerate(PIPELINE)}
+
+# Which pipeline step a job kind belongs to (failure footers, step panels).
+STEP_FOR_KIND = {
+    "scrape": Status.BACKLOG, "llm_patterns": Status.CURATING, "llm_metadata": Status.CURATING,
+    "index_test": Status.CONFIG_GENERATED, "validate": Status.CONFIG_GENERATED, "index_prod": Status.LIVE,
+}
 
 
 def next_action(c: Collection, job) -> dict:
@@ -111,10 +123,10 @@ def next_action(c: Collection, job) -> dict:
                 "hint": "Run the crawler on the seed URL"}
     if c.status is Status.SCRAPED:
         return {"label": "Start curating", "kind": "post", "url": f"/api/collections/{cid}/recompute",
-                "then": f"/collections/{cid}?tab=urls&set=deltas", "hint": "Compute deltas vs. the curated set"}
+                "then": f"/collections/{cid}?tab=curate", "hint": "Compute what changed vs. the curated set"}
     if c.status is Status.CURATING:
-        return {"label": "Open curation", "kind": "link", "url": f"/collections/{cid}?tab=urls&set=deltas",
-                "hint": "Review deltas, add patterns, then promote"}
+        return {"label": "Open curation", "kind": "link", "url": f"/collections/{cid}?tab=curate",
+                "hint": "Settle the exclusions, set metadata, then promote"}
     if c.status is Status.CURATED:
         return {"label": "Index to test", "kind": "post", "url": f"/api/collections/{cid}/index?target=test",
                 "hint": "Export the curated set to S3 and run the WEB_COSMOS indexer against the test index"}
@@ -141,16 +153,17 @@ def status_invariant_problem(c: Collection, new: Status) -> str | None:
 
 def pipeline_steps(c: Collection) -> list[dict]:
     cur = _ORDER[c.status]
-    return [
-        {"status": st, "label": label, "hint": hint, "index": i + 1,
-         "state": "done" if i < cur else "current" if i == cur else "todo"}
-        for i, (st, label, hint) in enumerate(PIPELINE)
-    ]
+    steps = []
+    for i, (st, label, do, done) in enumerate(PIPELINE):
+        state = "done" if i < cur else "current" if i == cur else "todo"
+        steps.append({"status": st, "label": label, "do": do, "done": done, "index": i + 1,
+                      "state": state, "hint": done if state == "done" else do})
+    return steps
 
 
 STATUS_ICON = {Status.BACKLOG: "○", Status.SCRAPED: "⬇", Status.CURATING: "✎", Status.CURATED: "✓",
                Status.CONFIG_GENERATED: "⚙", Status.LIVE: "●"}
-STATUS_LABEL = {st: label for st, label, _ in PIPELINE}
+STATUS_LABEL = {st: label for st, label, _, _ in PIPELINE}
 NONE_CURATOR = "__none__"  # filter value for collections without provenance
 
 
@@ -163,7 +176,8 @@ def status_label(st) -> str:
 
 
 templates.env.globals.update(
-    next_action=next_action, pipeline_steps=pipeline_steps, status_icon=status_icon, status_label=status_label
+    next_action=next_action, pipeline_steps=pipeline_steps, status_icon=status_icon, status_label=status_label,
+    step_for_kind=lambda kind: STEP_FOR_KIND.get(str(kind)),
 )
 
 
@@ -171,6 +185,20 @@ class StatusChange(BaseModel):
     status: Status
     note: str | None = None
     force: bool = False
+
+
+class StageChange(BaseModel):
+    stage: CurationStage
+
+
+class SuggestionBulk(BaseModel):
+    decision: Literal["accept", "reject"]
+    type: PatternType | None = None  # None = every pending suggestion
+
+
+class AiBulk(BaseModel):
+    decision: Literal["accept", "reject"]
+    field: Literal["title", "division", "document_type"]
 
 
 class UrlEdit(BaseModel):
@@ -184,6 +212,22 @@ class UrlEdit(BaseModel):
     def _check(self) -> UrlEdit:
         PatternCreate(type=self.type, match=self.url, value=self.value)  # same rules → 422
         return self
+
+
+def llm_prompts(settings: Settings) -> dict[str, dict[str, str]]:
+    return {
+        "patterns": {
+            "system": PATTERN_SYSTEM,
+            "user": ("Batch:\n{\"collection\": …, \"seed\": …, \"global_excludes_already_applied\": [top 15 global globs"
+                     " that matched], \"batch\": \"i of K\", \"urls\": [{\"url\": …, \"title\": scraped title}, …]}"
+                     f" — up to {settings.llm_pattern_batch_urls} URLs per call, no page text"),
+        },
+        "metadata": {
+            "system": METADATA_SYSTEM,
+            "user": ("Document:\n{\"url\": …, \"scraped_title\": …, \"text_chars\": N}\n\nText:\n"
+                     f"<the FULL page text, never cut; every page goes to {settings.openai_model}>"),
+        },
+    }
 
 
 def tri_bool(v: str | None) -> bool | None:
@@ -249,6 +293,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             indexer=lambda: make_index_backend(settings),
         )
         app.state.jobs = jobs
+        app.state.existing_cache = {}
         app.state.curation = CurationService(db, lock_for=jobs.lock)
         await jobs.recover()
         try:
@@ -356,7 +401,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         unfiltered per-option counts so the pane shows the whole distribution."""
         qp = request.query_params
         f = {
-            "status": set(qp.getlist("status")), "division": set(qp.getlist("division")),
+            "status": set(qp.getlist("status")), "stage": set(qp.getlist("stage")),
+            "flag": set(qp.getlist("flag")), "division": set(qp.getlist("division")),
             "curator": set(qp.getlist("curator")), "q": (qp.get("q") or "").strip(),
         }
         cols = await db(request).list_collections()
@@ -365,7 +411,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return c.created_by or NONE_CURATOR
 
         def keep(c: Collection) -> bool:
-            if f["status"] and c.status not in f["status"]:
+            # status and its curating sub-stages are one facet: any ticked box admits the row
+            if (f["status"] or f["stage"]) and c.status not in f["status"] and not (
+                c.status is Status.CURATING and c.curation_stage in f["stage"]
+            ):
+                return False
+            if "needs_recuration" in f["flag"] and not c.needs_recuration:
                 return False
             if f["division"] and c.division not in f["division"]:
                 return False
@@ -376,6 +427,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         counts = {
             "status": Counter(c.status for c in cols),
+            "stage": Counter(c.curation_stage for c in cols if c.status is Status.CURATING and c.curation_stage),
+            "flag": {"needs_recuration": sum(1 for c in cols if c.needs_recuration)},
             "division": Counter(c.division for c in cols),
             "curator": Counter(curator_of(c) for c in cols),
         }
@@ -385,21 +438,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         shown = [c for c in cols if keep(c)]
         return {
             "rows": [await row_context(request, c) for c in shown],
-            "statuses": list(Status), "divisions": list(Division), "curators": curators,
-            "counts": counts, "filters": f, "active": bool(f["q"] or f["status"] or f["division"] or f["curator"]),
+            "statuses": list(Status), "stages": list(CurationStage), "divisions": list(Division), "curators": curators,
+            "counts": counts, "filters": f,
+            "active": bool(f["q"] or f["status"] or f["stage"] or f["flag"] or f["division"] or f["curator"]),
             "total": len(cols), "shown": len(shown), "none_curator": NONE_CURATOR,
         }
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
-        return templates.TemplateResponse(request, "dashboard.html", await dashboard_context(request))
+        return templates.TemplateResponse(
+            request, "dashboard.html", {**await dashboard_context(request), **await jobs_context(request, compact=True)}
+        )
+
+    async def jobs_context(request: Request, *, compact: bool = False) -> dict[str, Any]:
+        d = db(request)
+        return {
+            "jobs_active": await d.active_jobs(), "jobs_failed": await d.list_recent_jobs(5, "failed"),
+            "names": {c.collection_id: c.name for c in await d.list_collections()}, "compact": compact,
+        }
+
+    @app.get("/jobs", response_class=HTMLResponse)
+    async def jobs_page(request: Request):
+        ctx = await jobs_context(request)
+        ctx["recent"] = await db(request).list_recent_jobs(50)
+        return templates.TemplateResponse(request, "jobs.html", ctx)
+
+    @app.get("/jobs/panel", response_class=HTMLResponse)
+    async def jobs_panel(request: Request):
+        return templates.TemplateResponse(
+            request, "partials/jobs_panel.html", await jobs_context(request, compact=request.headers.get("HX-Target") == "jobs-panel")
+        )
 
     @app.get("/rows", response_class=HTMLResponse)
     async def dashboard_rows(request: Request):
         """The collections table (outerHTML swap) + out-of-band filter counts."""
         return templates.TemplateResponse(request, "partials/rows.html", {**await dashboard_context(request), "oob": True})
 
-    TABS = ("overview", "urls", "patterns", "activity")
+    TABS = ("overview", "curate", "urls", "activity")
+    TAB_ALIASES = {"patterns": "curate"}  # old links / bookmarks
+
+    def norm_tab(tab: str | None) -> str:
+        tab = TAB_ALIASES.get(tab or "", tab or "")
+        return tab if tab in TABS else "overview"
     SETS = ("dump", "deltas", "curated")
 
     def list_params(request: Request) -> dict[str, Any]:
@@ -416,6 +496,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "q": (qp.get("q") or "").strip() or None, "kind": qp.get("kind") or None,
             "excluded": tri_bool(qp.get("excluded")), "division": qp.get("division") or None,
             "document_type": qp.get("document_type") or None, "page": page, "per": per,
+            "ai": qp.get("ai") if qp.get("ai") in ("pending", "high", "medium", "low") else None,
+            "changed": "true" if qp.get("changed") == "true" else None,
         }
 
     async def urls_context(request: Request, c: Collection, set_: str) -> dict[str, Any]:
@@ -433,7 +515,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             rows, total = await d.list_deltas(
                 c.collection_id, kind=lp["kind"], excluded=lp["excluded"], q=lp["q"],
-                division=lp["division"], document_type=lp["document_type"], limit=lp["per"], offset=off,
+                division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending",
+                ai_conf=lp["ai"] if lp["ai"] in ("high", "medium", "low") else None,
+                content_changed=True if lp["changed"] else None, limit=lp["per"], offset=off,
             )
             effects = await d.effects_for(c.collection_id, [r.url for r in rows])
         return {
@@ -455,18 +539,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if set_ not in SETS:
                 set_ = "deltas"
             ctx.update(await urls_context(request, c, set_))
-        elif tab == "patterns":
-            ctx.update(
-                patterns=await curation(request).pattern_stats(c),
-                suggestions=await d.list_pattern_suggestions(c.collection_id, "pending"),
-                classifiable=len(await d.deltas_for_llm(c.collection_id)),
-                llm_name=settings.llm_provider, divisions=list(Division), doc_types=list(DocumentType),
-                pattern_types=list(PatternType),
-            )
+        elif tab == "curate":
+            ctx.update(await curate_context(request, c))
         else:
             ctx.update(history=await d.status_history(c.collection_id), jobs=await d.list_jobs(c.collection_id, 50),
                        audit=await d.list_audit(c.collection_id, 100))
         return ctx
+
+    async def curate_context(request: Request, c: Collection) -> dict[str, Any]:
+        """The guided workspace: ① exclusions (suggested exclude rules) → ② metadata (AI per URL) → ③ promote."""
+        d = db(request)
+        cid = c.collection_id
+        suggestions = await d.list_pattern_suggestions(cid, "pending")
+        ai_counts = await d.delta_ai_counts(cid)
+        step = await step_context(request, c, Status.CURATING)
+        return {
+            "stats": step["stats"],
+            "suggestions": suggestions,
+            "suggestion_counts": {"total": len(suggestions), "by_type": Counter(s["type"] for s in suggestions)},
+            "patterns_ever_run": await d.job_exists(cid, "llm_patterns"),
+            "last_patterns_job": await d.latest_job_of_kind(cid, "llm_patterns"),
+            "last_metadata_job": await d.latest_job_of_kind(cid, "llm_metadata"),
+            "classifiable": await d.count_deltas_for_llm(cid),
+            "classifiable_all": await d.count_deltas_for_llm(cid, only_missing=False),
+            "ai_counts": ai_counts, "ai_pending_total": ai_counts["title"] + ai_counts["division"] + ai_counts["document_type"],
+            "llm_model": settings.openai_model if settings.llm_provider == "openai" else settings.llm_provider,
+            "llm_workers": settings.llm_workers,
+            "prompts": llm_prompts(settings),
+            "pattern_calls": -(-c.dump_count // settings.llm_pattern_batch_urls) if c.dump_count else 0,
+            "pattern_batch": settings.llm_pattern_batch_urls,
+            "global_excludes": len(load_global_excludes(settings.global_excludes_path).patterns),
+            "llm_name": settings.llm_provider, "divisions": list(Division), "doc_types": list(DocumentType),
+            "pattern_types": list(PatternType),
+        }
+
+    @app.get("/collections/{collection_id}/rules", response_class=HTMLResponse)
+    async def collection_rules(request: Request, collection_id: str):
+        """The rules (patterns) table, loaded lazily: match counting scans every dump URL."""
+        c = await must_get(request, collection_id)
+        job = await db(request).latest_job(collection_id)
+        return templates.TemplateResponse(request, "partials/rules.html", {
+            "c": c, "job": job, "patterns": await curation(request).pattern_stats(c),
+        })
 
     async def header_context(request: Request, c: Collection) -> dict[str, Any]:
         ctx = await step_context(request, c, c.status)
@@ -475,7 +589,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/collections/{collection_id}", response_class=HTMLResponse)
     async def collection_page(request: Request, collection_id: str, tab: str = "overview"):
         c = await must_get(request, collection_id)
-        tab = tab if tab in TABS else "overview"
+        tab = norm_tab(tab)
         ctx = await header_context(request, c)
         ctx.update(await tab_context(request, c, tab))
         ctx["selected"] = ctx.get("selected", c.status)
@@ -489,7 +603,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/collections/{collection_id}/tab/{tab}", response_class=HTMLResponse)
     async def collection_tab(request: Request, collection_id: str, tab: str):
         c = await must_get(request, collection_id)
-        tab = tab if tab in TABS else "overview"
+        tab = norm_tab(tab)
         ctx = await tab_context(request, c, tab)
         ctx["selected"] = ctx.get("selected", c.status)
         return templates.TemplateResponse(request, f"partials/tab_{tab}.html", ctx)
@@ -520,10 +634,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             rows, _ = await d.list_deltas(
                 c.collection_id, kind=lp["kind"], excluded=lp["excluded"], q=lp["q"],
-                division=lp["division"], document_type=lp["document_type"], limit=1_000_000,
+                division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending",
+                ai_conf=lp["ai"] if lp["ai"] in ("high", "medium", "low") else None,
+                content_changed=True if lp["changed"] else None, limit=1_000_000,
             )
-            cols = ["kind", "url", "excluded", "scraped_title", "title", "division", "document_type",
-                    "title_ai", "division_ai", "document_type_ai"]
+            cols = ["kind", "url", "excluded", "content_changed", "scraped_title", "title", "division",
+                    "document_type", "title_ai", "title_ai_conf", "division_ai", "division_ai_conf",
+                    "document_type_ai", "document_type_ai_conf", "ai_model"]
             data = [[getattr(r, k) for k in cols] for r in rows]
         buf = io.StringIO()
         w = csv.writer(buf); w.writerow(cols); w.writerows(data)
@@ -536,15 +653,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         d = db(request)
         jobs = await d.list_jobs(c.collection_id, limit=20)
         _, total = await d.list_deltas(c.collection_id, limit=1)
-        counts = {"new": 0, "modified": 0, "deleted": 0, "excluded": 0}
+        counts = {"new": 0, "modified": 0, "deleted": 0, "excluded": 0, "content_changed": 0}
         if total:
             for k in ("new", "modified", "deleted"):
                 counts[k] = (await d.list_deltas(c.collection_id, kind=k, limit=1))[1]
             counts["excluded"] = (await d.list_deltas(c.collection_id, excluded=True, limit=1))[1]
+            counts["content_changed"] = (await d.list_deltas(c.collection_id, content_changed=True, limit=1))[1]
         curated = await d.load_curated(c.collection_id) if c.curated_count else []
         runs = await d.list_index_runs(c.collection_id, limit=5)
+        failed = jobs[0] if jobs and jobs[0].state == "failed" else None
         stats = {
-            "last_scrape": next((j for j in jobs if j.kind == "scrape"), None),
+            "last_scrape": await d.latest_job_of_kind(c.collection_id, "scrape"),
+            "failed_step": STEP_FOR_KIND.get(str(failed.kind)) if failed else None,
             "index_runs": runs,
             "last_test_run": next((r for r in runs if r.target == "test"), None),
             "last_prod_run": next((r for r in runs if r.target == "prod"), None),
@@ -553,6 +673,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "pattern_count": len(await d.list_patterns(c.collection_id)),
             "curated_excluded": sum(1 for r in curated if r.excluded),
         }
+        if step in (Status.BACKLOG, Status.SCRAPED) or c.status in (Status.BACKLOG, Status.SCRAPED):
+            stats["existing_crawl"] = await existing_crawl(request, c)
         await with_validation(request, c)
         return {"c": c, "job": jobs[0] if jobs else None, "step": step,
                 "steps": pipeline_steps(c), "stats": stats}
@@ -609,7 +731,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ) if hasattr(e, "errors") else str(e)
             return templates.TemplateResponse(
                 request, "dashboard.html",
-                {**await dashboard_context(request), "error": msg, "form": data},
+                {**await dashboard_context(request), **await jobs_context(request, compact=True), "error": msg, "form": data},
                 status_code=422,
             )
         return RedirectResponse("/", status_code=303)
@@ -666,15 +788,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ── jobs ───────────────────────────────────────────────────────────
 
+    async def existing_crawl(request: Request, c: Collection) -> dict[str, Any] | None:
+        """The crawl output already produced for this collection (S3 or local), cached briefly:
+        the pipeline and header partials poll every few seconds. Never raises."""
+        cache: dict[str, tuple[float, Any]] = request.app.state.existing_cache
+        hit = cache.get(c.collection_id)
+        if hit and time.monotonic() - hit[0] < 60:
+            ex = hit[1]
+        else:
+            try:
+                ex = await request.app.state.jobs.scraper.existing(c)
+            except Exception as e:  # noqa: BLE001 - a broken backend must not break the page
+                log.warning("existing crawl lookup failed for %s: %s", c.collection_id, e)
+                ex = None
+            cache[c.collection_id] = (time.monotonic(), ex)
+        if ex is None:
+            return None
+        loaded = c.last_scraped_at is not None and ex.modified <= c.last_scraped_at
+        return {"modified": ex.modified, "where": ex.where, "size": ex.size, "already_loaded": loaded}
+
+    @app.get("/api/collections/{collection_id}/crawl/existing")
+    async def api_existing_crawl(request: Request, collection_id: str):
+        c = await must_get(request, collection_id)
+        ex = await existing_crawl(request, c)
+        return {"exists": ex is not None, **(ex or {})}
+
     @app.post("/api/collections/{collection_id}/scrape", status_code=202, response_model=None)
-    async def api_scrape(request: Request, collection_id: str):
+    async def api_scrape(request: Request, collection_id: str, reuse: bool = False):
+        """Run the crawler; with ?reuse=true ingest the crawl output that already exists instead."""
         c = await must_get(request, collection_id)
         jobs: JobManager = request.app.state.jobs
         try:
-            job = await jobs.start_scrape(c, actor=actor(request))
+            job = await jobs.start_scrape(c, actor=actor(request), reuse=reuse)
         except JobConflict as e:
             raise HTTPException(409, str(e)) from e
-        await audit(request, "scrape.start", collection_id, f"job #{job.id}")
+        request.app.state.existing_cache.pop(collection_id, None)
+        await audit(request, "scrape.reuse" if reuse else "scrape.start", collection_id, f"job #{job.id}")
         if _is_htmx(request) and request.headers.get("HX-Target", "").startswith("row-"):
             return templates.TemplateResponse(
                 request, "partials/row.html", await row_context(request, c)
@@ -826,14 +975,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/collections/{collection_id}/deltas")
     async def api_deltas(
         request: Request, collection_id: str, kind: str | None = None,
-        excluded: str | None = None, q: str | None = None, limit: int = 100, offset: int = 0,
+        excluded: str | None = None, q: str | None = None, content_changed: str | None = None,
+        limit: int = 100, offset: int = 0,
     ):
         await must_get(request, collection_id)
         rows, total = await db(request).list_deltas(
             collection_id, kind=kind or None, excluded=tri_bool(excluded), q=q or None,
-            limit=max(1, min(limit, 1000)), offset=max(0, offset),
+            content_changed=tri_bool(content_changed), limit=max(1, min(limit, 1000)), offset=max(0, offset),
         )
         return {"total": total, "items": rows}
+
+    @app.post("/api/collections/{collection_id}/stage")
+    async def api_set_stage(request: Request, collection_id: str, body: StageChange):
+        """Move between the curation stages (exclusions → metadata → back). Metadata is gated on every
+        pattern suggestion having been decided."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        if c.status is not Status.CURATING:
+            raise HTTPException(409, f"stages only apply while curating (status is {c.status})")
+        if body.stage is CurationStage.METADATA:
+            pending = await db(request).list_pattern_suggestions(collection_id, "pending")
+            if pending:
+                raise HTTPException(
+                    409, f"{len(pending)} pattern suggestion{'s are' if len(pending) != 1 else ' is'} pending"
+                         " — accept or reject them first"
+                )
+        await _set_stage(request, collection_id, body.stage)
+        await audit(request, "stage.set", collection_id, f"→ {body.stage}")
+        return htmx_done(request, {"stage": body.stage})
+
+    async def _set_stage(request: Request, collection_id: str, stage: CurationStage) -> None:
+        await db(request).set_stage(collection_id, stage)
+        c = await must_get(request, collection_id)
+        write_collection_yaml(settings.collections_dir, c, await db(request).status_history(collection_id))
+        emit_collection(request, c)
 
     @app.post("/api/collections/{collection_id}/promote")
     async def api_promote(request: Request, collection_id: str):
@@ -930,24 +1105,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """LLM suggests title/division/doc type per pending URL → *_ai fields (never the effective values)."""
         c = await must_get(request, collection_id)
         if c.delta_count == 0:
-            raise HTTPException(409, "no pending deltas — recompute first")
-        todo = await db(request).deltas_for_llm(collection_id, only_missing=not all)
-        if not todo:
+            raise HTTPException(409, "no pending changes — recompute first")
+        pending = await db(request).list_pattern_suggestions(collection_id, "pending")
+        if pending:  # exclusions first: excluded URLs are never classified, and titles depend on them
+            raise HTTPException(
+                409, f"{len(pending)} pattern suggestion{'s are' if len(pending) != 1 else ' is'} pending"
+                     " — accept or reject them before suggesting metadata",
+            )
+        if not await db(request).count_deltas_for_llm(collection_id, only_missing=not all):
             raise HTTPException(
                 409, "nothing to classify: every pending (non-excluded) URL already has suggestions"
                      " — use ?all=true to redo them",
             )
-        return await _start_llm(request, collection_id, "suggest.metadata",
+        resp = await _start_llm(request, collection_id, "suggest.metadata",
                                 lambda j, c, who: j.start_llm_metadata(c, only_missing=not all, actor=who))
+        if c.status is Status.CURATING and c.curation_stage is not CurationStage.METADATA:
+            await _set_stage(request, collection_id, CurationStage.METADATA)
+        return resp
+
+    @app.get("/api/llm/prompts")
+    async def api_llm_prompts(request: Request):
+        """The exact system prompts and the shape of the user message for both LLM jobs."""
+        return llm_prompts(settings)
 
     @app.get("/api/collections/{collection_id}/suggestions")
     async def api_suggestions(request: Request, collection_id: str, state: str | None = "pending"):
         await must_get(request, collection_id)
         return await db(request).list_pattern_suggestions(collection_id, state or None)
 
+    async def _decide_suggestions(request: Request, c: Collection, sugs: list[dict], decision: str) -> int:
+        """accept → the suggestions become real patterns (one recompute); reject → kept for the
+        record, never applied. Returns how many suggestions were decided."""
+        if decision == "accept":
+            _, ds = await curation(request).add_patterns(
+                c, [PatternCreate(type=s["type"], match=s["match"], value=s.get("value")) for s in sugs],
+                actor=actor(request),
+            )
+            await _after_curation_change(request, c, ds)
+        return await db(request).set_pattern_suggestions_state(
+            c.collection_id, [s["id"] for s in sugs], "accepted" if decision == "accept" else "rejected",
+            actor=actor(request),
+        )
+
+    @app.post("/api/collections/{collection_id}/suggestions/bulk")
+    async def api_decide_suggestions_bulk(request: Request, collection_id: str, body: SuggestionBulk):
+        """Accept or reject every pending pattern suggestion, optionally only one type."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        sugs = [s for s in await db(request).list_pattern_suggestions(collection_id, "pending")
+                if body.type is None or s["type"] == body.type]
+        if not sugs:
+            raise HTTPException(409, f"no pending {body.type or ''} suggestions".replace("  ", " "))
+        n = await _decide_suggestions(request, c, sugs, body.decision)
+        await audit(request, f"suggestion.bulk_{body.decision}", collection_id, f"{body.type or 'all'} × {n}")
+        return htmx_done(request, {"decided": n, "state": body.decision + "ed"})
+
     @app.post("/api/collections/{collection_id}/suggestions/{sid}/{decision}")
     async def api_decide_suggestion(request: Request, collection_id: str, sid: int, decision: str):
-        """accept → becomes a real pattern (recompute); reject → kept for the record, never applied."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         if decision not in ("accept", "reject"):
@@ -957,21 +1171,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "suggestion not found")
         if sug["state"] != "pending":
             raise HTTPException(409, f"suggestion already {sug['state']}")
-        if decision == "accept":
-            try:
-                _, ds = await curation(request).add_pattern(
-                    c, PatternCreate(type=sug["type"], match=sug["match"], value=sug["value"]),
-                    actor=actor(request),
-                )
-            except sqlite3.IntegrityError:
-                ds = await curation(request).recompute(c)  # identical pattern already exists
-            await _after_curation_change(request, c, ds)
-        await db(request).set_pattern_suggestion_state(
-            collection_id, sid, "accepted" if decision == "accept" else "rejected", actor=actor(request)
-        )
+        await _decide_suggestions(request, c, [sug], decision)
         await audit(request, f"suggestion.{decision}", collection_id,
                     f"{sug['type']} {sug['match']}" + (f" → {sug['value']}" if sug.get("value") else ""))
         return htmx_done(request, {"id": sid, "state": decision + "ed"})
+
+    @app.post("/api/collections/{collection_id}/ai/bulk")
+    async def api_decide_ai_bulk(request: Request, collection_id: str, body: AiBulk):
+        """Accept every AI suggestion for one field as exact-URL rules (one recompute), or drop them all."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        rows = await db(request).deltas_with_ai(collection_id, body.field)
+        if not rows:
+            raise HTTPException(409, f"no AI {body.field} suggestions to {body.decision}")
+        if body.decision == "accept":
+            ds = await curation(request).replace_exact_patterns(
+                c, [PatternCreate(type=PatternType(body.field), match=url, value=str(v)) for url, v in rows],
+                actor=actor(request),
+            )
+            await _after_curation_change(request, c, ds)
+        await db(request).clear_delta_ai_field(collection_id, body.field)
+        await audit(request, f"ai.bulk_{body.decision}", collection_id, f"{body.field} × {len(rows)}")
+        return htmx_done(request, {"decided": len(rows), "field": body.field, "state": body.decision + "ed"})
 
     @app.post("/api/collections/{collection_id}/ai/{decision}")
     async def api_decide_ai(request: Request, collection_id: str, decision: str, body: AiDecision):
@@ -980,8 +1201,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ensure_idle(request, c)
         if decision not in ("accept", "reject"):
             raise HTTPException(422, "decision must be accept or reject")
-        rows, _ = await db(request).list_deltas(collection_id, q=body.url, limit=1000)
-        row = next((r for r in rows if r.url == body.url), None)
+        row = await db(request).get_delta(collection_id, body.url)
         if row is None:
             raise HTTPException(404, "URL not in deltas")
         value = getattr(row, f"{body.field}_ai")

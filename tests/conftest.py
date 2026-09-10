@@ -9,6 +9,10 @@ from httpx import ASGITransport, AsyncClient
 from sde_curation.config import Settings
 from sde_curation.web.app import create_app
 
+# Tests must not depend on the developer's local .env (real bucket, instance, AOSS endpoints,
+# scrape backend…): every Settings() built while the suite runs ignores the env file.
+Settings.model_config["env_file"] = None
+
 # Login enabled: APP_PASSWORD seeds the bootstrap "admin" account with that password.
 SECURED = {"app_password": "s3cret", "session_secret": "unit-test-secret"}
 

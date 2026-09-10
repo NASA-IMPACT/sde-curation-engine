@@ -8,37 +8,58 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from ..config import Settings
 from ..engine.patterns import glob_to_regex
 from ..models import (
     Collection,
     Division,
     DocumentType,
-    MetadataSuggestions,
+    MetadataSuggestion,
     PatternSuggestion,
     PatternSuggestions,
 )
-from .base import LLMProvider
+from .base import Completion, LLMProvider
 
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
 
 _DIVISIONS = ", ".join(d.value for d in Division)
 _DOC_TYPES = ", ".join(d.value for d in DocumentType)
 
-PATTERN_SYSTEM = f"""You help curate web crawls for NASA's Science Discovery Engine.
-Given a sample of crawled URLs (with scraped titles) from one collection, propose curation patterns.
-Pattern types:
-- exclude: URL glob (use * as wildcard) for pages that are not science content (login, tags, feeds, site chrome, duplicates).
-- include: glob that must stay even if an exclude matches it.
-- title: glob + a title template using {{title}} (scraped title), {{url}}, {{collection}} — only when scraped titles are poor or need context.
-- division: glob + one of: {_DIVISIONS}.
-- document_type: glob + one of: {_DOC_TYPES}.
-Rules: globs must be specific (never just "*" for exclude); prefer few, high-value patterns; every pattern must match at least one sample URL; give a one-sentence rationale each.
-The same page often appears under http:// and https:// (and with/without a trailing slash): write host-agnostic globs like */login* or */map/?obs=* rather than https://host/login, so all variants are covered."""
+PATTERN_SYSTEM = """You help curate web crawls for NASA's Science Discovery Engine (SDE), a search engine over
+NASA science content. You are given one batch of crawled URLs (with their scraped titles) from one
+collection, sorted by path. Propose URL globs for pages that must NOT be searchable in the SDE:
+sign-in and account pages, tag / category / author / date archives, feeds and machine formats,
+search result pages, site chrome (privacy, terms, contact forms), duplicates of the same page
+under another URL (print views, share links, pagination of a listing), and anything else that is
+not science content.
+Rules:
+- Only "exclude" globs. Use * as the wildcard. Never a bare "*". Be specific enough that science
+  pages are not swept up; when unsure, leave the page in.
+- Every glob must match at least one URL in this batch; globs that match nothing are discarded.
+- Prefer few, high-value globs over many narrow ones. Give a one-sentence rationale each.
+- The same page often appears under http:// and https:// and with or without a trailing slash:
+  write host-agnostic globs like */login* or */map/?obs=* rather than https://host/login.
+- A list of globs already applied from a global exclude list is given as style examples; do not
+  repeat them."""
 
-METADATA_SYSTEM = f"""You classify crawled web pages for NASA's Science Discovery Engine.
-For each document, return: a clean concise title (strip site-name suffixes/prefixes; keep the page's real subject),
-the SMD division (one of: {_DIVISIONS}; omit if unclear), and the document type (one of: {_DOC_TYPES}; omit if unclear).
-Return one item per input url, using the url exactly as given."""
+METADATA_SYSTEM = f"""You classify one crawled web page at a time for NASA's Science Discovery Engine (SDE).
+You receive the page URL, its scraped title and its full text (possibly long). The scraped title
+is often the same site-wide string on every page, and the text usually starts with the site's
+navigation menu, alerts and login links: skip that chrome and read the page's own content. Return:
+- title: the title this page should have in a search result, judged by someone who has not seen
+  the site — descriptive and self-contained, typically 4–12 words: the page's real subject, plus
+  the project, mission or site name when the subject alone would be ambiguous ("Storm Tracker"
+  is not enough; "Aurorasaurus Storm Tracker: Real-Time Geomagnetic Activity" is). Do not copy
+  the site-wide scraped title, do not pad with slogans. Null only if no sensible title exists.
+- division: the NASA Science Mission Directorate division the content belongs to, one of:
+  {_DIVISIONS}. Null if it is not clear.
+- document_type: one of: {_DOC_TYPES}. Null if it is not clear.
+For each of the three fields also give a confidence:
+- high: the answer is stated explicitly in the text or title (a mission page names its division,
+  a dataset landing page is obviously "Data").
+- medium: a strong inference from the URL, the site or the surrounding context.
+- low: a guess. Prefer a null value with low confidence over a wrong value.
+Never invent facts that are not in the input."""
 
 
 def _matches_any(match: str, urls: list[str]) -> bool:
@@ -46,47 +67,61 @@ def _matches_any(match: str, urls: list[str]) -> bool:
     return any(rx.match(u) for u in urls)
 
 
-async def suggest_patterns(
-    llm: LLMProvider, c: Collection, sample: list[dict[str, Any]], all_urls: list[str]
-) -> list[PatternSuggestion]:
-    payload = {"collection": c.name, "seed": c.seed_url,
-               "urls": [{"url": s["url"], "title": s.get("scraped_title")} for s in sample]}
-    result: PatternSuggestions = await llm.complete(
-        system=PATTERN_SYSTEM, user="Sample:\n" + json.dumps(payload, ensure_ascii=False), schema=PatternSuggestions
+async def suggest_patterns_batch(
+    llm: LLMProvider, c: Collection, batch: list[dict[str, Any]], *,
+    examples: list[str] = (), batch_no: int = 1, batches: int = 1,
+) -> tuple[list[PatternSuggestion], Completion[PatternSuggestions]]:
+    """One call over one batch of {url, scraped_title}. A suggestion is kept only if it matches
+    a URL the model actually saw (this batch), is a real glob and is not a duplicate."""
+    payload = {
+        "collection": c.name, "seed": c.seed_url,
+        "global_excludes_already_applied": list(examples),
+        "batch": f"{batch_no} of {batches}",
+        "urls": [{"url": s["url"], "title": s.get("scraped_title")} for s in batch],
+    }
+    done = await llm.complete(
+        system=PATTERN_SYSTEM, user="Batch:\n" + json.dumps(payload, ensure_ascii=False), schema=PatternSuggestions
     )
+    urls = [s["url"] for s in batch]
     kept: list[PatternSuggestion] = []
     seen: set[tuple[str, str]] = set()
-    for s in result.suggestions:
+    for s in done.parsed.suggestions:
         key = (s.type, s.match)
-        if key in seen or s.match.strip() in ("", "*") and s.type == "exclude":
+        if key in seen or s.match.strip() in ("", "*"):
             continue
-        if not _matches_any(s.match, all_urls):
-            continue  # hallucinated / over-specific: matches nothing we crawled
+        if not _matches_any(s.match, urls):
+            continue  # hallucinated / over-specific: matches nothing the model was shown
         seen.add(key)
         kept.append(s)
-    return kept
+    return kept, done
+
+
+async def suggest_metadata_one(llm: LLMProvider, doc: dict[str, Any], *, settings: Settings) -> dict[str, Any]:
+    """One call for one document {url, title, text, content_hash}. Returns the row for
+    `Database.set_delta_ai` plus the token usage."""
+    text = doc.get("text") or ""  # the whole page, never cut: an accurate title needs all of it
+    header = {"url": doc["url"], "scraped_title": doc.get("title"), "text_chars": len(text)}
+    user = "Document:\n" + json.dumps(header, ensure_ascii=False) + "\n\nText:\n" + text
+    done = await llm.complete(system=METADATA_SYSTEM, user=user, schema=MetadataSuggestion)
+    r = done.parsed
+    return {
+        "url": doc["url"],
+        "title": (r.title or "").strip() or None, "title_conf": r.title_confidence,
+        "division": r.division, "division_conf": r.division_confidence,
+        "document_type": r.document_type, "document_type_conf": r.document_type_confidence,
+        "model": done.model, "content_hash": doc.get("content_hash"),
+        "tokens_in": done.tokens_in, "tokens_out": done.tokens_out, "tokens_cached": done.tokens_cached,
+    }
 
 
 async def suggest_metadata(
-    llm: LLMProvider, docs: list[dict[str, Any]], *, batch_size: int = 20,
+    llm: LLMProvider, docs: list[dict[str, Any]], *, settings: Settings,
     on_progress: ProgressCb | None = None,
 ) -> list[dict[str, Any]]:
-    """docs: {url, title, text}. Returns validated rows {url, title, division, document_type}."""
+    """Sequential convenience wrapper (tests, scripts): one call per document."""
     out: list[dict[str, Any]] = []
-    for i in range(0, len(docs), batch_size):
-        batch = docs[i : i + batch_size]
-        payload = {"documents": [{"url": d["url"], "title": d.get("title"), "text": (d.get("text") or "")[:1200]}
-                                 for d in batch]}
-        result: MetadataSuggestions = await llm.complete(
-            system=METADATA_SYSTEM, user="Documents:\n" + json.dumps(payload, ensure_ascii=False),
-            schema=MetadataSuggestions,
-        )
-        sent = {d["url"] for d in batch}
-        for item in result.items:
-            if item.url not in sent:
-                continue  # never write a suggestion for a URL we did not ask about
-            out.append({"url": item.url, "title": (item.title or "").strip() or None,
-                        "division": item.division, "document_type": item.document_type})
+    for i, d in enumerate(docs, 1):
+        out.append(await suggest_metadata_one(llm, d, settings=settings))
         if on_progress:
-            await on_progress({"done": min(i + batch_size, len(docs)), "total": len(docs)})
+            await on_progress({"done": i, "total": len(docs)})
     return out

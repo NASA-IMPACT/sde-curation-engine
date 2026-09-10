@@ -4,7 +4,7 @@
       hx-trigger="click, keyup[key=='Enter']"
       hx-get="/collections/{{ c.collection_id }}/step/{{ s.status }}" hx-target="#step-panel" hx-swap="innerHTML"
       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.classList.add('selected')">
-    <span class="n">{{ loop.index }}</span> {{ s.label }}</li>
+    <span class="n">{{ loop.index }}</span> {{ s.label }}{% if s.status == 'curating' and c.status == 'curating' and c.curation_stage %} <small class="stage">· {{ c.curation_stage }}</small>{% endif %}</li>
   {% endfor %}
   {% if c.needs_recuration %}<li class="warn" title="A newer crawl exists — re-curate and re-index">⚠ needs re-curation</li>{% endif %}
 </ol>

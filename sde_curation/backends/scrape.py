@@ -37,12 +37,26 @@ class ScrapeResult:
     documents_path: Path
     summary: dict[str, Any] = field(default_factory=dict)
     external_ref: str | None = None
+    crawled_at: datetime | None = None  # when the documents were produced (reused crawls); None = now
+
+
+@dataclass
+class ExistingCrawl:
+    """A documents file the crawler already produced for this collection, wherever it lives."""
+
+    modified: datetime
+    where: str
+    size: int | None = None
 
 
 class ScrapeBackend(Protocol):
     name: str
 
     async def run(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult: ...
+
+    async def existing(self, collection: Collection) -> ExistingCrawl | None: ...
+
+    async def fetch_existing(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult: ...
 
 
 def build_job(collection: Collection) -> dict[str, Any]:
@@ -123,6 +137,24 @@ class LocalSubprocessScraper:
             "docs": self.root / "output" / "collections" / f"{collection_id}.json",
             "summary": self.root / "logs" / "collections" / f"{collection_id}_failures_summary.json",
         }
+
+    async def existing(self, collection: Collection) -> ExistingCrawl | None:
+        p = self._paths(collection.collection_id)["docs"]
+        if not p.is_file():
+            return None
+        st = p.stat()
+        return ExistingCrawl(modified=datetime.fromtimestamp(st.st_mtime, UTC), where=str(p), size=st.st_size)
+
+    async def fetch_existing(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult:
+        ex = await self.existing(collection)
+        if ex is None:
+            raise ScrapeError("no existing crawl output to load — run the crawler")
+        await on_progress({"reused": True})
+        p = self._paths(collection.collection_id)
+        summary: dict[str, Any] = {}
+        if p["summary"].is_file():
+            summary = json.loads(p["summary"].read_text(encoding="utf-8"))
+        return ScrapeResult(documents_path=p["docs"], summary=summary, external_ref="reused", crawled_at=ex.modified)
 
     async def run(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult:
         if not (self.root / "run.py").is_file():
@@ -322,14 +354,55 @@ class SsmRemoteScraper:
             return None
         return r["ETag"], r["LastModified"]
 
+    def _key(self, rel: str) -> str:
+        prefix = self.s.crawler_s3_prefix.strip("/")
+        return f"{prefix}/{rel}" if prefix else rel
+
+    def _docs_key(self, cid: str) -> str:
+        return self._key(f"scraped_collections/{cid}.json")
+
+    async def existing(self, collection: Collection) -> ExistingCrawl | None:
+        key = self._docs_key(collection.collection_id)
+        try:
+            r = await asyncio.to_thread(self.s3.head_object, Bucket=self.s.crawler_s3_bucket, Key=key)
+        except self.s3.exceptions.ClientError:
+            return None
+        return ExistingCrawl(modified=r["LastModified"], where=f"s3://{self.s.crawler_s3_bucket}/{key}",
+                             size=r.get("ContentLength"))
+
+    async def fetch_existing(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult:
+        ex = await self.existing(collection)
+        if ex is None:
+            raise ScrapeError(f"no existing crawl in {ex.where if ex else self.s.crawler_s3_bucket} — run the crawler")
+        await on_progress({"reused": True})
+        result = await self._download(collection.collection_id)
+        result.external_ref, result.crawled_at = "reused", ex.modified
+        return result
+
+    async def _download(self, cid: str) -> ScrapeResult:
+        docs_key, summary_key = self._docs_key(cid), self._key(f"failure_logs/{cid}_failures_summary.json")
+        local = self.s.data_dir / "scrapes" / f"{cid}.json"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            self.s3.download_file, self.s.crawler_s3_bucket, docs_key, str(local)
+        )
+        summary: dict[str, Any] = {}
+        try:
+            obj = await asyncio.to_thread(
+                self.s3.get_object, Bucket=self.s.crawler_s3_bucket, Key=summary_key
+            )
+            summary = json.loads(obj["Body"].read())
+        except self.s3.exceptions.ClientError:
+            pass
+        return ScrapeResult(documents_path=local, summary=summary)
+
     async def _poll(self, cid: str) -> RemotePoll | None:
         status, out = await self._invocation(await self._send(self.poll_script(cid)))
         return parse_poll(out) if status == "Success" else None
 
     async def run(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult:
         cid = collection.collection_id
-        docs_key = f"scraped_collections/{cid}.json"
-        summary_key = f"failure_logs/{cid}_failures_summary.json"
+        docs_key = self._docs_key(cid)
         before = await self._head(docs_key)
         # S3 LastModified and the remote log mtime have 1-second resolution: floor our own
         # timestamp so a write landing in the same second still counts.
@@ -391,20 +464,9 @@ class SsmRemoteScraper:
                     f"remote crawl stalled: no log activity for {stalled / 3600:.1f}h"
                 )
 
-        local = self.s.data_dir / "scrapes" / f"{cid}.json"
-        local.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(
-            self.s3.download_file, self.s.crawler_s3_bucket, docs_key, str(local)
-        )
-        summary: dict[str, Any] = {}
-        try:
-            obj = await asyncio.to_thread(
-                self.s3.get_object, Bucket=self.s.crawler_s3_bucket, Key=summary_key
-            )
-            summary = json.loads(obj["Body"].read())
-        except self.s3.exceptions.ClientError:
-            pass
-        return ScrapeResult(documents_path=local, summary=summary, external_ref=cmd_id)
+        result = await self._download(cid)
+        result.external_ref = cmd_id
+        return result
 
 
 def make_scrape_backend(settings: Settings) -> ScrapeBackend:

@@ -48,6 +48,32 @@ class CurationService:
         )
         return p, await self.recompute(c)
 
+    async def add_patterns(
+        self, c: Collection, bodies: list[PatternCreate], *, actor: str | None = None
+    ) -> tuple[int, DeltaSet]:
+        """Bulk accept: insert every pattern (duplicates skipped), recompute once."""
+        async with self._lock_for(c.collection_id):
+            n = await self.db.insert_patterns(
+                [Pattern(collection_id=c.collection_id, created_by=actor, **b.model_dump()) for b in bodies]
+            )
+            return n, await self._recompute(c)
+
+    async def replace_exact_patterns(
+        self, c: Collection, bodies: list[PatternCreate], *, actor: str | None = None
+    ) -> DeltaSet:
+        """Bulk per-URL edits of one field: drop the previous exact-URL rule for each URL, insert
+        the new value, recompute once."""
+        async with self._lock_for(c.collection_id):
+            by_type: dict[str, list[str]] = {}
+            for b in bodies:
+                by_type.setdefault(str(b.type), []).append(b.match)
+            for t, matches in by_type.items():
+                await self.db.delete_exact_patterns(c.collection_id, t, matches)
+            await self.db.insert_patterns(
+                [Pattern(collection_id=c.collection_id, created_by=actor, **b.model_dump()) for b in bodies]
+            )
+            return await self._recompute(c)
+
     async def replace_exact_pattern(
         self, c: Collection, body: PatternCreate, *, old_id: int | None, actor: str | None = None
     ) -> DeltaSet:
@@ -78,7 +104,10 @@ class CurationService:
 
     async def _promote(self, c: Collection, actor: str | None = None) -> int:
         deltas = await self.db.load_deltas(c.collection_id)
-        curated = promote(await self.db.load_curated(c.collection_id), deltas)
+        curated = promote(
+            await self.db.load_curated(c.collection_id), deltas,
+            content_hashes=await self.db.dump_content_hashes(c.collection_id),
+        )
         n = await self.db.replace_curated(c.collection_id, curated)
         await self.db.replace_deltas(c.collection_id, [], [])
         await self.db.set_flag(c.collection_id, False)

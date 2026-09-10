@@ -53,9 +53,10 @@ async def test_pages_render(client):
     assert home.status_code == 200 and "Alpha" in home.text and 'sse-connect="/events"' in home.text
     page = await client.get("/collections/a.org")
     assert page.status_code == 200 and "pipeline" in page.text and 'role="tab"' in page.text
-    for tab in ("overview", "urls", "patterns", "activity"):
+    for tab in ("overview", "urls", "curate", "activity"):
         r = await client.get(f"/collections/a.org?tab={tab}")
         assert r.status_code == 200 and f'data-tab="{tab}"' in r.text, tab
+    assert 'data-tab="curate"' in (await client.get("/collections/a.org?tab=patterns")).text  # old alias
     assert "Status history" in (await client.get("/collections/a.org?tab=activity")).text
     assert (await client.get("/collections/a.org?tab=bogus")).status_code == 200  # falls back to overview
     assert (await client.get("/collections/nope")).status_code == 404
@@ -127,3 +128,13 @@ async def test_static_assets_are_hash_versioned(client):
     assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
     r = await client.get("/static/app.css?v=stale00000")
     assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+
+
+async def test_header_action_has_no_row_target(client):
+    """The Next-action button lives in a table row on the dashboard (row swap) but not on the
+    collection header; a 'closest tr' target there makes htmx drop the request silently."""
+    await client.post("/api/collections", json={"seed_url": "https://a.org", "name": "Alpha"})
+    header = (await client.get("/collections/a.org/header")).text
+    assert "/api/collections/a.org/scrape" in header and "closest tr" not in header and 'hx-swap="none"' in header
+    row = (await client.get("/collections/a.org/row")).text
+    assert "/api/collections/a.org/scrape" in row and 'hx-target="closest tr"' in row

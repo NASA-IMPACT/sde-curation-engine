@@ -77,22 +77,46 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
 Two buttons on the Patterns & AI tab, both background jobs that **never change effective values**.
 The page refreshes itself when the job finishes (SSE, with a 4 s poll while running), so results
 appear without a manual reload:
-- **✨ Suggest patterns** — the model sees a sample of crawled URLs (+ scraped titles) and drafts
-  `exclude` / `include` / `title` / `division` / `document_type` patterns with a rationale. They land
-  in a *Suggested patterns* table with match counts; **Accept** turns one into a real pattern
-  (recompute runs), **Reject** dismisses it. Suggestions that match no crawled URL are dropped before
-  you see them.
-- **✨ Suggest metadata** — per pending URL (title + first 1.5k chars of text, batched 20 per call)
-  the model proposes a clean title, division and document type. These show as purple `AI:` badges
-  next to each cell in URLs › Deltas; **✓** accepts (creates an exact-URL pattern, i.e. a manual
-  override), **✕** dismisses. Suggestions for URLs that weren't asked about are ignored.
+- **✨ Suggest patterns** — **exclude globs only**: which pages must never be searchable. First the
+  **global exclude list** (`sde_curation/data/global_excludes.yaml`, entries tagged `source: sme`
+  or `cosmos`) is applied deterministically: every glob that matches at least one crawled URL becomes
+  a pending suggestion tagged `global`, with its match count. Then the model sees **every** crawled
+  URL (URL + scraped title only, http/https and trailing-slash twins collapsed, sorted by path) in
+  batches of `LLM_PATTERN_BATCH_URLS` (default 1000), one call per batch through the worker pool,
+  and drafts globs with a rationale; a glob is kept only if it matches a URL in the batch the model
+  saw. Rows merge by glob across batches. The button says how many URLs and calls that is.
+  **Accept** turns a row into a real `exclude` rule (recompute runs) — the URLs are out of scope,
+  so they never reach the export or the index, and they are never sent for metadata; **Reject**
+  dismisses it. Include / title / division / type rules remain curator tools (the add-rule form).
+- **✨ Suggest metadata** — **one call per pending, included URL with the full page text**, up to
+  `LLM_WORKERS` (default 24) in flight. The text is never cut: an accurate title needs the whole
+  page, and the default model (`gpt-5.6-luna`, 1.05M-token window) takes any page whole; a page
+  beyond the model's window fails that one call (counted, shown, retried on the next run) rather
+  than being guessed from a slice. The model returns a descriptive search-result title, division and document type, each
+  with a **confidence** (`high` = explicit in the text, `medium` = strong inference, `low` = guess).
+  These show as `AI:` badges with the confidence next to each cell in URLs › Deltas (filter by
+  confidence; the review bar counts them); **✓** accepts (creates an exact-URL pattern, i.e. a
+  manual override), **✕** dismisses. Answers are written as they arrive: **cancel keeps what
+  finished**, one bad URL is counted as failed and never fails the job, and re-running classifies
+  only what is missing — plus any URL whose text changed since it was last classified. The job
+  result shows classified / failed counts and tokens in / out.
 
-Provider is pluggable (`LLM_PROVIDER`): `openai` (default model `gpt-5.4-mini`; any
+Provider is pluggable (`LLM_PROVIDER`): `openai` (default model `gpt-5.6-luna`; any
 OpenAI-compatible endpoint via `OPENAI_BASE_URL`; structured outputs parsed straight into Pydantic
 models — a malformed reply fails the job and writes nothing) or `fake` (deterministic heuristics,
 used in tests and demos; no key needed). Adding a provider = one module implementing
-`complete(system, user, schema)` + one line in `llm/base.py`. Prompts live in `llm/tasks.py`
-(they ask for host-agnostic globs like `*/login*` so http/https variants are covered together).
+`complete(system, user, schema, model=None) -> Completion` + one line in `llm/base.py`. Prompts
+live in `llm/tasks.py` (they ask for host-agnostic globs like `*/login*` so http/https variants
+are covered together). The worker pool (`llm/pool.py`) retries nothing itself — the OpenAI client
+retries 429 / 5xx / timeouts `LLM_MAX_RETRIES` times with backoff — but it keeps going past
+per-URL failures and aborts only after ten consecutive non-retryable errors (bad key, bad model).
+
+**Content-aware deltas**: every crawled page gets a `content_hash` (sha256 of its
+whitespace-normalised text) at ingest; a promote carries the current hash onto the curated rows.
+On the next re-scrape a page whose text changed shows as *modified* with a **text changed** badge
+(filter: *text changed since promotion*) even when its title and metadata did not move, and
+Suggest metadata re-classifies it. Rows promoted before hashing existed have no hash and compare as
+unchanged, so the first run after an upgrade does not flag everything.
 
 ### Indexing (Phase 5)
 **Index to test** exports the curated, non-excluded URLs as the indexer's contract —
@@ -163,6 +187,53 @@ unapply (next most specific → curated → NULL). Diff + apply run as one idemp
   marked failed on restart.
 - Server-side refusals surface as an alert with the server's message; nothing fails silently.
 
+### Working in parallel (several curators at once)
+Concurrency is **per collection, not global**. Any number of collections can have jobs running at
+the same time; each collection allows exactly one job, and curation edits on a collection wait
+for that collection's job. The app itself puts no cap on how many scrapes, index runs or LLM jobs
+are in flight — the ceilings come from the systems behind it.
+
+**Isolation**
+- One asyncio lock per collection, shared by scrape ingest, LLM jobs, index runs and every
+  curation write. Curators on different collections never block each other; on the same
+  collection, writes serialise and a second job start is refused with 409 (not queued).
+- Starting a job checks three things — a job being created, a live job task, and a held lock —
+  so two people clicking *Scrape* in the same instant cannot both start one.
+- Cancel only touches that collection's job and records who cancelled it.
+
+**What actually runs in parallel**
+- *Scrapes* — `local`: one subprocess per collection, all at once. `ssm`: the crawler box runs
+  one job at a time under `flock`; extra jobs are accepted immediately and shown as *queued*
+  with how many crawls are ahead, and a queue can wait indefinitely. So scrapes from several
+  curators are accepted in parallel but crawled one at a time.
+- *LLM jobs* — each job runs its own pool of `LLM_WORKERS` (default 24) concurrent calls. There
+  is no limiter across jobs: five curators classifying at once is up to 120 in-flight calls.
+  This is the first place you will hit the provider's rate limit.
+- *Index runs* — each dispatches its own ECS task and polls S3. Nothing limits how many run at
+  once; runs on different collections are fine as long as the indexer tolerates it.
+
+**Data layer**
+- SQLite in WAL mode with one connection per process; writes serialise at the connection. The
+  locks live in memory and the ECS service is pinned to one task — **do not run two replicas**,
+  the mutual exclusion would not hold across them.
+- Curation edits have no stale-edit check. Two curators editing the same row on the same
+  collection: last save wins silently. Every write records the actor (activity tab), but nobody
+  is warned.
+
+**What other curators see**
+- Job starts, progress and completion are pushed over SSE to every open browser; the header,
+  pipeline and jobs strip also poll (5–10 s), so a second curator sees status and counts move.
+- Another person's pattern/metadata edits are *not* pushed. Header counts catch up on the next
+  poll; the curate table body only reloads when a job finishes or the page is refreshed.
+
+**Guidance**
+- Assign curators to distinct collections — that is the model the app is built around.
+- Expect scrapes to queue on the shared crawler; kick them off early.
+- If several people will run LLM jobs at the same time, lower `LLM_WORKERS` or add a
+  process-wide semaphore in `llm/pool.py` so total in-flight calls stay under the provider limit.
+- If two people must share one collection, agree on who edits; the app will not detect a
+  stale edit.
+
 ## Configuration (`.env`, see `.env.example`)
 | Key | Purpose |
 |---|---|
@@ -170,7 +241,8 @@ unapply (next most specific → curated → NULL). Diff + apply run as one idemp
 | `CRAWLER_ROOT`, `CRAWLER_PYTHON` | crawl4ai repo and its interpreter |
 | `INDEXER_ROOT`, `INDEXER_PYTHON` | sde-api-scrapers repo (Phase 5) |
 | `SCRAPE_BACKEND` | `local` (subprocess) or `ssm` (drop the job on the EC2 inbox via SSM; the job shows as *queued* until the crawler rewrites its log, then S3 is polled for the documents object) |
-| `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET` | needed for `ssm` |
+| `AWS_PROFILE` | local runs only: the AWS CLI/SSO profile boto3 uses (the app exports it); unset in ECS |
+| `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET`, `CRAWLER_S3_PREFIX` | needed for `ssm`; the prefix is the folder inside the bucket the crawler writes to (`<prefix>/scraped_collections/…`), empty = bucket root |
 | `INDEX_BACKEND` (`local`\|`ecs`), `COSMOS_INDEX_BUCKET`, `WEB_INDEX_NAME` | indexing target bucket / index |
 | `INDEXING_ECS_CLUSTER`, `INDEXING_TASK_FAMILY`, `INDEXING_CONTAINER_NAME`, `INDEXING_SUBNETS`, `INDEXING_SECURITY_GROUPS`, `INDEXING_DISPATCH_ROLE_ARN` | `ecs` backend |
 | `OPENSEARCH_ENDPOINT_TEST`, `OPENSEARCH_ENDPOINT_PROD`, `SAGEMAKER_ENDPOINT_NAME` | `local` backend (the ECS task def already carries these) |
@@ -178,7 +250,8 @@ unapply (next most specific → curated → NULL). Diff + apply run as one idemp
 | `SCRAPE_POLL_INTERVAL_S` | `ssm` backend: how often to look at the crawler host. A queued job waits indefinitely (the UI shows for how long); only a dead `watch_inbox.sh` fails it |
 | `VALIDATION_DELAY_S`, `VALIDATION_TITLE_MATCH_THRESHOLD`, `VALIDATION_ASSUME_ROLE_ARN` | validation gate |
 | `NOTIFY_WEBHOOK_URL`, `PUBLIC_BASE_URL` | Slack-compatible notifications on every status change |
-| `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.4-mini`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` | LLM assist; any OpenAI-compatible endpoint |
+| `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.6-luna`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` (per attempt), `LLM_MAX_RETRIES` | LLM assist; any OpenAI-compatible endpoint |
+| `LLM_WORKERS` (24), `LLM_PATTERN_BATCH_URLS` (1000), `GLOBAL_EXCLUDES_PATH` | calls in flight per LLM job; URLs per Suggest-patterns call; override the packaged global exclude YAML |
 | `APP_PASSWORD`, `SESSION_SECRET`, `SESSION_TTL_S`, `AUTH_COOKIE_SECURE` | login with local accounts (off when `APP_PASSWORD` is empty; the value seeds the bootstrap `admin`); `/health` stays open |
 | `DB_LOCKING_MODE` (`normal`\|`exclusive`) | `exclusive` when `engine.db` lives on EFS/NFS |
 

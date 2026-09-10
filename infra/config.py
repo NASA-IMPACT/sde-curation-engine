@@ -24,7 +24,7 @@ class Environment(str, Enum):
 # key → what it is. Every one is a plain String parameter; every one is required.
 PARAMS: dict[str, str] = {
     "crawler_instance_id": "EC2 instance of the crawler (sde-crawl4ai-scraper-v1, SdeCrawlerStack)",
-    "crawler_bucket": "S3 bucket the crawler writes scraped_collections/ and failure_logs/ to",
+    "crawler_bucket": "S3 bucket the crawler writes <crawler_s3_prefix>/scraped_collections/ and failure_logs/ to",
     "indexing_cluster_name": "ECS cluster of the WEB_COSMOS indexer (sde-api-scrapers)",
     "indexing_task_family": "task definition family of the WEB_COSMOS indexer",
     "indexing_task_role_arn": "task role ARN of the indexer task definition (iam:PassRole)",
@@ -48,9 +48,13 @@ class EnvConfig:
     vpc_id: str | None = None
 
     crawler_inbox: str = "/opt/sde-crawler/jobs/incoming"
+    # Folder inside crawler_bucket the crawler writes to ("" = bucket root).
+    crawler_s3_prefix: str = "sde-curation-engine-prototype"
     indexing_container_name: str = "WEB_COSMOSContainer"
     web_index_name: str = "sde-web-subset"
-    openai_model: str = "gpt-5.4-mini"
+    openai_model: str = "gpt-5.6-luna"  # 1.05M-token window: the full page text always fits
+    llm_workers: int = 24
+    llm_pattern_batch_urls: int = 1000
     # Override for notification links; default = the stack's CloudFront URL.
     public_base_url: str | None = None
     cpu: int = 1024

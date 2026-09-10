@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -26,9 +26,12 @@ from .engine.export import (
     write_jsonl,
 )
 from .engine.patterns import match_counts
+from .engine.urls import batches, dedupe_variants
 from .events import EventBus
 from .llm.base import LLMError, LLMProvider
-from .llm.tasks import suggest_metadata, suggest_patterns
+from .llm.global_excludes import global_exclude_hits, load_global_excludes
+from .llm.pool import run_pool
+from .llm.tasks import suggest_metadata_one, suggest_patterns_batch
 from .models import (
     SYSTEM_ACTOR,
     Collection,
@@ -43,6 +46,10 @@ from .models import (
 )
 
 log = logging.getLogger(__name__)
+
+# Suggest metadata writes answers to the DB in small chunks (cancel keeps them, commits stay few).
+AI_FLUSH_ROWS = 25
+AI_FLUSH_SECONDS = 2.0
 
 
 class JobConflict(Exception):
@@ -126,21 +133,23 @@ class JobManager:
 
     # ── scrape ─────────────────────────────────────────────────────────
 
-    async def start_scrape(self, c: Collection, *, actor: str | None = None) -> JobRun:
+    async def start_scrape(self, c: Collection, *, actor: str | None = None, reuse: bool = False) -> JobRun:
+        """Run the crawler, or with reuse=True load the crawl output that already exists."""
         cid = c.collection_id
         if cid in self._starting or self.active_for(cid) or self.lock(cid).locked():
             raise JobConflict(f"a job is already running for {cid}")
         self._starting.add(cid)
         try:
             job = await self.db.insert_job(
-                JobRun(collection_id=cid, kind=JobKind.SCRAPE, state=JobState.RUNNING, started_by=actor)
+                JobRun(collection_id=cid, kind=JobKind.SCRAPE, state=JobState.RUNNING, started_by=actor,
+                       progress={"reused": True} if reuse else {})
             )
             self._emit(c, job)
-            return await self._spawn(job, self._run_scrape(c, job))
+            return await self._spawn(job, self._run_scrape(c, job, reuse))
         finally:
             self._starting.discard(cid)
 
-    async def _run_scrape(self, c: Collection, job: JobRun) -> None:
+    async def _run_scrape(self, c: Collection, job: JobRun, reuse: bool = False) -> None:
         async with self._lock(c.collection_id):
             try:
                 async def on_progress(p: dict[str, Any]) -> None:
@@ -150,18 +159,24 @@ class JobManager:
                     await self.db.update_job(job)
                     self._emit(c, job)
 
-                result = await self.scraper.run(c, on_progress)
+                if reuse:
+                    result = await self.scraper.fetch_existing(c, on_progress)
+                else:
+                    result = await self.scraper.run(c, on_progress)
                 docs = parse_documents(result.documents_path)
                 n = await self.ingest_dump(c.collection_id, docs)
+                crawled_at = result.crawled_at or utcnow()
+                await self.db.set_last_scraped(c.collection_id, crawled_at)
                 # deltas computed against the previous dump are now meaningless
                 await self.db.replace_deltas(c.collection_id, [], [])
                 job.progress = {**job.progress, "docs": n, "summary": _brief(result.summary)}
                 job.external_ref = result.external_ref or job.external_ref
+                note = (f"loaded existing crawl from {crawled_at:%Y-%m-%d %H:%M}Z: {n} documents" if reuse
+                        else f"scrape ok: {n} documents")
                 # Collection state first, job record last: "succeeded" must mean every effect of
                 # the job is already visible to whoever polls the job list.
                 updated = await self.db.set_status(
-                    c.collection_id, Status.SCRAPED, note=f"scrape ok: {n} documents", force=True,
-                    actor=SYSTEM_ACTOR,
+                    c.collection_id, Status.SCRAPED, note=note, force=True, actor=SYSTEM_ACTOR,
                 )
                 if c.curated_count:  # anything already promoted must be re-reviewed
                     await self.db.set_flag(c.collection_id, True)
@@ -202,12 +217,8 @@ class JobManager:
         finally:
             self._starting.discard(cid)
 
-    async def start_llm_patterns(
-        self, c: Collection, *, sample_size: int = 60, actor: str | None = None
-    ) -> JobRun:
-        return await self._start(
-            c, JobKind.LLM_PATTERNS, lambda job: self._run_llm_patterns(c, job, sample_size), actor=actor
-        )
+    async def start_llm_patterns(self, c: Collection, *, actor: str | None = None) -> JobRun:
+        return await self._start(c, JobKind.LLM_PATTERNS, lambda job: self._run_llm_patterns(c, job), actor=actor)
 
     async def start_llm_metadata(
         self, c: Collection, *, only_missing: bool = True, actor: str | None = None
@@ -215,6 +226,14 @@ class JobManager:
         return await self._start(
             c, JobKind.LLM_METADATA, lambda job: self._run_llm_metadata(c, job, only_missing), actor=actor
         )
+
+    def _progress_cb(self, c: Collection, job: JobRun):
+        """Merge a progress dict into the job, persist it and publish it over SSE."""
+        async def on_progress(p: dict[str, Any]) -> None:
+            job.progress = {**job.progress, **p}
+            await self.db.update_job(job)
+            self._emit(c, job)
+        return on_progress
 
     async def _guarded(self, c: Collection, job: JobRun, body) -> None:
         async with self._lock(c.collection_id):
@@ -235,40 +254,96 @@ class JobManager:
                 await self.db.finish_job(job, JobState.FAILED, error=f"{type(e).__name__}: {e}"[:2000])
                 self._emit(c, job)
 
-    async def _run_llm_patterns(self, c: Collection, job: JobRun, sample_size: int) -> None:
+    async def _run_llm_patterns(self, c: Collection, job: JobRun) -> None:
+        """Exclude-only suggestions over the whole dump: the global exclude list first
+        (deterministic), then one model call per batch of URLs, merged by (type, match)."""
         async def body():
             dump = await self.db.load_dump(c.collection_id)
             if not dump:
                 raise LLMError("no crawl dump to sample — scrape first")
-            rng = random.Random(42)
-            sample = [d.model_dump() for d in (rng.sample(dump, sample_size) if len(dump) > sample_size else dump)]
+            cid = c.collection_id
             all_urls = [d.url for d in dump]
-            job.progress = {"sample": len(sample), "urls": len(all_urls)}
-            await self.db.update_job(job)
-            kept = await suggest_patterns(self.llm(), c, sample, all_urls)
-            counts = match_counts(
-                [Pattern(id=i, collection_id=c.collection_id, type=s.type, match=s.match, value=s.value)
-                 for i, s in enumerate(kept)], all_urls)
-            rows = [{"type": s.type, "match": s.match, "value": s.value, "rationale": s.rationale,
-                     "matches": counts.get(i, 0)} for i, s in enumerate(kept)]
-            n = await self.db.replace_pattern_suggestions(c.collection_id, rows)
-            job.progress = {**job.progress, "suggestions": n}
+            titles = {d.url: d.scraped_title for d in dump}
+            await self.db.clear_pending_pattern_suggestions(cid)
+            gl = global_exclude_hits(load_global_excludes(self.s.global_excludes_path), all_urls)
+            n_global = await self.db.add_pattern_suggestions(cid, gl)
+            examples = [g["match"] for g in sorted(gl, key=lambda g: -g["matches"])[:15]]
+            if not examples:  # nothing matched: still show the style
+                examples = [g.match for g in load_global_excludes(self.s.global_excludes_path).patterns[:10]]
+            unique = dedupe_variants(all_urls)
+            chunks = batches([{"url": u, "scraped_title": titles.get(u)} for u in unique],
+                             self.s.llm_pattern_batch_urls)
+            progress = self._progress_cb(c, job)
+            await progress({"llm": "patterns", "urls": len(all_urls), "unique": len(unique), "calls": len(chunks),
+                            "total": len(chunks), "done": 0, "failed": 0, "global": n_global,
+                            "suggestions": n_global, "tokens_in": 0, "tokens_out": 0})
+            llm = self.llm()
+
+            async def one(item):
+                i, chunk = item
+                return await suggest_patterns_batch(llm, c, chunk, examples=examples, batch_no=i + 1,
+                                                    batches=len(chunks))
+
+            async def on_result(item, result):
+                kept, done = result
+                counts = match_counts(
+                    [Pattern(id=i, collection_id=cid, type=s.type, match=s.match) for i, s in enumerate(kept)],
+                    all_urls)
+                rows = [{"type": s.type, "match": s.match, "rationale": s.rationale, "matches": counts.get(i, 0)}
+                        for i, s in enumerate(kept)]
+                added = await self.db.add_pattern_suggestions(cid, rows)
+                job.progress["suggestions"] = job.progress.get("suggestions", 0) + added
+                job.progress["tokens_in"] = job.progress.get("tokens_in", 0) + done.tokens_in
+                job.progress["tokens_out"] = job.progress.get("tokens_out", 0) + done.tokens_out
+
+            await run_pool(list(enumerate(chunks)), one, workers=self.s.llm_workers, on_result=on_result,
+                           on_progress=progress, total=len(chunks))
+            await progress({"suggestions": await self.db.count_pending_pattern_suggestions(cid)})
         await self._guarded(c, job, body)
 
     async def _run_llm_metadata(self, c: Collection, job: JobRun, only_missing: bool) -> None:
+        """One call per pending, included URL with the full page text, LLM_WORKERS at a time.
+        Results are written in small chunks as they arrive, so a cancel keeps what finished and
+        a re-run (only_missing) resumes with the rest. One bad URL never fails the job."""
         async def body():
-            docs = await self.db.deltas_for_llm(c.collection_id, only_missing=only_missing)
-            if not docs:
+            cid = c.collection_id
+            total = await self.db.count_deltas_for_llm(cid, only_missing=only_missing)
+            if not total:
                 raise LLMError("no pending URLs to classify — recompute deltas first (or all already have suggestions)")
+            progress = self._progress_cb(c, job)
+            await progress({"llm": "metadata", "total": total, "done": 0, "failed": 0, "inflight": 0,
+                            "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
+            llm = self.llm()
+            buf: list[dict[str, Any]] = []
+            last_flush = time.monotonic()
+            written = 0
 
-            async def on_progress(p: dict[str, Any]) -> None:
-                job.progress = {**job.progress, **p}
-                await self.db.update_job(job)
-                self._emit(c, job)
+            async def flush() -> None:
+                nonlocal last_flush, written
+                last_flush = time.monotonic()
+                if buf:
+                    rows, buf[:] = list(buf), []
+                    n = await self.db.set_delta_ai(cid, rows)
+                    written += n  # never `written += await …`: two flushes overlap and one is lost
 
-            rows = await suggest_metadata(self.llm(), docs, on_progress=on_progress)
-            n = await self.db.set_delta_ai(c.collection_id, rows)
-            job.progress = {**job.progress, "classified": n}
+            async def on_result(doc, row):
+                p = job.progress
+                p["tokens_in"] = p.get("tokens_in", 0) + row.pop("tokens_in", 0)
+                p["tokens_out"] = p.get("tokens_out", 0) + row.pop("tokens_out", 0)
+                p["tokens_cached"] = p.get("tokens_cached", 0) + row.pop("tokens_cached", 0)
+                buf.append(row)
+                if len(buf) >= AI_FLUSH_ROWS or time.monotonic() - last_flush > AI_FLUSH_SECONDS:
+                    await flush()
+
+            try:
+                await run_pool(
+                    self.db.iter_deltas_for_llm(cid, only_missing=only_missing),
+                    lambda d: suggest_metadata_one(llm, d, settings=self.s),
+                    workers=self.s.llm_workers, on_result=on_result, on_progress=progress, total=total,
+                )
+            finally:
+                await flush()  # a cancel still keeps every answer that arrived
+            await progress({"classified": written, "inflight": 0})
         await self._guarded(c, job, body)
 
     # ── index (export → S3 → WEB_COSMOS → status.json) ─────────────────

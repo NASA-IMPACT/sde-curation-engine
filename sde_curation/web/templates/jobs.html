@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% from "partials/job_progress.html" import job_progress %}
+{% block title %}Jobs · SDE Curation Engine{% endblock %}
+{% block content %}
+<h1>Jobs</h1>
+<p class="muted">Every crawl, LLM run and indexing run across all collections. Collections run independently; the crawler host runs one crawl at a time (queued crawls show their position).</p>
+<section class="card" id="jobs-active" hx-get="/jobs/panel" hx-trigger="sse:collection, every 10s" hx-sync="this:replace" hx-swap="innerHTML">
+  {% include "partials/jobs_panel.html" %}
+</section>
+<section class="card">
+  <h2>Recent <span class="count">{{ recent|length }}</span> <small class="muted">newest first</small></h2>
+  <table>
+    <thead><tr><th>#</th><th>Collection</th><th>Kind</th><th>State</th><th>By</th><th>Started</th><th>Took</th><th>Result</th></tr></thead>
+    <tbody>{% for j in recent %}
+      <tr><td class="muted">{{ j.id }}</td><td><a href="/collections/{{ j.collection_id }}?tab=activity">{{ names.get(j.collection_id, j.collection_id) }}</a></td><td>{{ j.kind }}</td>
+          <td><span class="job j-{{ 'queued' if j.state == 'running' and j.progress.queued else j.state }}">{{ 'queued' if j.state == 'running' and j.progress.queued else j.state }}</span></td>
+          <td class="small">{{ j.started_by or '' }}</td>
+          <td class="nowrap">{{ j.started_at.strftime('%m-%d %H:%M:%S') }}</td>
+          <td class="num">{% if j.finished_at %}{{ (j.finished_at - j.started_at).seconds }}s{% elif j.state == 'running' %}<span class="spinner"></span>{% endif %}</td>
+          <td>{% if j.error %}<span class="err">{{ j.error[:160] }}</span>{% else %}{{ job_progress(j) }}{% endif %}</td></tr>
+    {% else %}<tr><td colspan="8" class="muted">No jobs yet.</td></tr>{% endfor %}</tbody>
+  </table>
+</section>
+{% endblock %}
