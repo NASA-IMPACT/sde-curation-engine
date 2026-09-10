@@ -8,8 +8,8 @@
   {% endfor %}
   <span class="subtab-hint muted">
     {% if set == 'dump' %}Raw crawl output, read-only. Decisions are made in <a href="/collections/{{ cid }}?tab=curate">Curate</a> and reviewed under <b>Pending</b>.
-    {% elif set == 'deltas' %}Per-URL edits: ✗/✓ toggles scope, click a title, pick division/type. Each edit becomes an exact-URL rule.
-    {% else %}Read-only snapshot of what was promoted. Use <b>Curate ↗</b> on a row with a pending change.{% endif %}
+    {% elif set == 'deltas' %}Per-URL edits: ✗/✓ excludes / includes a URL, click a title, pick division/type. Each edit becomes an exact-URL rule.
+    {% else %}Read-only snapshot of what was promoted. A row with a newer change waiting shows <b>pending change · Curate ↗</b>.{% endif %}
   </span>
 </nav>
 <div id="urls-table">{% include "partials/urls_table.html" %}</div>

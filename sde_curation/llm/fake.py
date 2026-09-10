@@ -14,15 +14,15 @@ from urllib.parse import urlsplit
 from pydantic import ValidationError
 
 from ..models import (
+    Confidence,
     Division,
     DocumentType,
     MetadataSuggestion,
-    MetadataSuggestions,
     PatternSuggestion,
     PatternSuggestions,
     PatternType,
 )
-from .base import LLMError, T
+from .base import Completion, LLMError, T
 
 _CHROME = ("privacy", "terms", "login", "leaderboard", "tag", "feed", "sitemap", "search")
 _DIV = {
@@ -46,21 +46,31 @@ class FakeProvider:
         self.canned = canned  # raw JSON/dict to return regardless of schema (tests: malformed output)
         self.calls: list[dict[str, str]] = []
 
-    async def complete(self, *, system: str, user: str, schema: type[T]) -> T:
-        self.calls.append({"system": system, "user": user, "schema": schema.__name__})
+    async def complete(
+        self, *, system: str, user: str, schema: type[T], model: str | None = None
+    ) -> Completion[T]:
+        self.calls.append({"system": system, "user": user, "schema": schema.__name__, "model": model})
+        return Completion(
+            parsed=self._answer(user, schema), model=model or self.name,
+            tokens_in=len(system + user) // 4, tokens_out=32,
+        )
+
+    def _answer(self, user: str, schema: type[T]) -> T:
         if self.canned is not None:
             try:
                 return schema.model_validate(self.canned)
             except ValidationError as e:
                 raise LLMError(f"response did not match {schema.__name__}: {e}") from e
-        payload = json.loads(user.split("\n", 1)[1]) if "\n" in user else {}
         if schema is PatternSuggestions:
-            return self._patterns(payload)  # type: ignore[return-value]
-        if schema is MetadataSuggestions:
-            return self._metadata(payload)  # type: ignore[return-value]
+            return self._patterns(json.loads(user.split("\n", 1)[1]))  # type: ignore[return-value]
+        if schema is MetadataSuggestion:
+            _, header, text = user.split("\n", 2)
+            return self._metadata(json.loads(header), text.split("\nText:\n", 1)[-1])  # type: ignore[return-value]
         raise LLMError(f"fake provider has no handler for {schema.__name__}")
 
     def _patterns(self, payload: dict) -> PatternSuggestions:
+        """Exclude globs only: one per site-chrome path segment seen, plus — so every batch
+        yields something deterministic — an exact exclude of the last URL of the batch."""
         urls = [u["url"] for u in payload.get("urls", [])]
         out: list[PatternSuggestion] = []
         seen: set[str] = set()
@@ -73,17 +83,29 @@ class FakeProvider:
                         type=PatternType.EXCLUDE, match=f"*/{seg}*",
                         rationale=f"'{seg}' pages are site chrome, not science content"))
         if urls:
-            out.append(PatternSuggestion(
-                type=PatternType.TITLE, match="*", value="{title} | " + payload.get("collection", ""),
-                rationale="append the collection name for context in search results"))
+            out.append(PatternSuggestion(type=PatternType.EXCLUDE, match=urls[-1],
+                                         rationale="fake: the last URL of every batch is excluded"))
         return PatternSuggestions(suggestions=out)
 
-    def _metadata(self, payload: dict) -> MetadataSuggestions:
-        items = []
-        for d in payload.get("documents", []):
-            hay = (d["url"] + " " + (d.get("title") or "") + " " + (d.get("text") or "")).lower()
-            div = next((v for k, v in _DIV.items() if k in hay), None)
-            dt = next((v for k, v in _DT.items() if k in hay), DocumentType.DOCUMENTATION)
-            title = re.sub(r"\s+[-–|]\s+.*$", "", d.get("title") or "").strip() or None
-            items.append(MetadataSuggestion(url=d["url"], title=title, division=div, document_type=dt))
-        return MetadataSuggestions(items=items)
+    def _metadata(self, header: dict, text: str) -> MetadataSuggestion:
+        """Confidence is deterministic: high when the keyword is in the URL or title, medium when
+        only in the page text, low when the value is a default or missing."""
+        strong = (header["url"] + " " + (header.get("scraped_title") or "")).lower()
+        weak = text.lower()
+
+        def pick(table: dict, default=None):
+            for k, v in table.items():
+                if k in strong:
+                    return v, Confidence.HIGH
+            for k, v in table.items():
+                if k in weak:
+                    return v, Confidence.MEDIUM
+            return default, Confidence.LOW
+
+        div, div_c = pick(_DIV)
+        dt, dt_c = pick(_DT, DocumentType.DOCUMENTATION)
+        title = re.sub(r"\s+[-–|]\s+.*$", "", header.get("scraped_title") or "").strip() or None
+        return MetadataSuggestion(
+            title=title, title_confidence=Confidence.HIGH if title else Confidence.LOW,
+            division=div, division_confidence=div_c, document_type=dt, document_type_confidence=dt_c,
+        )

@@ -104,7 +104,10 @@ class CurationService:
 
     async def _promote(self, c: Collection, actor: str | None = None) -> int:
         deltas = await self.db.load_deltas(c.collection_id)
-        curated = promote(await self.db.load_curated(c.collection_id), deltas)
+        curated = promote(
+            await self.db.load_curated(c.collection_id), deltas,
+            content_hashes=await self.db.dump_content_hashes(c.collection_id),
+        )
         n = await self.db.replace_curated(c.collection_id, curated)
         await self.db.replace_deltas(c.collection_id, [], [])
         await self.db.set_flag(c.collection_id, False)

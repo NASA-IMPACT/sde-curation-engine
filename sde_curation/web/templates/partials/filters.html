@@ -15,7 +15,7 @@
       <span class="status s-{{ st }}">{{ status_icon(st) }} {{ status_label(st) }}</span><span id="f-status-{{ st }}" class="cnt">{{ counts.status[st] }}</span></label>
     {% if st == 'curating' %}{% for sg in stages %}
     <label class="f-opt sub" title="curating collections in the {{ sg }} stage"><input type="checkbox" name="stage" value="{{ sg }}" {% if sg in filters.stage %}checked{% endif %}>
-      <span class="f-lbl">{{ '① Scope' if sg == 'scope' else '② Metadata' }}</span><span id="f-stage-{{ sg }}" class="cnt">{{ counts.stage[sg] }}</span></label>
+      <span class="f-lbl">{{ '① Exclusions' if sg == 'exclusions' else '② Metadata' }}</span><span id="f-stage-{{ sg }}" class="cnt">{{ counts.stage[sg] }}</span></label>
     {% endfor %}{% endif %}
     {% endfor %}
   </fieldset>

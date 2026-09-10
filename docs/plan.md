@@ -186,3 +186,27 @@ Old `/curate` redirects to URLs › Deltas. Verified by tests (67) and browser w
 
 ## Out of scope (per workflow.md)
 TDAMM tagging, multi-user auth, xpath title extraction (stub only), feedback/EJ apps, Sinequa.
+
+### Phase 8 — LLM jobs at October scale — DONE 2026-09-10
+Driven by `suggestions and questions.md` (Bernard's "Recommended Updates").
+- **Content-aware deltas**: `dump_urls.content_hash` / `curated_urls.content_hash` (sha256 of
+  whitespace-normalised text, `engine/text.py`), `delta_urls.content_changed` overlay flag set by
+  `engine/diff.py` only when both sides carry a hash (no storm on the first run after upgrade);
+  promote carries the current dump hash; badge + filter in URLs › Deltas.
+- **Suggest patterns = exclude only, whole dump**: global exclude YAML pre-pass
+  (`sde_curation/data/global_excludes.yaml`, `llm/global_excludes.py`, rows tagged `source=global`),
+  then URL+title batches (`engine/urls.py` dedupes http/https + trailing slash, sorts by path;
+  `LLM_PATTERN_BATCH_URLS`) through the worker pool; a glob is kept only if it matches a URL in its
+  batch; merged by (type, match) with match counts over the whole dump.
+- **Suggest metadata = one call per URL with the full text**: `llm/tasks.py::suggest_metadata_one`,
+  never cut, one model (`gpt-5.6-luna`, 1.05M-token window), per-field confidence
+  (`*_ai_conf`, `ai_model`, `ai_content_hash` on `delta_urls`), candidates streamed
+  from SQLite (`iter_deltas_for_llm`), answers flushed every 25 rows / 2 s so cancel keeps them and
+  re-runs resume; content-changed rows are re-classified.
+- **Infrastructure**: `llm/base.py` `Completion` (model + token usage) and `LLMRetryable`;
+  `llm/pool.py` bounded worker pool (`LLM_WORKERS`, per-item failures counted, abort after 10
+  consecutive non-retryable errors); "LLM calls in progress · done/total · k in flight" via
+  `partials/job_progress.html` on every surface; exact-pattern fast path in `engine/patterns.py`
+  so bulk-accepting per-URL AI suggestions stays fast at 100k URLs.
+- **Next** (`docs/llm-calibration.md`): SME calibration sample → per-field auto-accept thresholds
+  → auto-accept job with audit; COSMOS export mining into the global exclude list.

@@ -1,7 +1,7 @@
 {% from "partials/job_progress.html" import job_progress %}
   <td><a href="/collections/{{ c.collection_id }}">{{ c.name }}</a><br><small class="muted">{{ c.collection_id }}</small></td>
   <td><span class="status s-{{ c.status }}">{{ status_icon(c.status) }} {{ status_label(c.status) }}</span>
-      {% if c.status == 'curating' and c.curation_stage %}<span class="chip stage" title="curation stage">{{ '① Scope' if c.curation_stage == 'scope' else '② Metadata' }}</span>{% endif %}
+      {% if c.status == 'curating' and c.curation_stage %}<span class="chip stage" title="curation stage">{{ '① Exclusions' if c.curation_stage == 'exclusions' else '② Metadata' }}</span>{% endif %}
       {% if c.needs_recuration %}<span class="flag" title="needs re-curation">⚠</span>{% endif %}</td>
   <td title="URLs in the latest crawl">{{ c.dump_count }}</td>
   <td title="Pending changes to review"><a href="/collections/{{ c.collection_id }}?tab=urls&set=deltas">{{ c.delta_count }}</a></td>

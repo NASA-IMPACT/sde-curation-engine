@@ -66,11 +66,16 @@ class Settings(BaseSettings):
     # ── LLM ────────────────────────────────────────────────────────────
     llm_provider: Literal["openai", "fake"] = "openai"
     openai_api_key: str | None = None
-    openai_model: str = "gpt-5.4-mini"
+    openai_model: str = "gpt-5.6-luna"  # 1.05M-token window: every page fits, whole
     openai_base_url: str | None = None  # any OpenAI-compatible endpoint
-    llm_timeout_s: float = 60.0
-    # Suggest patterns sends this many crawled URLs (random, fixed seed) to the model.
-    llm_pattern_sample_size: int = Field(default=60, ge=5, le=500)
+    llm_timeout_s: float = 60.0  # per attempt
+    llm_max_retries: int = Field(default=5, ge=0, le=10)  # SDK retries on 429 / 5xx / timeouts
+    llm_workers: int = Field(default=24, ge=1, le=64)  # concurrent calls inside one LLM job
+    # Suggest metadata always sends the FULL page text (no budget, no truncation, one model).
+    # Suggest patterns sends every crawled URL (+ title) in batches of this size, one call each.
+    llm_pattern_batch_urls: int = Field(default=1000, ge=50, le=10_000)
+    # Exclude globs applied deterministically before the model's own suggestions.
+    global_excludes_path: Path | None = None  # default: the packaged sde_curation/data/global_excludes.yaml
 
     # ── notifications ──────────────────────────────────────────────────
     notify_webhook_url: str | None = None

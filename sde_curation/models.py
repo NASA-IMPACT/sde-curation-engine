@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
@@ -44,10 +44,10 @@ ALLOWED_TRANSITIONS: dict[Status, set[Status]] = {
 
 
 class CurationStage(StrEnum):
-    """Sub-stage while a collection is `curating`: first decide scope (include/exclude), then
+    """Sub-stage while a collection is `curating`: first decide the exclusions, then
     metadata (title / division / document type). Cleared whenever the status leaves curating."""
 
-    SCOPE = "scope"
+    EXCLUSIONS = "exclusions"
     METADATA = "metadata"
 
 
@@ -70,6 +70,12 @@ class Division(StrEnum):
     HELIOPHYSICS = "Heliophysics"
     PLANETARY = "Planetary Science"
     GENERAL = "General"
+
+
+class Confidence(StrEnum):
+    HIGH = "high"      # stated explicitly in the page text or title
+    MEDIUM = "medium"  # a strong inference from URL, site or context
+    LOW = "low"        # a guess; a null value with low confidence is preferred to a wrong one
 
 
 class DocumentType(StrEnum):
@@ -225,6 +231,7 @@ class DumpUrl(BaseModel):
     full_text: str | None = None
     content_type: str | None = None
     depth: int | None = None
+    content_hash: str | None = None  # sha256 of the normalised full_text (None = empty/unknown)
 
 
 class DeltaUrl(BaseModel):
@@ -236,10 +243,16 @@ class DeltaUrl(BaseModel):
     division: Division | None = None
     document_type: DocumentType | None = None
     excluded: bool = False
-    # AI suggestions never overwrite manual values
+    content_changed: bool = False  # page text differs from the promoted (curated) version
+    # AI suggestions never overwrite manual values; each carries the model's own confidence
     title_ai: str | None = None
     division_ai: Division | None = None
     document_type_ai: DocumentType | None = None
+    title_ai_conf: Confidence | None = None
+    division_ai_conf: Confidence | None = None
+    document_type_ai_conf: Confidence | None = None
+    ai_model: str | None = None  # which model answered
+    ai_content_hash: str | None = None  # hash of the text the model saw (resume / re-classify logic)
 
 
 class CuratedUrl(BaseModel):
@@ -250,6 +263,7 @@ class CuratedUrl(BaseModel):
     division: Division | None = None
     document_type: DocumentType | None = None
     excluded: bool = False
+    content_hash: str | None = None  # hash of the text that was promoted (NULL = before hashing existed)
 
 
 # ── patterns ───────────────────────────────────────────────────────────
@@ -389,14 +403,16 @@ class IndexRun(BaseModel):
 
 
 class PatternSuggestion(BaseModel):
-    type: PatternType
+    """What the model may propose: exclude globs only. Everything else (include overrides,
+    titles, divisions, document types) is either a curator's decision or per-URL metadata."""
+
+    type: Literal[PatternType.EXCLUDE]
     match: str = Field(min_length=1)
-    value: str | None = None
     rationale: str
 
     @model_validator(mode="after")
     def _same_rules_as_patterns(self) -> PatternSuggestion:
-        PatternCreate(type=self.type, match=self.match, value=self.value)
+        PatternCreate(type=self.type, match=self.match)
         return self
 
 
@@ -404,12 +420,29 @@ class PatternSuggestions(BaseModel):
     suggestions: list[PatternSuggestion]
 
 
+class GlobalExclude(BaseModel):
+    match: str = Field(min_length=1)
+    rationale: str
+    source: Literal["sme", "cosmos"] = "sme"
+
+    @model_validator(mode="after")
+    def _valid_glob(self) -> GlobalExclude:
+        PatternCreate(type=PatternType.EXCLUDE, match=self.match)
+        return self
+
+
+class GlobalExcludeList(BaseModel):
+    version: int = 1
+    patterns: list[GlobalExclude] = []
+
+
 class MetadataSuggestion(BaseModel):
-    url: str
+    """The model's answer for ONE document (one call per URL). Confidence is per field and
+    required, so the schema forces the model to commit."""
+
     title: str | None = None
+    title_confidence: Confidence
     division: Division | None = None
+    division_confidence: Confidence
     document_type: DocumentType | None = None
-
-
-class MetadataSuggestions(BaseModel):
-    items: list[MetadataSuggestion]
+    document_type_confidence: Confidence

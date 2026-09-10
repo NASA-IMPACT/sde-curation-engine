@@ -16,18 +16,17 @@ async def test_suggestions_bulk_by_type_and_all(crawler_client):
     assert (await c.post("/api/collections/ex.org/suggestions/bulk", json={"decision": "accept"})).status_code == 409
     await c.post("/api/collections/ex.org/suggest/patterns"); await wait_job(c, "ex.org")
     sugs = (await c.get("/api/collections/ex.org/suggestions")).json()
-    n_title = sum(1 for s in sugs if s["type"] == "title")
-    assert n_title == 1 and len(sugs) >= 1
+    assert len(sugs) == 1 and sugs[0]["type"] == "exclude"  # the fake excludes the last URL of the batch
     audit_before = len((await c.get("/collections/ex.org?tab=activity")).text.split("suggestion.bulk_"))
-    # accept only titles → one pattern, one recompute, the rest still pending
-    r = await c.post("/api/collections/ex.org/suggestions/bulk", json={"decision": "accept", "type": "title"})
+    # accept excludes → one pattern, one recompute
+    r = await c.post("/api/collections/ex.org/suggestions/bulk", json={"decision": "accept", "type": "exclude"})
     assert r.status_code == 200 and r.json()["decided"] == 1
     pats = (await c.get("/api/collections/ex.org/patterns")).json()
-    assert [p["type"] for p in pats] == ["title"]
-    assert (await c.get("/api/collections/ex.org/deltas?q=p2")).json()["items"][0]["title"] == "Page 2 | Ex"
+    assert [p["type"] for p in pats] == ["exclude"]
+    assert (await c.get("/api/collections/ex.org/deltas?q=p9")).json()["items"][0]["excluded"] is True
     left = (await c.get("/api/collections/ex.org/suggestions")).json()
-    assert len(left) == len(sugs) - 1 and all(s["type"] != "title" for s in left)
-    assert (await c.post("/api/collections/ex.org/suggestions/bulk", json={"decision": "accept", "type": "title"})).status_code == 409
+    assert left == []
+    assert (await c.post("/api/collections/ex.org/suggestions/bulk", json={"decision": "accept", "type": "exclude"})).status_code == 409
     # reject everything else → nothing more applied, none pending
     if left:
         r = await c.post("/api/collections/ex.org/suggestions/bulk", json={"decision": "reject"})
@@ -45,11 +44,11 @@ async def test_bulk_accept_skips_duplicates(crawler_client):
     await setup(c)
     await c.post("/api/collections/ex.org/suggest/patterns"); await wait_job(c, "ex.org")
     # the same rule already exists by hand → accept-all must not fail, and must not duplicate it
-    await c.post("/api/collections/ex.org/patterns", json={"type": "title", "match": "*", "value": "{title} | Ex"})
+    await c.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": "https://ex.org/p9"})
     r = await c.post("/api/collections/ex.org/suggestions/bulk", json={"decision": "accept"})
     assert r.status_code == 200
     pats = (await c.get("/api/collections/ex.org/patterns")).json()
-    assert len([p for p in pats if p["type"] == "title"]) == 1
+    assert len([p for p in pats if p["type"] == "exclude"]) == 1
     assert (await c.get("/api/collections/ex.org/suggestions")).json() == []
 
 
@@ -87,7 +86,7 @@ async def test_curate_workspace_counts_and_gate(crawler_client):
     c = crawler_client
     await setup(c)
     page = (await c.get("/collections/ex.org?tab=curate")).text
-    assert "Suggest patterns" in page and "(8 of 8)" in page  # sample capped at the dump size
+    assert "Suggest exclusions" in page and "(all 8 URLs · 1 call)" in page
     assert "Suggest metadata" in page and "(8 URLs)" in page and "Tip: run" in page
     await c.post("/api/collections/ex.org/suggest/patterns"); await wait_job(c, "ex.org")
     page = (await c.get("/collections/ex.org?tab=curate")).text
@@ -100,16 +99,20 @@ async def test_curate_workspace_counts_and_gate(crawler_client):
     assert (await c.get("/collections/ex.org/rules")).status_code == 200
 
 
-async def test_pattern_sample_size_setting(tmp_path):
+async def test_pattern_batch_setting(tmp_path):
     from httpx import ASGITransport, AsyncClient
 
     from tests.conftest import _crawler_app
 
-    app = _crawler_app(tmp_path, llm_pattern_sample_size=5)
+    app = _crawler_app(tmp_path, llm_pattern_batch_urls=50)
     async with app.router.lifespan_context(app), AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         c.app = app
-        await setup(c)
+        await setup(c, n=70)  # 56 docs → 2 calls of ≤ 50
+        assert "(all 56 URLs · 2 calls)" in (await c.get("/collections/ex.org?tab=curate")).text
         await c.post("/api/collections/ex.org/suggest/patterns")
-        job = await wait_job(c, "ex.org")
-        assert job["progress"]["sample"] == 5 and job["progress"]["urls"] == 8
-        assert "(5 of 8)" in (await c.get("/collections/ex.org?tab=curate")).text
+        job = await wait_job(c, "ex.org", timeout=30)
+        p = job["progress"]
+        assert p["calls"] == 2 and p["done"] == 2 and p["urls"] == 56 and p["failed"] == 0
+        sugs = (await c.get("/api/collections/ex.org/suggestions")).json()
+        assert len(sugs) == 2 and {s["type"] for s in sugs} == {"exclude"}  # one exact exclude per batch
+        assert "56 URLs in 2 calls" in (await c.get("/collections/ex.org?tab=curate")).text

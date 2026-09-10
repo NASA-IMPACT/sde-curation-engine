@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
+from .engine.text import content_hash
 from .models import (
     Collection,
     CuratedUrl,
@@ -70,6 +72,7 @@ CREATE TABLE IF NOT EXISTS dump_urls (
   full_text TEXT,
   content_type TEXT,
   depth INTEGER,
+  content_hash TEXT,
   PRIMARY KEY (collection_id, url)
 );
 
@@ -82,9 +85,15 @@ CREATE TABLE IF NOT EXISTS delta_urls (
   division TEXT,
   document_type TEXT,
   excluded INTEGER NOT NULL DEFAULT 0,
+  content_changed INTEGER NOT NULL DEFAULT 0,
   title_ai TEXT,
   division_ai TEXT,
   document_type_ai TEXT,
+  title_ai_conf TEXT,
+  division_ai_conf TEXT,
+  document_type_ai_conf TEXT,
+  ai_model TEXT,
+  ai_content_hash TEXT,
   PRIMARY KEY (collection_id, url)
 );
 
@@ -96,6 +105,7 @@ CREATE TABLE IF NOT EXISTS curated_urls (
   division TEXT,
   document_type TEXT,
   excluded INTEGER NOT NULL DEFAULT 0,
+  content_hash TEXT,
   PRIMARY KEY (collection_id, url)
 );
 
@@ -127,6 +137,7 @@ CREATE TABLE IF NOT EXISTS pattern_suggestions (
   rationale TEXT,
   matches INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL DEFAULT 'pending',
+  source TEXT NOT NULL DEFAULT 'llm',
   created_at TEXT NOT NULL,
   decided_by TEXT,
   UNIQUE (collection_id, type, match)
@@ -233,8 +244,15 @@ class Database:
             ("collections", "created_by"), ("status_history", "actor"), ("patterns", "created_by"),
             ("pattern_suggestions", "decided_by"), ("index_runs", "started_by"), ("job_runs", "started_by"),
             ("collections", "curation_stage"), ("collections", "last_scraped_at"),
+            # content-aware deltas (NULL hash = "unknown", never "changed")
+            ("dump_urls", "content_hash"), ("curated_urls", "content_hash"),
+            # per-field confidence and provenance of AI suggestions
+            ("delta_urls", "title_ai_conf"), ("delta_urls", "division_ai_conf"),
+            ("delta_urls", "document_type_ai_conf"), ("delta_urls", "ai_model"), ("delta_urls", "ai_content_hash"),
         ):
             await self._add_column(table, col, "TEXT")
+        await self._add_column("delta_urls", "content_changed", "INTEGER NOT NULL DEFAULT 0")
+        await self._add_column("pattern_suggestions", "source", "TEXT NOT NULL DEFAULT 'llm'")
         # Rows from before last_scraped_at existed: take the last successful scrape job.
         await self._conn.execute(
             """UPDATE collections SET last_scraped_at = (
@@ -244,7 +262,10 @@ class Database:
         )
         # Collections already curating when stages were introduced start at the first stage.
         await self._conn.execute(
-            "UPDATE collections SET curation_stage='scope' WHERE status='curating' AND curation_stage IS NULL"
+            "UPDATE collections SET curation_stage='exclusions' WHERE status='curating' AND curation_stage IS NULL"
+        )
+        await self._conn.execute(  # the first stage used to be called "scope"
+            "UPDATE collections SET curation_stage='exclusions' WHERE curation_stage='scope'"
         )
         await self._conn.commit()
 
@@ -310,10 +331,10 @@ class Database:
         if not force:
             check_transition(c.status, new)
         now = utcnow()
-        # Stage rule, applied for every caller: entering `curating` starts at scope, staying in
+        # Stage rule, applied for every caller: entering `curating` starts at exclusions, staying in
         # it keeps the current stage, leaving it clears the stage.
         if new is Status.CURATING:
-            stage = c.curation_stage if c.status is Status.CURATING and c.curation_stage else CurationStage.SCOPE
+            stage = c.curation_stage if c.status is Status.CURATING and c.curation_stage else CurationStage.EXCLUSIONS
         else:
             stage = None
         await self.conn.execute(
@@ -382,9 +403,10 @@ class Database:
         await self.conn.execute("DELETE FROM dump_urls WHERE collection_id=?", (collection_id,))
         await self.conn.executemany(
             """INSERT OR REPLACE INTO dump_urls
-               (collection_id,url,scraped_title,full_text,content_type,depth) VALUES (?,?,?,?,?,?)""",
-            [(r.collection_id, r.url, r.scraped_title, r.full_text, r.content_type, r.depth)
-             for r in rows],
+               (collection_id,url,scraped_title,full_text,content_type,depth,content_hash)
+               VALUES (?,?,?,?,?,?,?)""",
+            [(r.collection_id, r.url, r.scraped_title, r.full_text, r.content_type, r.depth,
+              r.content_hash or content_hash(r.full_text)) for r in rows],
         )
         cur = await self.conn.execute(
             "SELECT COUNT(*) FROM dump_urls WHERE collection_id=?", (collection_id,)
@@ -463,7 +485,7 @@ class Database:
 
     async def load_dump(self, collection_id: str) -> list[DumpUrl]:
         cur = await self.conn.execute(
-            "SELECT collection_id,url,scraped_title,content_type,depth FROM dump_urls WHERE collection_id=?",
+            "SELECT collection_id,url,scraped_title,content_type,depth,content_hash FROM dump_urls WHERE collection_id=?",
             (collection_id,),
         )
         return [DumpUrl(**dict(r)) for r in await cur.fetchall()]
@@ -473,6 +495,12 @@ class Database:
             "SELECT url FROM dump_urls WHERE collection_id=?", (collection_id,)
         )
         return [r[0] for r in await cur.fetchall()]
+
+    async def dump_content_hashes(self, collection_id: str) -> dict[str, str | None]:
+        cur = await self.conn.execute(
+            "SELECT url, content_hash FROM dump_urls WHERE collection_id=?", (collection_id,)
+        )
+        return {r[0]: r[1] for r in await cur.fetchall()}
 
     async def dump_full_text(self, collection_id: str) -> dict[str, str | None]:
         cur = await self.conn.execute(
@@ -498,15 +526,22 @@ class Database:
     async def list_deltas(
         self, collection_id: str, *, kind: str | None = None, excluded: bool | None = None,
         q: str | None = None, division: str | None = None, document_type: str | None = None,
-        ai_pending: bool = False, limit: int = 100, offset: int = 0,
+        ai_pending: bool = False, ai_conf: str | None = None, content_changed: bool | None = None,
+        limit: int = 100, offset: int = 0,
     ) -> tuple[list[DeltaUrl], int]:
         where, args = ["collection_id=?"], [collection_id]
         if kind:
             where.append("kind=?"); args.append(kind)
         if excluded is not None:
             where.append("excluded=?"); args.append(int(excluded))
+        if content_changed is not None:
+            where.append("content_changed=?"); args.append(int(content_changed))
         if ai_pending:
             where.append("(title_ai IS NOT NULL OR division_ai IS NOT NULL OR document_type_ai IS NOT NULL)")
+        if ai_conf:
+            where.append("((title_ai IS NOT NULL AND title_ai_conf=?) OR (division_ai IS NOT NULL AND division_ai_conf=?)"
+                         " OR (document_type_ai IS NOT NULL AND document_type_ai_conf=?))")
+            args += [ai_conf] * 3
         if division:
             where.append("division=?"); args.append(division)
         if document_type:
@@ -529,9 +564,13 @@ class Database:
         await self.conn.execute("DELETE FROM delta_urls WHERE collection_id=?", (collection_id,))
         await self.conn.executemany(
             """INSERT INTO delta_urls (collection_id,url,kind,scraped_title,title,division,document_type,
-               excluded,title_ai,division_ai,document_type_ai) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               excluded,content_changed,title_ai,division_ai,document_type_ai,title_ai_conf,division_ai_conf,document_type_ai_conf,ai_model,ai_content_hash)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [(d.collection_id, d.url, d.kind, d.scraped_title, d.title, d.division, d.document_type,
-              int(d.excluded), d.title_ai, d.division_ai, d.document_type_ai) for d in deltas],
+              int(d.excluded), int(d.content_changed), d.title_ai, d.division_ai, d.document_type_ai,
+              d.title_ai_conf, d.division_ai_conf, d.document_type_ai_conf, d.ai_model,
+              d.ai_content_hash)
+             for d in deltas],
         )
         await self.conn.execute(
             "DELETE FROM pattern_effects WHERE collection_id=?", (collection_id,)
@@ -547,12 +586,19 @@ class Database:
         await self.conn.commit()
 
     async def set_delta_ai(self, collection_id: str, items: list[dict[str, Any]]) -> int:
-        """Bulk-write AI suggestions (never touches the effective fields)."""
+        """Bulk-write AI suggestions for whole rows (never touches the effective fields). A
+        re-classification replaces the previous answer, confidence included."""
+        if not items:
+            return 0
         await self.conn.executemany(
-            """UPDATE delta_urls SET title_ai=COALESCE(?, title_ai), division_ai=COALESCE(?, division_ai),
-               document_type_ai=COALESCE(?, document_type_ai) WHERE collection_id=? AND url=?""",
-            [(i.get("title"), i.get("division"), i.get("document_type"), collection_id, i["url"])
-             for i in items],
+            """UPDATE delta_urls SET title_ai=?, division_ai=?, document_type_ai=?,
+               title_ai_conf=?, division_ai_conf=?, document_type_ai_conf=?,
+               ai_model=?, ai_content_hash=?
+               WHERE collection_id=? AND url=?""",
+            [(i.get("title"), i.get("division"), i.get("document_type"),
+              i.get("title_conf"), i.get("division_conf"), i.get("document_type_conf"),
+              i.get("model"), i.get("content_hash"),
+              collection_id, i["url"]) for i in items],
         )
         await self.conn.commit()
         return len(items)
@@ -566,10 +612,10 @@ class Database:
     async def replace_curated(self, collection_id: str, rows: list[CuratedUrl]) -> int:
         await self.conn.execute("DELETE FROM curated_urls WHERE collection_id=?", (collection_id,))
         await self.conn.executemany(
-            """INSERT INTO curated_urls (collection_id,url,scraped_title,title,division,document_type,excluded)
-               VALUES (?,?,?,?,?,?,?)""",
+            """INSERT INTO curated_urls (collection_id,url,scraped_title,title,division,document_type,excluded,
+               content_hash) VALUES (?,?,?,?,?,?,?,?)""",
             [(r.collection_id, r.url, r.scraped_title, r.title, r.division, r.document_type,
-              int(r.excluded)) for r in rows],
+              int(r.excluded), r.content_hash) for r in rows],
         )
         await self.conn.execute(
             "UPDATE collections SET curated_count=?, updated_at=? WHERE collection_id=?",
@@ -639,25 +685,45 @@ class Database:
 
     # ── LLM suggestions ────────────────────────────────────────────────
 
-    async def replace_pattern_suggestions(self, collection_id: str, rows: list[dict[str, Any]]) -> int:
+    async def clear_pending_pattern_suggestions(self, collection_id: str) -> None:
         await self.conn.execute(
             "DELETE FROM pattern_suggestions WHERE collection_id=? AND state='pending'", (collection_id,)
         )
-        await self.conn.executemany(
-            """INSERT OR IGNORE INTO pattern_suggestions (collection_id,type,match,value,rationale,matches,state,created_at)
-               VALUES (?,?,?,?,?,?,'pending',?)""",
-            [(collection_id, r["type"], r["match"], r.get("value"), r.get("rationale"), r.get("matches", 0),
-              _iso(utcnow())) for r in rows],
-        )
         await self.conn.commit()
-        return len(rows)
+
+    async def add_pattern_suggestions(self, collection_id: str, rows: list[dict[str, Any]]) -> int:
+        """Insert pending suggestions; a (type, match) already present — pending from another
+        batch, or accepted/rejected earlier — is skipped. Returns how many were new."""
+        n = 0
+        for r in rows:
+            cur = await self.conn.execute(
+                """INSERT OR IGNORE INTO pattern_suggestions
+                   (collection_id,type,match,value,rationale,matches,state,source,created_at)
+                   VALUES (?,?,?,?,?,?,'pending',?,?)""",
+                (collection_id, r["type"], r["match"], r.get("value"), r.get("rationale"), r.get("matches", 0),
+                 r.get("source", "llm"), _iso(utcnow())),
+            )
+            n += cur.rowcount
+        await self.conn.commit()
+        return n
+
+    async def replace_pattern_suggestions(self, collection_id: str, rows: list[dict[str, Any]]) -> int:
+        await self.clear_pending_pattern_suggestions(collection_id)
+        return await self.add_pattern_suggestions(collection_id, rows)
+
+    async def count_pending_pattern_suggestions(self, collection_id: str) -> int:
+        cur = await self.conn.execute(
+            "SELECT COUNT(*) FROM pattern_suggestions WHERE collection_id=? AND state='pending'", (collection_id,)
+        )
+        return (await cur.fetchone())[0]
 
     async def list_pattern_suggestions(self, collection_id: str, state: str | None = "pending") -> list[dict[str, Any]]:
+        """Global-list hits first, then the model's, biggest match count first within each."""
         q = "SELECT * FROM pattern_suggestions WHERE collection_id=?"
         args: list[Any] = [collection_id]
         if state:
             q += " AND state=?"; args.append(state)
-        cur = await self.conn.execute(q + " ORDER BY id", args)
+        cur = await self.conn.execute(q + " ORDER BY (source='global') DESC, matches DESC, id", args)
         return [dict(r) for r in await cur.fetchall()]
 
     async def get_pattern_suggestion(self, collection_id: str, sid: int) -> dict[str, Any] | None:
@@ -686,15 +752,39 @@ class Database:
         await self.conn.commit()
         return n
 
+    # Pending, included URLs the LLM should classify. `only_missing` = never classified, or the
+    # page text changed since the model last saw it (content_changed and a different hash).
+    _LLM_WHERE = "d.collection_id=? AND d.kind!='deleted' AND d.excluded=0"
+    _LLM_MISSING = (" AND ((d.title_ai IS NULL AND d.division_ai IS NULL AND d.document_type_ai IS NULL)"
+                    " OR (d.content_changed=1 AND (d.ai_content_hash IS NULL OR d.ai_content_hash != u.content_hash)))")
+
+    async def count_deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> int:
+        q = (f"SELECT COUNT(*) FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id"
+             f" AND u.url=d.url WHERE {self._LLM_WHERE}") + (self._LLM_MISSING if only_missing else "")
+        cur = await self.conn.execute(q, (collection_id,))
+        return (await cur.fetchone())[0]
+
+    async def iter_deltas_for_llm(
+        self, collection_id: str, *, only_missing: bool = True, chunk: int = 200
+    ) -> AsyncIterator[dict[str, Any]]:
+        """{url, title, text, content_hash} rows with the FULL page text, streamed in keyset-paginated
+        chunks so a 100k-URL collection never sits in memory at once. Rows written by the running
+        job are always behind the cursor, so concurrent set_delta_ai calls are safe."""
+        q = (f"SELECT d.url, d.scraped_title AS title, u.full_text AS text, u.content_hash"
+             f" FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id AND u.url=d.url"
+             f" WHERE {self._LLM_WHERE}") + (self._LLM_MISSING if only_missing else "")
+        last = ""
+        while True:
+            cur = await self.conn.execute(q + " AND d.url > ? ORDER BY d.url LIMIT ?", (collection_id, last, chunk))
+            rows = [dict(r) for r in await cur.fetchall()]
+            if not rows:
+                return
+            for r in rows:
+                yield r
+            last = rows[-1]["url"]
+
     async def deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> list[dict[str, Any]]:
-        """Non-deleted, non-excluded delta URLs joined with dump text for classification."""
-        q = """SELECT d.url, d.scraped_title AS title, substr(u.full_text, 1, 1500) AS text
-               FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id AND u.url=d.url
-               WHERE d.collection_id=? AND d.kind!='deleted' AND d.excluded=0"""
-        if only_missing:
-            q += " AND d.title_ai IS NULL AND d.division_ai IS NULL AND d.document_type_ai IS NULL"
-        cur = await self.conn.execute(q + " ORDER BY d.url", (collection_id,))
-        return [dict(r) for r in await cur.fetchall()]
+        return [r async for r in self.iter_deltas_for_llm(collection_id, only_missing=only_missing)]
 
     async def deltas_with_ai(self, collection_id: str, field: str) -> list[tuple[str, str]]:
         """(url, suggested value) for every pending, non-removed URL with an AI suggestion for `field`."""
@@ -705,19 +795,28 @@ class Database:
         )
         return [(r[0], r[1]) for r in await cur.fetchall()]
 
-    async def delta_ai_counts(self, collection_id: str) -> dict[str, int]:
+    async def delta_ai_counts(self, collection_id: str) -> dict[str, Any]:
+        """Pending AI suggestions per field, plus `by_conf`: suggestions (field-level) per confidence."""
         cur = await self.conn.execute(
-            """SELECT SUM(title_ai IS NOT NULL), SUM(division_ai IS NOT NULL), SUM(document_type_ai IS NOT NULL)
+            """SELECT SUM(title_ai IS NOT NULL), SUM(division_ai IS NOT NULL), SUM(document_type_ai IS NOT NULL),
+                      SUM((title_ai IS NOT NULL AND title_ai_conf='high') + (division_ai IS NOT NULL AND division_ai_conf='high')
+                          + (document_type_ai IS NOT NULL AND document_type_ai_conf='high')),
+                      SUM((title_ai IS NOT NULL AND title_ai_conf='medium') + (division_ai IS NOT NULL AND division_ai_conf='medium')
+                          + (document_type_ai IS NOT NULL AND document_type_ai_conf='medium')),
+                      SUM((title_ai IS NOT NULL AND title_ai_conf='low') + (division_ai IS NOT NULL AND division_ai_conf='low')
+                          + (document_type_ai IS NOT NULL AND document_type_ai_conf='low'))
                FROM delta_urls WHERE collection_id=? AND kind!='deleted'""",
             (collection_id,),
         )
-        t, d, dt = await cur.fetchone()
-        return {"title": t or 0, "division": d or 0, "document_type": dt or 0}
+        t, d, dt, hi, med, lo = await cur.fetchone()
+        return {"title": t or 0, "division": d or 0, "document_type": dt or 0,
+                "by_conf": {"high": hi or 0, "medium": med or 0, "low": lo or 0}}
 
     async def clear_delta_ai_field(self, collection_id: str, field: str) -> int:
         assert field in ("title", "division", "document_type")
         cur = await self.conn.execute(
-            f"UPDATE delta_urls SET {field}_ai=NULL WHERE collection_id=? AND {field}_ai IS NOT NULL", (collection_id,)
+            f"UPDATE delta_urls SET {field}_ai=NULL, {field}_ai_conf=NULL WHERE collection_id=? AND {field}_ai IS NOT NULL",
+            (collection_id,)
         )
         await self.conn.commit()
         return cur.rowcount
@@ -725,7 +824,7 @@ class Database:
     async def clear_delta_ai(self, collection_id: str, url: str, field: str) -> None:
         assert field in ("title", "division", "document_type")
         await self.conn.execute(
-            f"UPDATE delta_urls SET {field}_ai=NULL WHERE collection_id=? AND url=?", (collection_id, url)
+            f"UPDATE delta_urls SET {field}_ai=NULL, {field}_ai_conf=NULL WHERE collection_id=? AND url=?", (collection_id, url)
         )
         await self.conn.commit()
 

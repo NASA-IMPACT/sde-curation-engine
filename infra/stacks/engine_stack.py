@@ -161,6 +161,8 @@ class CurationEngineStack(Stack):
             "OPENSEARCH_ENDPOINT_PROD": p["opensearch_endpoint_prod"],
             "LLM_PROVIDER": "openai",
             "OPENAI_MODEL": cfg.openai_model,
+            "LLM_WORKERS": str(cfg.llm_workers),
+            "LLM_PATTERN_BATCH_URLS": str(cfg.llm_pattern_batch_urls),
             "VALIDATION_DELAY_S": "30",
         }
         container = task_def.add_container(

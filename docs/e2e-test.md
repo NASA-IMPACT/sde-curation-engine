@@ -112,10 +112,11 @@ Prerequisite: the OpenAI key secret is set (deploy runbook section 4).
 
 | Do | Expect |
 |---|---|
-| **✨ Suggest patterns** | a `llm_patterns` job runs (seconds to a minute); **Suggested patterns** appear with **Accept** / **Reject**; log has no `openai` error |
-| **Accept** one | it becomes a real pattern and deltas recompute |
+| **✨ Suggest patterns** (button says *all N URLs · K calls*) | a `llm_patterns` job runs; the header chip reads *LLM calls in progress · i/K calls*; **Suggested patterns** appear — `global` rows first, then `llm` rows, all `exclude` — with **Accept** / **Reject**; log has no `openai` error |
+| **Accept** one | it becomes a real `exclude` rule, deltas recompute, the matching URLs show *excluded* |
 | **Reject** one | it disappears and nothing changes |
-| **✨ Suggest metadata** (shows how many URLs are classifiable) | per-URL division/document_type suggestions on the Deltas rows, again with accept/reject |
+| **✨ Suggest metadata** (shows how many URLs are classifiable and which models) | the chip reads *LLM calls in progress · i/N URLs · k in flight*; per-URL title/division/document_type suggestions with a confidence on the Deltas rows; the review bar counts high / medium / low; job result shows tokens in/out |
+| **Cancel** a running Suggest metadata, then run it again | rows classified before the cancel keep their `AI:` badges; the second run's total is only the remainder |
 
 If the log shows `401` from OpenAI, the key is missing or wrong. With `LLM_PROVIDER=fake` (local
 only) the same buttons return canned suggestions.

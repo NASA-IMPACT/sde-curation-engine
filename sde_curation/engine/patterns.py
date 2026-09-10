@@ -55,11 +55,21 @@ class Compiled:
     matches: set[str] = field(default_factory=set)
 
 
+def is_exact(match: str) -> bool:
+    return "*" not in match
+
+
 def compile_patterns(patterns: list[Pattern], urls: list[str]) -> list[Compiled]:
+    """An exact match (no `*`) is a set lookup, not a regex scan: per-URL edits and accepted
+    per-URL AI suggestions are exact patterns, and there can be as many of them as URLs."""
+    url_set = set(urls)
     out = []
     for p in patterns:
         c = Compiled(p, glob_to_regex(p.match))
-        c.matches = {u for u in urls if c.regex.match(u)}
+        if is_exact(p.match):
+            c.matches = {p.match} if p.match in url_set else set()
+        else:
+            c.matches = {u for u in urls if c.regex.match(u)}
         out.append(c)
     return out
 
@@ -78,11 +88,17 @@ def resolve_all(
     excluded: set[str] = set()
     included: set[str] = set()
     per_field: dict[str, list[Compiled]] = {t: [] for t in FIELD_TYPES}
+    # exact patterns always win (match set of size 1 = most specific; unique per type+match),
+    # so they are resolved by dict lookup instead of scanning the glob list per URL
+    exact: dict[tuple[str, str], Compiled] = {}
     for c in compiled:
         if c.pattern.type is PatternType.EXCLUDE:
             excluded |= c.matches
         elif c.pattern.type is PatternType.INCLUDE:
             included |= c.matches
+        elif is_exact(c.pattern.match):
+            if c.matches:
+                exact[(c.pattern.type, c.pattern.match)] = c
         else:
             per_field[c.pattern.type].append(c)
 
@@ -95,7 +111,7 @@ def resolve_all(
         r = Resolved(excluded=(u in excluded) and (u not in included))
         b = base.get(u, {})
         for t in FIELD_TYPES:
-            winner = next((c for c in per_field[t] if u in c.matches), None)
+            winner = exact.get((t, u)) or next((c for c in per_field[t] if u in c.matches), None)
             if winner is None:
                 value = b.get(t)
             else:

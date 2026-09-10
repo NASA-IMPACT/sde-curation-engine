@@ -62,7 +62,7 @@
     {% else %}
       <a class="button primary" href="/collections/{{ cid }}?tab=curate">Open curation</a>
       {{ btn('Recompute deltas', '/api/collections/' ~ cid ~ '/recompute', 'Re-run the diff against the latest crawl (safe to repeat)', disabled=(c.dump_count == 0)) }}
-      {% if c.status == 'curating' %}<span class="muted small">Promote from the Curate tab once scope and metadata are reviewed.</span>{% endif %}
+      {% if c.status == 'curating' %}<span class="muted small">Promote from the Curate tab once exclusions and metadata are reviewed.</span>{% endif %}
     {% endif %}
   </div>
 

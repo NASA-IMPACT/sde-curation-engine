@@ -52,3 +52,23 @@ async def test_cancel_from_jobs_panel(crawler_client):
     job = await wait_job(c, "ex.org")
     assert job["state"] == "failed" and "cancelled" in job["error"]
     assert "No jobs running" in (await c.get("/jobs/panel")).text
+
+
+async def test_llm_progress_tag_shows_on_every_surface(crawler_client):
+    """One macro renders the in-flight LLM state: header chip, curate stepper, dashboard, jobs strip."""
+    from sde_curation.models import JobRun
+
+    c = crawler_client
+    await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 40})
+    await c.post("/api/collections/ex.org/scrape")
+    await asyncio.sleep(0.1)
+    job = JobRun(**(await c.get("/api/collections/ex.org/jobs")).json()[0])
+    job.progress = {"llm": "metadata", "done": 3, "total": 8, "inflight": 2, "failed": 1}
+    await c.app.state.db.update_job(job)
+    expect = "LLM calls in progress · 3/8 URLs · 2 in flight · 1 failed"
+    for url in ("/jobs/panel", "/collections/ex.org/header", "/", "/jobs"):
+        assert expect in (await c.get(url)).text, url
+    job.progress = {"llm": "patterns", "done": 1, "total": 4, "inflight": 3}
+    await c.app.state.db.update_job(job)
+    assert "LLM calls in progress · 1/4 calls · 3 in flight" in (await c.get("/jobs/panel")).text
+    await wait_job(c, "ex.org", timeout=30)

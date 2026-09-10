@@ -29,7 +29,7 @@ ACTIONS = [
     ("GET", "/collections/{c}?tab=patterns", None),
     ("GET", "/collections/{c}?tab=curate", None),
     ("POST", "/api/collections/{c}/stage", {"stage": "metadata"}),
-    ("POST", "/api/collections/{c}/stage", {"stage": "scope"}),
+    ("POST", "/api/collections/{c}/stage", {"stage": "exclusions"}),
     ("GET", "/collections/{c}?tab=activity", None),
     ("GET", "/collections/{c}/urls/deltas?format=csv", None),
     ("GET", "/collections/{c}/header", None),
@@ -49,7 +49,7 @@ async def invariants(client, cid):
     if st in ("curating", "curated", "config_generated", "live"):
         assert c["dump_count"] > 0 or c["curated_count"] > 0, f"{st} with no data"
     if st == "curating":
-        assert c["curation_stage"] in ("scope", "metadata"), "curating without a stage"
+        assert c["curation_stage"] in ("exclusions", "metadata"), "curating without a stage"
     else:
         assert c["curation_stage"] is None, f"{st} carries a curation stage"
     jobs = (await client.get(f"/api/collections/{cid}/jobs")).json()
@@ -199,10 +199,10 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     # curated tab after promote: read-only rows, 'Curate ↗' only when a delta exists
     await c.post("/api/collections/ex.org/promote")
     t = (await c.get("/collections/ex.org?tab=urls&set=curated")).text
-    assert ">included<" in t and ">excluded<" in t and "unchanged" in t and "Curate ↗</a>" not in t
+    assert ">included<" in t and ">excluded<" in t and "Curate ↗</a>" not in t and "Pending</th>" not in t
     await c.post("/api/collections/ex.org/patterns", json={"type": "title", "match": "*/p3", "value": "Three"})
     t = (await c.get("/collections/ex.org?tab=urls&set=curated&q=p3")).text
-    assert "Curate ↗</a>" in t
+    assert "pending change · Curate ↗</a>" in t
     # header chips reflect counts
     h = (await c.get("/collections/ex.org/header")).text
     assert "Crawl <b>8</b>" in h and "Curated <b>8</b>" in h and "Rules <b>3</b>" in h

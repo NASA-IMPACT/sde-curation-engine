@@ -218,7 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-data/
+/data/
 .env
 
 # infra (CDK): build output, venv, cached VPC lookup, and the per-env values seeded into SSM

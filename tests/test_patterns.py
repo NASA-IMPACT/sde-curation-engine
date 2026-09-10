@@ -92,3 +92,23 @@ def test_idempotent():
     a = resolve(pats, titles={u: "t" for u in URLS})
     b = resolve(pats, titles={u: "t" for u in URLS})
     assert a == b
+
+
+def test_exact_patterns_scale_to_one_per_url():
+    """Accepting per-URL AI suggestions creates one exact pattern per URL; 50k of them over 100k
+    URLs must resolve in the same budget as the glob case (set lookups, no regex scan)."""
+    import time
+
+    from sde_curation.engine.patterns import resolve_all
+
+    urls = [f"https://ex.org/p/{i}" for i in range(100_000)]
+    pats = [Pattern(id=i, collection_id="x", type=PatternType.DIVISION, match=urls[i], value="Heliophysics")
+            for i in range(50_000)]
+    pats.append(Pattern(id=99_999, collection_id="x", type=PatternType.DIVISION, match="*", value="General"))
+    pats.append(Pattern(id=99_998, collection_id="x", type=PatternType.TITLE, match="https://ex.org/p/7", value="Seven"))
+    t0 = time.perf_counter()
+    r = resolve_all(urls, pats, base={}, scraped_titles={}, collection_name="X")
+    assert time.perf_counter() - t0 < 5
+    assert r[urls[0]].division == "Heliophysics" and r[urls[0]].effects["division"] == 0
+    assert r[urls[60_000]].division == "General"
+    assert r["https://ex.org/p/7"].title == "Seven" and r["https://ex.org/p/7"].division == "Heliophysics"
