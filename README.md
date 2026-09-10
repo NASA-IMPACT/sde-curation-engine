@@ -187,6 +187,53 @@ unapply (next most specific → curated → NULL). Diff + apply run as one idemp
   marked failed on restart.
 - Server-side refusals surface as an alert with the server's message; nothing fails silently.
 
+### Working in parallel (several curators at once)
+Concurrency is **per collection, not global**. Any number of collections can have jobs running at
+the same time; each collection allows exactly one job, and curation edits on a collection wait
+for that collection's job. The app itself puts no cap on how many scrapes, index runs or LLM jobs
+are in flight — the ceilings come from the systems behind it.
+
+**Isolation**
+- One asyncio lock per collection, shared by scrape ingest, LLM jobs, index runs and every
+  curation write. Curators on different collections never block each other; on the same
+  collection, writes serialise and a second job start is refused with 409 (not queued).
+- Starting a job checks three things — a job being created, a live job task, and a held lock —
+  so two people clicking *Scrape* in the same instant cannot both start one.
+- Cancel only touches that collection's job and records who cancelled it.
+
+**What actually runs in parallel**
+- *Scrapes* — `local`: one subprocess per collection, all at once. `ssm`: the crawler box runs
+  one job at a time under `flock`; extra jobs are accepted immediately and shown as *queued*
+  with how many crawls are ahead, and a queue can wait indefinitely. So scrapes from several
+  curators are accepted in parallel but crawled one at a time.
+- *LLM jobs* — each job runs its own pool of `LLM_WORKERS` (default 24) concurrent calls. There
+  is no limiter across jobs: five curators classifying at once is up to 120 in-flight calls.
+  This is the first place you will hit the provider's rate limit.
+- *Index runs* — each dispatches its own ECS task and polls S3. Nothing limits how many run at
+  once; runs on different collections are fine as long as the indexer tolerates it.
+
+**Data layer**
+- SQLite in WAL mode with one connection per process; writes serialise at the connection. The
+  locks live in memory and the ECS service is pinned to one task — **do not run two replicas**,
+  the mutual exclusion would not hold across them.
+- Curation edits have no stale-edit check. Two curators editing the same row on the same
+  collection: last save wins silently. Every write records the actor (activity tab), but nobody
+  is warned.
+
+**What other curators see**
+- Job starts, progress and completion are pushed over SSE to every open browser; the header,
+  pipeline and jobs strip also poll (5–10 s), so a second curator sees status and counts move.
+- Another person's pattern/metadata edits are *not* pushed. Header counts catch up on the next
+  poll; the curate table body only reloads when a job finishes or the page is refreshed.
+
+**Guidance**
+- Assign curators to distinct collections — that is the model the app is built around.
+- Expect scrapes to queue on the shared crawler; kick them off early.
+- If several people will run LLM jobs at the same time, lower `LLM_WORKERS` or add a
+  process-wide semaphore in `llm/pool.py` so total in-flight calls stay under the provider limit.
+- If two people must share one collection, agree on who edits; the app will not detect a
+  stale edit.
+
 ## Configuration (`.env`, see `.env.example`)
 | Key | Purpose |
 |---|---|
