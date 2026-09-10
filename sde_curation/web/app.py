@@ -463,6 +463,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ctx["recent"] = await db(request).list_recent_jobs(50)
         return templates.TemplateResponse(request, "jobs.html", ctx)
 
+    @app.get("/manual", response_class=HTMLResponse)
+    async def manual_page(request: Request):
+        """The curator's handbook: workflow walkthrough with screenshots, rule semantics, quirks."""
+        return templates.TemplateResponse(request, "manual.html", {})
+
     @app.get("/jobs/panel", response_class=HTMLResponse)
     async def jobs_panel(request: Request):
         return templates.TemplateResponse(

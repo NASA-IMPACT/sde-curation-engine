@@ -1,0 +1,249 @@
+{% extends "base.html" %}
+{% block title %}User manual · SDE Curation Engine{% endblock %}
+{% block content %}
+{# Generated from the curator's handbook; screenshots live in static/manual/. Keep sections in
+   sync with the workbench when a button or stage is renamed. #}
+<div class="manual">
+<div class="masthead">
+  <span class="eyebrow">Curator's handbook</span>
+  <h1>SDE Curation Engine Handbook</h1>
+  <p class="lede">How the curation workbench works, what each button does, and the things that trip people up. Written for curators and admins working the October 2026 reindex.</p>
+  <div class="meta"><span>Covers the redesigned workbench (September 2026)</span><span>Screenshots are from a demo environment with sample sites</span></div>
+</div>
+
+<div class="layout">
+<nav class="toc" aria-label="Sections">
+  <span class="eyebrow">Contents</span>
+  <ol>
+    <li><a href="#what">What it is</a></li>
+    <li><a href="#quick">The quick path</a></li>
+    <li><a href="#walkthrough">Walkthrough with screens</a></li>
+    <li class="sub"><a href="#s-dashboard">Dashboard</a></li>
+    <li class="sub"><a href="#s-scrape">Scrape</a></li>
+    <li class="sub"><a href="#s-exclusions">Exclusions</a></li>
+    <li class="sub"><a href="#s-metadata">Metadata</a></li>
+    <li class="sub"><a href="#s-promote">Promote</a></li>
+    <li class="sub"><a href="#s-index">Index and validate</a></li>
+    <li><a href="#screens">Screens reference</a></li>
+    <li><a href="#rules">How rules resolve</a></li>
+    <li><a href="#jobs">Jobs</a></li>
+    <li><a href="#parallel">Working alongside others</a></li>
+    <li><a href="#quirks">Things to know</a></li>
+    <li><a href="#glossary">Statuses and words</a></li>
+  </ol>
+</nav>
+
+<div class="body">
+
+<h2 id="what" class="first">What it is</h2>
+<p>The engine takes a website from a seed URL to a live entry in the SDE search index. It runs the crawler and the WEB_COSMOS indexer for you and gives you one place to decide what gets indexed and how each page is described. Every collection moves through the same six stages, and the app always shows you the one next thing to do.</p>
+
+<div class="pipeline" aria-label="The six pipeline stages">
+  <div><b>Backlog</b><small>added, not crawled</small></div>
+  <div><b>Scraped</b><small>crawl loaded</small></div>
+  <div><b>Curating</b><small>exclusions → metadata</small></div>
+  <div><b>Curated</b><small>approved set promoted</small></div>
+  <div><b>Test index</b><small>indexed, validated</small></div>
+  <div><b>Live</b><small>in the prod index</small></div>
+</div>
+<p class="caption">Statuses only move forward when the data supports it. A failed validation, or a re-crawl after promotion, sends the collection back to Curating with a <span class="chip warn">⚠ needs re-curation</span> flag.</p>
+
+<p>Three ideas carry the whole app:</p>
+<ul>
+  <li><b>The crawl is raw.</b> You never edit crawled pages. You decide what to do with them.</li>
+  <li><b>Everything is a rule.</b> Excluding a URL, fixing a title, picking a division: each is a rule you can see, filter by, and delete. Even a one-off edit on a single row is a rule that matches exactly that URL.</li>
+  <li><b>Pending changes are computed, not typed.</b> The engine diffs the crawl against what was last approved and applies your rules. You review the result and promote it.</li>
+</ul>
+
+<h2 id="quick">The quick path</h2>
+<p>If you only read one section, read this one. Every collection goes through these clicks in this order. The blue <b>Next</b> button in the header always points at the current one.</p>
+<div class="quick">
+  <span class="eyebrow">From seed URL to live index</span>
+  <ol>
+    <li><b>Add collection</b> on the dashboard: seed URL, name, division, max pages.</li>
+    <li><b>Scrape</b>, or <b>load existing</b> if the crawler already has output.</li>
+    <li><b>Start curating</b> to compute the pending changes.</li>
+    <li><b>Suggest exclusions</b>, then accept or reject every suggestion.</li>
+    <li><b>Continue to metadata</b>.</li>
+    <li><b>Suggest metadata</b>, then accept all titles, divisions, and types, or review one by one.</li>
+    <li><b>Promote</b> the pending changes to the curated set.</li>
+    <li><b>Index to test</b> and wait for validation to pass.</li>
+    <li><b>Index to prod</b>. The collection is Live.</li>
+  </ol>
+</div>
+<p>Signing in: deployed environments require a login. Admins add accounts at <code>/users</code>, everyone changes their own password at <code>/account</code>. Curators can do everything except manage users and delete collections. Every action is recorded under your name.</p>
+
+<h2 id="walkthrough">Walkthrough with screens</h2>
+<p>The same path, one screen at a time, with what to look at on each.</p>
+
+<ol class="steps">
+  <li id="s-dashboard">
+    <h3>Find or add the collection on the dashboard</h3>
+    <p>The home page lists every collection with its status, the crawl / pending / curated counts, its last job, and the one button for the next step. The filter pane narrows by status, the curating sub-stage, the needs re-curation flag, division, and curator. Press <kbd>/</kbd> to jump to search. The jobs strip above the table shows everything running anywhere.</p>
+    <figure><img src="{{ static_url('manual/01-dashboard.png') }}" alt="Dashboard with the filter pane, add-collection form, jobs strip, and four collections at different statuses, each with a next-step button">
+    <figcaption><b>Dashboard.</b> Four collections at different stages. The status badge on a curating collection also shows which sub-stage it is in. Each row ends in exactly one action.</figcaption></figure>
+    <p>To add a site, fill in the seed URL, a display name, the division, and a page cap, then press <b>Add collection</b>. The collection id is derived from the seed host.</p>
+  </li>
+
+  <li id="s-scrape">
+    <h3>Scrape the site, or load a crawl that already exists</h3>
+    <p>Open the collection and press <b>Scrape</b>. The header shows a spinner and live document counts, with a cancel button next to it. When the crawler already has output for this site, the header also offers <b>or load existing</b> with the date of that output. That ingests it without re-crawling.</p>
+    <figure><img src="{{ static_url('manual/10-running.png') }}" alt="Workbench header while a scrape runs: spinner, live document count, and a cancel button next to the status badge">
+    <figcaption><b>A running scrape.</b> The chip next to the status badge carries the live progress. Every button that would change this collection is disabled until the job finishes or you cancel it.</figcaption></figure>
+    <p>On the deployed environment the crawler is a shared machine that runs one crawl at a time. If someone else's crawl is running, yours shows as <span class="chip">queued</span> with how many crawls are ahead. A queued job has no timeout and can legitimately wait a long time.</p>
+    <p>When it finishes, the Overview tab's step panel says how many pages were crawled and how many failed, and the <b>Next</b> button becomes <b>Start curating</b>.</p>
+    <figure><img src="{{ static_url('manual/02-overview.png') }}" alt="Overview tab of a curating collection: the six-step pipeline with the current step highlighted, its panel, details, and last job">
+    <figcaption><b>Overview tab.</b> The pipeline stepper is clickable. Each step's panel shows what that step did and its actions. Below: details, last job, and the collapsed Advanced section.</figcaption></figure>
+  </li>
+
+  <li id="s-exclusions">
+    <h3>Exclusions: decide what must never be indexed</h3>
+    <p>Press <b>Start curating</b>. The engine computes the pending changes and opens the Curate tab at section 1. Press <b>✨ Suggest exclusions</b>. It first applies the team's global exclude list, then sends every crawled URL and title to the model in batches and asks for exclude globs. The button tells you how many URLs and how many calls before you press it.</p>
+    <figure><img src="{{ static_url('manual/03-exclusions.png') }}" alt="Curate tab, Exclusions section, with eight suggested exclude rules listed with their source, match count, and rationale, plus Accept and Reject buttons">
+    <figcaption><b>Exclusion suggestions.</b> Each row is a glob, where it came from (<i>global</i> list or the model), how many crawled URLs it matches, and why. Match counts link to the URLs. Accept one, accept all of a type, or accept all.</figcaption></figure>
+    <p>Accepting a suggestion creates a real exclude rule and recomputes the pending changes. Reject dismisses it. You can also add an exclude or include rule by hand: a glob with <code>*</code>, or an exact URL. When every suggestion is decided, press <b>Continue to metadata</b>.</p>
+    <div class="know"><span class="eyebrow">Know this</span><p>Re-running Suggest exclusions <b>replaces</b> any suggestions you have not yet decided.</p><p>The Metadata section is locked until every exclusion suggestion is decided. If you skipped Suggest exclusions entirely, metadata is allowed with a hint.</p></div>
+  </li>
+
+  <li id="s-metadata">
+    <h3>Metadata: titles, divisions, and document types</h3>
+    <p>Press <b>✨ Suggest metadata</b>. It makes one model call per pending, included URL that has not been classified yet, sending the full page text. Each answer carries a title, a division, and a document type, each with a confidence: <b>high</b> means explicit in the text, <b>medium</b> a strong inference, <b>low</b> a guess. Answers are saved as they arrive, so cancelling keeps what finished.</p>
+    <figure><img src="{{ static_url('manual/05-metadata.png') }}" alt="Curate tab at the Metadata step: Exclusions marked done, the Suggest metadata card with its last run, and a review bar showing 66 AI suggestions with accept-all buttons per field and confidence counts">
+    <figcaption><b>Metadata section after a run.</b> The review bar counts suggestions by field and by confidence, with an accept-all per field. Section 3 below already warns that promoting now would discard the undecided suggestions.</figcaption></figure>
+    <p>To see the suggestions on the rows themselves, press <b>Review one by one</b> or open <b>URLs › Pending</b>. Each AI badge shows the proposed value and its confidence, with ✓ to accept and ✕ to dismiss. Filter the table by confidence to review only the medium and low ones by hand and accept the rest in bulk.</p>
+    <figure><img src="{{ static_url('manual/06-urls-pending.png') }}" alt="URLs tab, Pending set, with AI badges under the title, division, and document type cells showing the proposed value, its confidence, and accept and dismiss buttons">
+    <figcaption><b>Pending URLs with AI badges.</b> The title column shows the scraped title above the effective one. Division and type are dropdowns you can set directly. Every edit here becomes an exact-URL rule.</figcaption></figure>
+    <div class="tip"><span class="eyebrow">Why the Rules count jumps</span><p>Accepting 22 titles, 22 divisions, and 22 types adds 66 rules, one exact-URL rule per accepted value. That is expected. It is what makes every accepted value visible and reversible in the rules table. Exclude suggestions are globs and stay few.</p></div>
+    <figure><img src="{{ static_url('manual/07-rules.png') }}" alt="The Rules table: eight exclude globs followed by exact-URL title rules, each with its match count, when it was added, who added it, and a delete button">
+    <figcaption><b>The Rules table</b> at the bottom of the Curate tab, after a bulk accept. Glob excludes first, then one exact-URL title rule per accepted suggestion. The ✕ deletes a rule, which recomputes the affected URLs.</figcaption></figure>
+  </li>
+
+  <li id="s-promote">
+    <h3>Promote the pending changes</h3>
+    <p>Section 3 of the Curate tab. <b>Promote</b> writes the pending changes into the curated set and marks the collection Curated. If nothing is pending, the button reads <b>Mark curated</b>. <b>Recompute pending changes</b> re-applies the rules without promoting, useful after hand-editing several rules.</p>
+    <div class="know"><span class="eyebrow">Know this</span><p>Promoting <b>discards</b> any AI suggestions still undecided. The Promote section warns you with the count. Accept or reject them first.</p></div>
+    <figure><img src="{{ static_url('manual/08-curated-overview.png') }}" alt="Overview tab of a curated collection: step 4 highlighted, its panel showing 31 curated URLs with 9 excluded, and the Index to test button">
+    <figcaption><b>After promoting.</b> Pending drops to zero, Curated shows the approved set with its excluded count, and the next action becomes Index to test.</figcaption></figure>
+  </li>
+
+  <li id="s-index">
+    <h3>Index to test, validate, then index to prod</h3>
+    <p><b>Index to test</b> exports the included curated rows and dispatches an indexing run against the test index. The step-5 panel shows exported, indexed, changed, and deleted counts as it progresses, then the validation result.</p>
+    <p>The engine validates on its own. About thirty seconds after the run succeeds it queries the index directly for this collection and compares counts and titles against the curated set. If it lacks access to query the index, it dispatches a second pass of the same export purely to get a fresh validation file. Nothing is re-vectorised on that pass.</p>
+    <dl class="defs">
+      <dt>Pass</dt><dd>Counts match and at least 99% of titles match. Status becomes Test index and <b>Index to prod</b> is enabled.</dd>
+      <dt>Fail</dt><dd>Back to Curating with the needs re-curation flag and the mismatches listed. Fix and re-index, or press <b>Re-validate</b> if you believe the index only needed more time.</dd>
+    </dl>
+    <p><b>Index to prod</b> is refused until the latest test run passed. Success marks the collection Live and clears the flag. Every status transition posts to the team Slack channel with a link.</p>
+  </li>
+</ol>
+
+<h2 id="screens">Screens reference</h2>
+<h3>The workbench header</h3>
+<p>Sticky on every tab. Name, seed link, status badge, the running job with a cancel button, and four count chips that are also links:</p>
+<dl class="defs">
+  <dt>Crawl</dt><dd>Every URL the last crawl found. Raw and read-only.</dd>
+  <dt>Pending</dt><dd>What will change in the curated set when you promote: new · modified · removed · excluded.</dd>
+  <dt>Curated</dt><dd>The approved set. Included rows are what gets exported to the index.</dd>
+  <dt>Rules</dt><dd>Every rule in force, including exact-URL rules from per-row edits and accepted AI suggestions.</dd>
+</dl>
+<h3>The four tabs</h3>
+<dl class="defs">
+  <dt>Overview</dt><dd>The clickable pipeline with a panel per step, details, the last job, and Advanced (Re-scrape, manual status override, Delete for admins).</dd>
+  <dt>Curate</dt><dd>Exclusions, Metadata, Promote, in the order you work them, with the full rules table underneath.</dd>
+  <dt>URLs</dt><dd>Three sets: Crawl, Pending, Curated. Search, filter by change kind, exclusion, division, type, AI confidence, and text changed. Download the filtered rows as CSV.</dd>
+  <dt>Activity</dt><dd>Every job, the status history, and the audit trail.</dd>
+</dl>
+<figure><img src="{{ static_url('manual/04-urls-crawl.png') }}" alt="URLs tab, Crawl set: the raw crawl with title, content type, depth, text size and state per URL, read-only">
+<figcaption><b>URLs › Crawl.</b> The raw crawl, read-only. Use it to check what the crawler actually found before deciding anything.</figcaption></figure>
+<h3>The Jobs page</h3>
+<p><code>/jobs</code> lists every running or queued job across all collections, who started it, and live progress, with the recent history underneath. The dashboard carries a compact version of the same strip.</p>
+<figure><img src="{{ static_url('manual/09-jobs.png') }}" alt="Jobs page: one running scrape with a cancel button, and a table of six recent jobs with kind, state, who started them, start time, duration and result">
+<figcaption><b>Jobs.</b> Running jobs on top with cancel. The result column reads the same as the progress chip on the collection: docs, suggestions, classified counts, tokens.</figcaption></figure>
+
+<h2 id="rules">How rules resolve</h2>
+<p>Every URL's effective title, division, document type, and included or excluded state is computed from the rules. When several rules match the same URL:</p>
+<ul>
+  <li><b>The most specific rule wins.</b> Specific means the rule with the smallest number of matching URLs. On a tie, the longer pattern string wins. An exact-URL rule matches one URL, so it is always the most specific.</li>
+  <li><b>Include always beats exclude</b>, regardless of specificity. Use include rules to carve exceptions out of broad excludes.</li>
+  <li><b>No rule, then the curated value, then nothing.</b> Deleting a rule falls back to the next most specific rule, then to whatever was last promoted, then to blank. Deleting <em>is</em> the undo.</li>
+</ul>
+<p>Title rules are templates. <code>{title}</code> is the scraped title, <code>{url}</code> the URL, <code>{collection}</code> the collection name. A rule with value <code>{title} | GES DISC</code> appends a suffix to every matching page.</p>
+<p>Hover any field on the Pending set to see which rule set it. Match counts in the rules table link to the matching rows.</p>
+<div class="know"><span class="eyebrow">Know this</span><p>A URL excluded by a rule never reaches the export, the index, or the metadata model. Exclude early to save model calls and review time.</p></div>
+
+<h2 id="jobs">Jobs</h2>
+<ul>
+  <li><b>One job per collection at a time.</b> While a job runs, every button that would change that collection is disabled, and any direct request is refused with a conflict. Cancel first if you need to act now.</li>
+  <li><b>Progress is live.</b> The header chip, the Curate tab, the dashboard row, and the jobs strip show the same progress text and update within seconds.</li>
+  <li><b>Cancel is safe.</b> A cancelled metadata job keeps every answer that had already arrived. A cancelled scrape leaves the previous crawl in place.</li>
+  <li><b>Every job ends in succeeded or failed with a reason</b>, shown on the header, the Overview panel, and the Activity tab. Nothing fails silently.</li>
+  <li><b>An engine restart fails running jobs</b> with the message "engine restarted while job was running". Start them again.</li>
+</ul>
+
+<h2 id="parallel">Working alongside others</h2>
+<p>Concurrency is per collection, not global. Any number of collections can have jobs running at once. Within one collection, exactly one job runs and edits wait their turn.</p>
+<ul>
+  <li><b>Different collections never block each other.</b> Assign people to distinct collections and everything is safe.</li>
+  <li><b>Scrapes queue on the shared crawler.</b> Several people can press Scrape at once. The crawls run one after another. Kick them off early.</li>
+  <li><b>LLM jobs run in parallel with no shared cap.</b> Each metadata job runs its own pool of concurrent model calls, default twenty-four. Five people classifying at once is over a hundred calls in flight and will hit the provider's rate limit first. Stagger large runs.</li>
+  <li><b>Job activity is pushed to everyone's browser.</b> You see a colleague's job start and finish live.</li>
+  <li><b>Edits are not pushed.</b> Header counts catch up within ten seconds, but the URL table and rules list only reload when a job finishes or you refresh. If two people edit the same row of the same collection, the last save wins and nobody is warned. The audit trail records who did what.</li>
+</ul>
+
+<h2 id="quirks">Things to know</h2>
+<p>The list people wish they had read first. Some repeat points from above, gathered in one place.</p>
+<ul>
+  <li><b>A re-scrape clears pending changes</b> and, if anything was ever promoted, raises the needs re-curation flag. Your rules survive. Undecided suggestions do not.</li>
+  <li><b>An identical re-crawl returns straight to Curated.</b> Recompute never demotes a collection when nothing changed.</li>
+  <li><b>Modified includes "text changed".</b> Each page carries a hash of its text. A page whose title and metadata did not move but whose body did shows as modified with a text changed badge, and Suggest metadata re-classifies it. Pages promoted before this existed compare as unchanged the first time.</li>
+  <li><b>Max pages caps the crawl.</b> If the Crawl count sits exactly at the cap, the site is bigger than the crawl. Raise the cap and re-scrape.</li>
+  <li><b>The Curator filter means who created the collection</b>, not who is working on it. There is no assignment field.</li>
+  <li><b>The manual status override still obeys the data.</b> Advanced › Set status will not put a collection in Scraped without a crawl, or in Curated with pending changes outstanding.</li>
+  <li><b>Suggest exclusions sees URLs and titles only.</b> It cannot know what a page says. Suggest metadata reads the whole page and never truncates it. A page beyond the model's window fails that single URL, is counted, and is retried on the next run.</li>
+  <li><b>The prompts are inspectable.</b> Both suggestion cards have a "Show the prompt" toggle. If suggestions look off, read what the model was asked.</li>
+  <li><b>A malformed model reply fails the job and writes nothing.</b> A bad API key or model name aborts after ten consecutive errors. Per-URL failures never abort.</li>
+  <li><b>Validation waits on purpose.</b> The thirty-second pause after a test run is the index refresh window, not a stall.</li>
+  <li><b>Prod indexing is gated on the latest test run.</b> A new test run after a passed one resets the gate until it passes too.</li>
+  <li><b>CSV export follows your filters.</b> The download on the URLs tab contains exactly the rows you are looking at.</li>
+  <li><b>Old curation links still work.</b> Links to the previous curate page redirect into URLs › Pending.</li>
+  <li><b>Delete is admin only and permanent.</b> It removes the collection, its crawl, its rules, and its history from the engine. Crawler output in S3 is untouched.</li>
+</ul>
+
+<h2 id="glossary">Statuses and words</h2>
+<div class="tbl"><table>
+  <thead><tr><th>Status</th><th>Meaning</th><th>Next action</th></tr></thead>
+  <tbody>
+    <tr><td>Backlog</td><td>Added, no crawl loaded yet.</td><td>Scrape, or load existing</td></tr>
+    <tr><td>Scraped</td><td>A crawl is loaded. Nothing computed yet.</td><td>Start curating</td></tr>
+    <tr><td>Curating · Exclusions</td><td>Deciding what must never be indexed.</td><td>Suggest exclusions, then Continue to metadata</td></tr>
+    <tr><td>Curating · Metadata</td><td>Fixing titles, divisions, document types.</td><td>Suggest metadata, accept, then Promote</td></tr>
+    <tr><td>Curated</td><td>Approved set promoted, ready to index.</td><td>Index to test</td></tr>
+    <tr><td>Test index</td><td>Indexed to test and validated.</td><td>Index to prod</td></tr>
+    <tr><td>Live</td><td>In the production index.</td><td>Re-scrape when the site changes</td></tr>
+  </tbody>
+</table></div>
+
+<div class="tbl"><table>
+  <thead><tr><th>Word</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>Pending</td><td>A URL whose effective values differ from the curated set, or which is new or gone. Promoting applies it.</td></tr>
+    <tr><td>New</td><td>In the crawl, not in the curated set.</td></tr>
+    <tr><td>Modified</td><td>In both, and title, division, type, inclusion, or page text changed.</td></tr>
+    <tr><td>Removed</td><td>In the curated set, not in the crawl. Promoting drops it from the index.</td></tr>
+    <tr><td>Excluded</td><td>Matched by an exclude rule and no include rule. Never exported, never classified.</td></tr>
+    <tr><td>Included</td><td>Not excluded. What the index receives.</td></tr>
+    <tr><td>Rule</td><td>A glob or exact URL plus a type (exclude, include, title, division, document_type) and, for the last three, a value.</td></tr>
+    <tr><td>Suggestion</td><td>A proposed exclude rule awaiting your decision. Nothing is applied until you accept.</td></tr>
+    <tr><td>AI badge</td><td>A proposed title, division, or type for one URL, with a confidence. ✓ makes it an exact-URL rule, ✕ dismisses it.</td></tr>
+    <tr><td>Needs re-curation</td><td>Something promoted is now stale: a re-crawl happened or validation failed. Review and promote again.</td></tr>
+  </tbody>
+</table></div>
+
+<p class="caption">Something that does not match this handbook: note the collection id and the time, and check the Activity tab for the job error before asking. It usually says exactly what happened.</p>
+
+</div>
+</div>
+</div>
+
+{% endblock %}

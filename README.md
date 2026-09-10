@@ -69,7 +69,10 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
 
    A running job shows a spinner, live doc counts and a **Cancel** button. *Advanced* (collapsed)
    holds Re-scrape, a manual status override and Delete.
-3. Typical loop: **Scrape → Start curating → (URLs › Deltas: fix rows; Patterns & AI: add rules /
+3. **User manual** (`/manual`, also in the ☰ menu): the illustrated curator's handbook — quick path,
+   screen-by-screen walkthrough, rule semantics, jobs, parallel work, quirks. Template
+   `sde_curation/web/templates/manual.html`, screenshots in `static/manual/`.
+4. Typical loop: **Scrape → Start curating → (URLs › Deltas: fix rows; Patterns & AI: add rules /
    accept suggestions) → Promote**. Every inline edit is an exact-URL pattern, so everything is
    visible and reversible in Patterns & AI.
 

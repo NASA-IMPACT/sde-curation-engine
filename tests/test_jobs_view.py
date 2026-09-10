@@ -72,3 +72,16 @@ async def test_llm_progress_tag_shows_on_every_surface(crawler_client):
     job.progress = {"llm": "patterns", "done": 1, "total": 4, "inflight": 3}
     await c.app.state.db.update_job(job)
     assert "LLM calls in progress · 1/4 calls · 3 in flight" in (await c.get("/jobs/panel")).text
+
+
+async def test_user_manual_page_and_menu_link(crawler_client):
+    c = crawler_client
+    assert 'href="/manual"' in (await c.get("/")).text
+    r = await c.get("/manual")
+    assert r.status_code == 200
+    body = r.text
+    assert "SDE Curation Engine Handbook" in body and "The quick path" in body
+    # every screenshot referenced by the page ships with the app
+    import re
+    for name in set(re.findall(r"/static/(manual/[\w-]+\.png)", body)):
+        assert (await c.get(f"/static/{name}")).status_code == 200, name
