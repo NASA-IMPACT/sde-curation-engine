@@ -114,37 +114,3 @@ async def test_unauthenticated_mode_uses_anonymous_actor(crawler_client):
     await c.post("/api/collections/ex.org/scrape"); await wait_job(c, "ex.org")
     hist = (await c.get("/api/collections/ex.org/history")).json()
     assert [h["actor"] for h in hist] == ["anonymous", "system"]
-
-
-async def test_migration_leaves_old_rows_blank(tmp_path):
-    """A database created before provenance existed gains the columns; old rows stay NULL."""
-    import sqlite3
-
-    from sde_curation.db import Database
-
-    path = tmp_path / "old.db"
-    con = sqlite3.connect(path)
-    con.executescript("""
-        CREATE TABLE collections (collection_id TEXT PRIMARY KEY, name TEXT NOT NULL, seed_url TEXT NOT NULL,
-          division TEXT NOT NULL, document_type TEXT, connector TEXT NOT NULL, max_pages INTEGER NOT NULL,
-          status TEXT NOT NULL, needs_recuration INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL, dump_count INTEGER NOT NULL DEFAULT 0, delta_count INTEGER NOT NULL DEFAULT 0,
-          curated_count INTEGER NOT NULL DEFAULT 0);
-        CREATE TABLE status_history (id INTEGER PRIMARY KEY AUTOINCREMENT, collection_id TEXT NOT NULL,
-          old_status TEXT, new_status TEXT NOT NULL, note TEXT, at TEXT NOT NULL);
-        INSERT INTO collections VALUES ('old.org','Old','https://old.org','General',NULL,'crawler2',5,'backlog',0,
-          '2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00',0,0,0);
-        INSERT INTO status_history (collection_id,old_status,new_status,note,at) VALUES ('old.org',NULL,'backlog','created','2026-01-01T00:00:00+00:00');
-    """)
-    con.commit(); con.close()
-    db = await Database(path).connect()
-    try:
-        old = await db.get_collection("old.org")
-        assert old is not None and old.created_by is None
-        hist = await db.status_history("old.org")
-        assert hist[0].actor is None
-        await db.set_status("old.org", "scraped", note="later", force=True, actor="bob")
-        assert (await db.status_history("old.org"))[-1].actor == "bob"
-        assert await db.count_users() == 0
-    finally:
-        await db.close()

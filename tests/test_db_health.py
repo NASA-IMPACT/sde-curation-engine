@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -8,8 +10,8 @@ from sde_curation.web.app import create_app
 
 
 @pytest.fixture
-async def db(tmp_path):
-    d = await Database(tmp_path / "t.db").connect()
+async def db():
+    d = await Database(os.environ["DATABASE_URL"]).connect()
     yield d
     await d.close()
 

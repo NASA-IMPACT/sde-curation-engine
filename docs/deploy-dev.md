@@ -310,8 +310,8 @@ aws ecs wait services-stable --cluster sde-curation-engine-dev --services sde-cu
 `make redeploy` prints the deployments (`PRIMARY IN_PROGRESS`, then the old one `ACTIVE`); the
 `wait` returns when the new task is running, usually within 2–3 minutes. **Expect the URL to answer
 503 for about 90 seconds** in the middle: the single task is stopped before its replacement starts
-(one SQLite writer), and the load balancer needs one more health-check cycle after the new task is
-up. `curl -s <CloudFrontUrl>/health` until it returns `"ok":true`.
+(the job registry is in-process), and the load balancer needs one more health-check cycle after the
+new task is up. `curl -s <CloudFrontUrl>/health` until it returns `"ok":true`.
 
 **Step 3 — confirm the app came back**: `curl -s <CloudFrontUrl>/health` → `"ok":true`.
 
@@ -396,8 +396,8 @@ document is there.
 make redeploy ENV=dev PROFILE=sde-dev
 aws ecs wait services-stable --cluster sde-curation-engine-dev --services sde-curation-engine-dev
 ```
-Reload the UI: the collection and its dump are still there (SQLite lives on EFS), and `/health`
-answers.
+Reload the UI: the collection and its dump are still there (the state is in RDS, the YAML on EFS),
+and `/health` answers.
 
 **8. LLM assist**: on a collection in curation click **✨ Suggest patterns**. Suggested patterns
 appear under the pattern list and the log has no `openai` error. If it shows 401, redo section 4.
@@ -415,7 +415,7 @@ appear under the pattern list and the log has no `openai` error. If it shows 401
 | shell into the task | `TASK=$(aws ecs list-tasks --cluster sde-curation-engine-dev --query 'taskArns[0]' --output text --profile sde-dev); aws ecs execute-command --cluster sde-curation-engine-dev --task $TASK --container engine --interactive --command bash --profile sde-dev` (needs `brew install --cask session-manager-plugin`) |
 | deploy by hand (CI down, or debugging) | `aws sso login --profile sde-dev && make diff ENV=dev && make deploy ENV=dev` — same stack, same result; needs Docker running |
 | pause automatic deploys | Actions → Deploy → ⋯ → Disable workflow; re-enable the same way |
-| tear down | `make destroy ENV=dev` — EFS (SQLite + collection YAML) and the secrets are kept; the bootstrap stack, its role and the SSM parameters are untouched. To really delete: the EFS in the console, `aws secretsmanager delete-secret`, `aws ssm delete-parameters` |
+| tear down | `make destroy ENV=dev` — the database is kept as a final snapshot, EFS (collection YAML) and the secrets are kept; the bootstrap stack, its role and the SSM parameters are untouched. To really delete: the RDS snapshot and the EFS in the console, `aws secretsmanager delete-secret`, `aws ssm delete-parameters` |
 
 ## 7. If something goes wrong
 
@@ -433,7 +433,7 @@ Where to look first, by job:
 | same error with a correct secret and branch | the token's subject does not match the trust policy — compare `gh api repos/NASA-IMPACT/sde-curation-engine/actions/oidc/customization/sub` (`sub_claim_prefix`) with the role's `StringLike` condition (`aws iam get-role`), then fix `infra/bootstrap/bootstrap_stack.py` and re-run `make bootstrap-github` |
 | Deploy job: `Unable to fetch parameters [/sde-curation-engine/dev/…]` | section 2.4 was skipped or run against another account → `make infra-seed ENV=dev`, re-run the workflow |
 | Deploy job: `SSM parameter /cdk-bootstrap/sde/version not found` or cannot assume `cdk-sde-*` | account not bootstrapped with `--qualifier sde` (section 2.2) |
-| Deploy rolls back with "circuit breaker" / verify: 0 running tasks | the task never became healthy; the stopped-task reason above tells you why (bad SSM value, secret missing, EFS mount denied) |
+| Deploy rolls back with "circuit breaker" / verify: 0 running tasks | the task never became healthy; the stopped-task reason above tells you why (bad SSM value, secret missing, EFS mount denied, database unreachable — the engine log then shows the `psycopg` connection error) |
 | Verify: health check never passes but the service is steady | CloudFront still propagating on the very first deploy → re-run the verify job; otherwise `make logs` |
 | the UI loads but Scrape/Index fails with AccessDenied | the SSM values are wrong for this account, or the task role lacks a permission — the engine log has the AccessDenied message with the exact action |
 | LLM actions fail with 401 | the OpenAI key is still `REPLACE_ME` or wrong → section 4 |

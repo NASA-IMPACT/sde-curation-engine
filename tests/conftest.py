@@ -1,17 +1,65 @@
 import asyncio
+import os
 import sys
 import textwrap
 from pathlib import Path
 
+import psycopg
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from sde_curation.config import Settings
+from sde_curation.schema import TABLES, migrate_sync
 from sde_curation.web.app import create_app
 
 # Tests must not depend on the developer's local .env (real bucket, instance, AOSS endpoints,
 # scrape backend…): every Settings() built while the suite runs ignores the env file.
 Settings.model_config["env_file"] = None
+
+
+# ── PostgreSQL ─────────────────────────────────────────────────────────
+# TEST_DATABASE_URL (CI: a `services: postgres` job container; locally: `make db-up` +
+# postgresql://engine:engine@localhost:5432/engine) or, when unset, a throwaway container started
+# by testcontainers (needs Docker). The schema is created once; every test starts from empty tables.
+
+
+@pytest.fixture(scope="session")
+def pg_url() -> str:
+    url = os.environ.get("TEST_DATABASE_URL")
+    if url:
+        yield url
+        return
+    try:
+        try:
+            from testcontainers.community.postgres import PostgresContainer
+        except ImportError:  # testcontainers < 4.15
+            from testcontainers.postgres import PostgresContainer
+
+        container = PostgresContainer("postgres:17-alpine", username="engine", password="engine", dbname="engine")
+        container.start()
+    except Exception as e:  # noqa: BLE001 - one clear message instead of 140 identical failures
+        pytest.exit(f"PostgreSQL is required: set TEST_DATABASE_URL or start Docker ({e})", returncode=3)
+    try:
+        yield (f"postgresql://engine:engine@{container.get_container_host_ip()}"
+               f":{container.get_exposed_port(5432)}/engine")
+    finally:
+        container.stop()
+
+
+@pytest.fixture(scope="session")
+def pg_schema(pg_url) -> str:
+    with psycopg.connect(pg_url) as conn:
+        migrate_sync(conn)
+    return pg_url
+
+
+@pytest.fixture(autouse=True)
+def database_url(pg_schema, monkeypatch) -> str:
+    """Every test sees DATABASE_URL (Settings reads it) and empty tables."""
+    with psycopg.connect(pg_schema, autocommit=True) as conn:
+        conn.execute(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE")
+    monkeypatch.setenv("DATABASE_URL", pg_schema)
+    return pg_schema
 
 # Login enabled: APP_PASSWORD seeds the bootstrap "admin" account with that password.
 SECURED = {"app_password": "s3cret", "session_secret": "unit-test-secret"}

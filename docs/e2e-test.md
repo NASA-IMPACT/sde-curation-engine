@@ -183,7 +183,7 @@ make redeploy ENV=dev PROFILE=sde-dev
 aws ecs wait services-stable --cluster sde-curation-engine-dev --services sde-curation-engine-dev
 ```
 Expect ~90 s of 503 from the URL, then: the collection, its dump, patterns, deltas, index runs and
-status history are all still there (SQLite and the YAML files live on EFS), and the SSE dot goes
+status history are all still there (the state is in RDS, the YAML files on EFS), and the SSE dot goes
 green again without a reload.
 
 If a job was running during the restart it is marked `failed` with "cancelled by user or

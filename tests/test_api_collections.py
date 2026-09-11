@@ -109,7 +109,7 @@ async def test_dashboard_filters(client):
     assert 'id="f-shown" hx-swap-oob="true">1 of 2<' in r.text
     # No login → actor "anonymous"; rows that predate provenance (created_by NULL) show as "Unassigned".
     assert 'value="anonymous"' in home.text and "Unassigned" not in home.text
-    await client.app.state.db.conn.execute("UPDATE collections SET created_by=NULL WHERE collection_id='b.org'")
+    await client.app.state.db.execute("UPDATE collections SET created_by=NULL WHERE collection_id='b.org'")
     r = await client.get("/", params={"curator": "anonymous"})
     assert "Alpha" in r.text and 'href="/collections/b.org"' not in r.text and "Unassigned" in r.text
     r = await client.get("/", params={"curator": "__none__"})

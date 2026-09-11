@@ -158,7 +158,8 @@ Every status transition posts to `NOTIFY_WEBHOOK_URL` (Slack-compatible `{"text"
 built from `PUBLIC_BASE_URL`); failures to notify never block a transition.
 
 **Deploying (AWS CDK + GitHub Actions)**: `infra/` holds a Python CDK app that runs the engine as
-one ECS Fargate task (SQLite on EFS) behind an ALB and CloudFront (HTTPS + WAF), wired to the
+one ECS Fargate task with RDS PostgreSQL as its state store (per-collection YAML and logs on
+EFS) behind an ALB and CloudFront (HTTPS + WAF), wired to the
 crawler over SSM and the WEB_COSMOS indexer over `ecs:RunTask`, with its own read-only AOSS
 data-access policy for direct validation. Pushing to `dev` / `test` / `prod` deploys that
 environment via `.github/workflows/deploy.yml` (branch = environment = AWS account, OIDC role per
@@ -242,9 +243,10 @@ are in flight — the ceilings come from the systems behind it.
   once; runs on different collections are fine as long as the indexer tolerates it.
 
 **Data layer**
-- SQLite in WAL mode with one connection per process; writes serialise at the connection. The
-  locks live in memory and the ECS service is pinned to one task — **do not run two replicas**,
-  the mutual exclusion would not hold across them.
+- PostgreSQL through a small connection pool (`DB_POOL_SIZE`, default 8); every `Database`
+  method is one transaction, and status transitions lock the collection row. The job registry
+  and per-collection locks still live in memory, so the ECS service is pinned to one task —
+  **do not run two replicas** until those move into the database.
 - Curation edits have no stale-edit check. Two curators editing the same row on the same
   collection: last save wins silently. Every write records the actor (activity tab), but nobody
   is warned.
@@ -266,7 +268,9 @@ are in flight — the ceilings come from the systems behind it.
 ## Configuration (`.env`, see `.env.example`)
 | Key | Purpose |
 |---|---|
-| `DATA_DIR` | SQLite (`engine.db`) + `collections/<id>/{collection,patterns}.yaml` |
+| `DATABASE_URL` or `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_SSLMODE` | PostgreSQL. One URL locally (`make db-up` → `postgresql://engine:engine@localhost:5432/engine`); the ECS task gets the parts, with user/password from the RDS secret |
+| `DB_POOL_SIZE` (8) | connections per engine process |
+| `DATA_DIR` | `collections/<id>/{collection,patterns}.yaml`, index logs, scrape jobs |
 | `CRAWLER_ROOT`, `CRAWLER_PYTHON` | crawl4ai repo and its interpreter |
 | `INDEXER_ROOT`, `INDEXER_PYTHON` | sde-api-scrapers repo (Phase 5) |
 | `SCRAPE_BACKEND` | `local` (subprocess) or `ssm` (drop the job on the EC2 inbox via SSM; the job shows as *queued* until the crawler rewrites its log, then S3 is polled for the documents object) |
@@ -283,7 +287,6 @@ are in flight — the ceilings come from the systems behind it.
 | `PROMOTE_REMOVAL_WARN_RATIO` (0.25) | share of the curated set that must vanish from a crawl before Promote warns |
 | `LLM_WORKERS` (16), `LLM_PATTERN_BATCH_URLS` (1000), `GLOBAL_EXCLUDES_PATH` | calls in flight per LLM job; URLs per Suggest-patterns call; override the packaged global exclude YAML |
 | `APP_PASSWORD`, `SESSION_SECRET`, `SESSION_TTL_S`, `AUTH_COOKIE_SECURE` | login with local accounts (off when `APP_PASSWORD` is empty; the value seeds the bootstrap `admin`); `/health` stays open |
-| `DB_LOCKING_MODE` (`normal`\|`exclusive`) | `exclusive` when `engine.db` lives on EFS/NFS |
 
 ## API
 Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers get
@@ -331,7 +334,9 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 sde_curation/
   config.py        pydantic-settings
   models.py        every boundary model (API, DB rows, indexer contracts, LLM schemas)
-  db.py            SQLite (aiosqlite), bulk ops
+  db.py            PostgreSQL (psycopg 3 pool): one transaction per method, COPY for bulk replaces
+  schema.py        numbered migrations (schema_version table)
+  import_sqlite.py one-off cutover: copy a SQLite-era engine.db into PostgreSQL
   engine/          pure: patterns.py (resolution), diff.py (delta URLs, promote), export.py (indexer contract)
   curation.py      engine ↔ DB glue, per-collection locking
   backends/        scrape.py (local subprocess | SSM), index.py (local subprocess | ECS), validate.py (direct AOSS check), s3.py

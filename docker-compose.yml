@@ -1,0 +1,22 @@
+# Local PostgreSQL for `make run` and the test-suite (TEST_DATABASE_URL). The deployment uses
+# RDS (infra/); nothing here is used in AWS.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: sde-curation-postgres
+    environment:
+      POSTGRES_DB: engine
+      POSTGRES_USER: engine
+      POSTGRES_PASSWORD: engine
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U engine -d engine"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  pgdata:

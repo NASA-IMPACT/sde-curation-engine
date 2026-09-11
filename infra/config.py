@@ -60,6 +60,11 @@ class EnvConfig:
     cpu: int = 1024
     memory_mib: int = 2048
     waf_rate_limit_per_5min: int = 1000
+    # RDS PostgreSQL (the state store). Storage starts at 20 GB gp3 and autoscales to 100 GB.
+    db_instance_class: str = "t4g.medium"  # 2 vCPU burstable, 4 GiB
+    db_multi_az: bool = False
+    db_backup_days: int = 7
+    db_deletion_protection: bool = False
 
     @property
     def name(self) -> str:
@@ -75,8 +80,11 @@ class EnvConfig:
 
 CONFIGS: dict[Environment, EnvConfig] = {
     Environment.DEV: EnvConfig(env=Environment.DEV),
-    Environment.TEST: EnvConfig(env=Environment.TEST),
-    Environment.PROD: EnvConfig(env=Environment.PROD, cpu=2048, memory_mib=4096),
+    Environment.TEST: EnvConfig(env=Environment.TEST, db_instance_class="t4g.large"),
+    Environment.PROD: EnvConfig(
+        env=Environment.PROD, cpu=2048, memory_mib=4096,
+        db_instance_class="t4g.large", db_multi_az=True, db_backup_days=35, db_deletion_protection=True,
+    ),
 }
 
 

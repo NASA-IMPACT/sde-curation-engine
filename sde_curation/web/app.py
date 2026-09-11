@@ -7,7 +7,6 @@ import hashlib
 import logging
 import re
 import secrets
-import sqlite3
 import time
 from collections import Counter
 from collections.abc import AsyncIterator
@@ -28,7 +27,7 @@ from ..backends.index import IndexError_, make_index_backend
 from ..backends.scrape import make_scrape_backend
 from ..config import Settings, get_settings
 from ..curation import CurationService
-from ..db import SOURCE_LABEL, Database
+from ..db import SOURCE_LABEL, ConflictError, Database
 from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
 from ..llm.base import LLMError, make_llm
@@ -275,9 +274,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        db = await Database(
-            settings.resolved_db_path, exclusive=settings.db_locking_mode == "exclusive"
-        ).connect()
+        db = await Database(settings.resolved_database_url, pool_size=settings.db_pool_size).connect()
         app.state.settings = settings
         app.state.db = db
         app.state.notifier = Notifier(settings.notify_webhook_url, base_url=settings.public_base_url)
@@ -973,10 +970,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ensure_idle(request, c)
         try:
             p, ds = await curation(request).add_pattern(c, body, actor=actor(request))
-        except Exception as e:
-            if "UNIQUE" in str(e):
-                raise HTTPException(409, "pattern already exists") from e
-            raise
+        except ConflictError as e:
+            raise HTTPException(409, "pattern already exists") from e
         await _after_curation_change(request, c, ds)
         await audit(request, "pattern.add", collection_id, _pattern_detail(p))
         return htmx_done(request, {"pattern": p.model_dump(mode="json"), "deltas": ds.counts})
@@ -1232,10 +1227,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(422, str(e)) from e
             try:
                 _, ds = await curation(request).add_pattern(c, pc, actor=actor(request), source=RuleSource.LLM_EDITED)
-            except Exception as e:
-                if "UNIQUE" in str(e):
-                    raise HTTPException(409, f"a {sug['type']} rule for {edited} already exists") from e
-                raise
+            except ConflictError as e:
+                raise HTTPException(409, f"a {sug['type']} rule for {edited} already exists") from e
             await _after_curation_change(request, c, ds)
             await db(request).set_pattern_suggestion_state(collection_id, sid, "accepted", actor=actor(request),
                                                            accepted_as=edited)
@@ -1416,7 +1409,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return await users_view(request, error=f"Password: at least {MIN_PASSWORD} characters.", status_code=422)
             try:
                 await db(request).create_user(username, auth.hash_password(password), role)
-            except sqlite3.IntegrityError:
+            except ConflictError:
                 return await users_view(request, error=f"User {username!r} already exists.", status_code=409)
             await audit(request, "user.create", None, f"{username} ({role})")
             return RedirectResponse("/users", status_code=303)

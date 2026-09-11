@@ -34,7 +34,7 @@
   <table>
     <thead><tr><th>At</th><th>By</th><th>Action</th><th>Detail</th></tr></thead>
     <tbody>{% for a in audit %}
-      <tr><td class="nowrap">{{ a.at[:19]|replace('T',' ') }}Z</td><td class="small">{{ a.actor }}</td>
+      <tr><td class="nowrap">{{ a.at.strftime('%Y-%m-%d %H:%M:%S') }}Z</td><td class="small">{{ a.actor }}</td>
           <td><code>{{ a.action }}</code></td><td class="muted">{{ a.detail or '' }}</td></tr>
     {% endfor %}</tbody>
   </table>
