@@ -84,8 +84,8 @@ without touching policies owned by other stacks.
 ## Operating notes
 - **Single task by design** (in-process job registry and locks). A deploy replaces the task
   (`minHealthyPercent=0`), so in-flight jobs are marked failed on restart — deploy when idle.
-- **Database**: RDS PostgreSQL 17, `db.t4g.medium` single-AZ in dev, `db.t4g.large` single-AZ in
-  test and Multi-AZ in prod (`config.py`), 20 GB gp3 autoscaling to 100 GB, encrypted, not publicly accessible, only
+- **Database**: RDS PostgreSQL 17, `db.m6i.large` everywhere, single-AZ in dev and test, Multi-AZ
+  in prod (`config.py`), 20 GB gp3 autoscaling to 100 GB, encrypted, not publicly accessible, only
   the service security group may connect. Automated backups with point-in-time recovery (7 days;
   35 in prod), deletion protection in prod, and a final snapshot on stack deletion. Performance
   Insights and the PostgreSQL log in CloudWatch are on.

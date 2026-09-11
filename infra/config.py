@@ -61,7 +61,14 @@ class EnvConfig:
     memory_mib: int = 2048
     waf_rate_limit_per_5min: int = 1000
     # RDS PostgreSQL (the state store). Storage starts at 20 GB gp3 and autoscales to 100 GB.
-    db_instance_class: str = "t4g.medium"  # 2 vCPU burstable, 4 GiB
+    # x86 dedicated compute, 2 vCPU / 8 GiB, no CPU-credit model. Graviton burstable (t4g) was
+    # the first choice but hit "insufficient-capacity" twice in us-east-1 on 2026-09-11; the m6i
+    # pools are far larger. Same class in every environment.
+    db_instance_class: str = "m6i.large"
+    # The DB subnet group spans every AZ where the class is orderable (not just `azs`, which is
+    # limited by Fargate): RDS picks one with free capacity at create time, so more AZs = fewer
+    # "insufficient-capacity" failures. us-east-1e offers no db.t3/t4g classes.
+    db_azs: tuple[str, ...] = ("us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d", "us-east-1f")
     db_multi_az: bool = False
     db_backup_days: int = 7
     db_deletion_protection: bool = False
@@ -80,10 +87,10 @@ class EnvConfig:
 
 CONFIGS: dict[Environment, EnvConfig] = {
     Environment.DEV: EnvConfig(env=Environment.DEV),
-    Environment.TEST: EnvConfig(env=Environment.TEST, db_instance_class="t4g.large"),
+    Environment.TEST: EnvConfig(env=Environment.TEST),
     Environment.PROD: EnvConfig(
         env=Environment.PROD, cpu=2048, memory_mib=4096,
-        db_instance_class="t4g.large", db_multi_az=True, db_backup_days=35, db_deletion_protection=True,
+        db_multi_az=True, db_backup_days=35, db_deletion_protection=True,
     ),
 }
 
