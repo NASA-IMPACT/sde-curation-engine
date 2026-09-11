@@ -150,8 +150,9 @@ Old `/curate` redirects to URLs › Deltas. Verified by tests (67) and browser w
 
 ### Phase 5 — Export + test indexing (R5, R6) — DONE 2026-08-29 (moto-verified + live ECS run: 13 docs indexed into sde-web-subset in 27 s)
 - `engine/export.py`: curated non-excluded rows → `documents.jsonl` lines
-  `{url, title, full_text, document_type, division}`; manifest per contract; `full_text` joined
-  from `dump_urls`. Writer streams to a temp file then `put_object` docs **then** manifest.
+  `{url, title, full_text, document_type, division}`; manifest per contract; `full_text` is the
+  curated row's own (copied from `dump_urls` at promote since 2026-09-11, schema v2 — the dump is
+  not read at export). Writer streams to a temp file then `put_object` docs **then** manifest.
 - `backends/index.py`: `IndexBackend.dispatch(key, run_id, target) -> JobRun`, `.status()`.
   `LocalSubprocessIndexer` (subprocess `api_scraper.py --source WEB_COSMOS …`, env from Settings);
   `EcsDispatchIndexer` (`sts.assume_role` → `ecs.run_task` exactly as above, store `taskArn`).
@@ -193,6 +194,12 @@ Driven by `suggestions and questions.md` (Bernard's "Recommended Updates").
   whitespace-normalised text, `engine/text.py`), `delta_urls.content_changed` overlay flag set by
   `engine/diff.py` only when both sides carry a hash (no storm on the first run after upgrade);
   promote carries the current dump hash; badge + filter in URLs › Deltas.
+- **Curated rows carry their text** (2026-09-11, schema v2, review feedback "why only keep the hash
+  on the curated set when you can also store the extracted text"): `curated_urls.full_text` is
+  copied from the dump inside PostgreSQL at promote (`Database.replace_curated(text_from_dump=True)`),
+  the export reads `load_curated(with_text=True)` and never the dump, listing queries return
+  `text_len` instead of the text. The migration and the SQLite importer backfill existing rows
+  from the dump. Cost: one extra copy of the promoted text per collection.
 - **Suggest patterns = exclude only, whole dump**: global exclude YAML pre-pass
   (`sde_curation/data/global_excludes.yaml`, `llm/global_excludes.py`, rows tagged `source=global`),
   then URL+title batches (`engine/urls.py` dedupes http/https + trailing slash, sorts by path;

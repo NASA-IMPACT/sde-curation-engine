@@ -668,7 +668,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         elif set_ == "curated":
             rows, _ = await d.list_curated(c.collection_id, limit=1_000_000, q=lp["q"], excluded=lp["excluded"],
                                            edited=lp["edited"])
-            cols = ["url", "excluded", "scraped_title", "title", "division", "document_type", "edited_by"]
+            cols = ["url", "excluded", "scraped_title", "title", "division", "document_type", "text_len", "edited_by"]
             data = [[getattr(r, k) for k in cols] for r in rows]
         else:
             rows, _ = await d.list_deltas(

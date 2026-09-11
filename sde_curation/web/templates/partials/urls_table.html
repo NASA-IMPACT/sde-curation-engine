@@ -77,7 +77,7 @@
   {% elif set == 'delta' %}
     <tr><th class="num">#</th><th title="new: not in the curated URLs · modified: differs from the curated URLs · removed: gone from the dump (promote drops it from the curated URLs; the next index run deletes it)">Change</th><th>URL</th><th title="included rows are exported to the index; excluded rows are kept out">In index</th><th>Title <small class="muted">scraped → effective</small></th><th>Division</th><th>Doc type</th><th title="who set the effective values: AI (accepted suggestions), SME (typed or toggled by a curator), or both">Edited by</th></tr>
   {% else %}
-    <tr><th class="num">#</th><th>URL</th><th title="included rows are exported to the index; excluded rows are kept out. Click to change: the edit shows up under Delta URLs">In index</th><th>Title <small class="muted">scraped → effective</small></th><th>Division</th><th>Doc type</th><th title="who set the effective values: AI (accepted suggestions), SME (typed or toggled by a curator), or both">Edited by</th></tr>
+    <tr><th class="num">#</th><th>URL</th><th title="included rows are exported to the index; excluded rows are kept out. Click to change: the edit shows up under Delta URLs">In index</th><th>Title <small class="muted">scraped → effective</small></th><th>Division</th><th>Doc type</th><th title="size of the page text this row was approved with — the text the index gets; empty means the row was promoted before the engine kept text on the curated URLs">Text</th><th title="who set the effective values: AI (accepted suggestions), SME (typed or toggled by a curator), or both">Edited by</th></tr>
   {% endif %}
   </thead>
   <tbody>
@@ -116,6 +116,7 @@
       <td>{{ title_cell(r, why, not running) }}</td>
       <td>{{ select_cell(r, why, not running, 'division', divisions) }}</td>
       <td>{{ select_cell(r, why, not running, 'document_type', doc_types) }}</td>
+      <td class="num muted small">{% if r.text_len is none %}<span title="no text kept for this row (promoted before the engine stored text on the curated URLs): promote again to fill it">—</span>{% else %}{{ '{:,}'.format(r.text_len) }}{% endif %}</td>
       <td class="nowrap">{{ edited_chip(r, why) }}</td>
     </tr>
     {% endif %}

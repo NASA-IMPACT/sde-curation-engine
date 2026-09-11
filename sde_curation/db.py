@@ -50,6 +50,10 @@ async def _scalar(cur: psycopg.AsyncCursor) -> Any:
     return None if row is None else next(iter(row.values()))
 
 
+# Every curated column except the page text (most of the bytes; only the export reads it).
+_CURATED_COLS = "collection_id,url,scraped_title,title,division,document_type,excluded,content_hash,edited_by"
+
+
 class Database:
     def __init__(self, dsn: str, *, pool_size: int = 8, connect_timeout_s: float = 30.0):
         self.dsn = dsn
@@ -327,7 +331,8 @@ class Database:
         async with self._conn() as conn:
             total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM curated_urls WHERE {w}", args))
             cur = await conn.execute(
-                f"SELECT * FROM curated_urls WHERE {w} ORDER BY url LIMIT %s OFFSET %s", [*args, limit, offset]
+                f"SELECT {_CURATED_COLS}, length(full_text) AS text_len FROM curated_urls WHERE {w}"
+                " ORDER BY url LIMIT %s OFFSET %s", [*args, limit, offset]
             )
             return [CuratedUrl(**r) for r in await cur.fetchall()], total
 
@@ -350,13 +355,6 @@ class Database:
                 "SELECT url, content_hash FROM dump_urls WHERE collection_id=%s", (collection_id,)
             )
             return {r["url"]: r["content_hash"] for r in await cur.fetchall()}
-
-    async def dump_full_text(self, collection_id: str) -> dict[str, str | None]:
-        async with self._conn() as conn:
-            cur = await conn.execute(
-                "SELECT url, full_text FROM dump_urls WHERE collection_id=%s", (collection_id,)
-            )
-            return {r["url"]: r["full_text"] for r in await cur.fetchall()}
 
     # ── deltas / curated ───────────────────────────────────────────────
 
@@ -462,9 +460,12 @@ class Database:
             )
         return len(items)
 
-    async def load_curated(self, collection_id: str) -> list[CuratedUrl]:
+    async def load_curated(self, collection_id: str, *, with_text: bool = False) -> list[CuratedUrl]:
+        """The whole curated set. `with_text` also loads the approved page text (the export needs
+        it; the diff and the pages do not, and it is most of the bytes)."""
+        cols = "*" if with_text else _CURATED_COLS
         async with self._conn() as conn:
-            cur = await conn.execute("SELECT * FROM curated_urls WHERE collection_id=%s", (collection_id,))
+            cur = await conn.execute(f"SELECT {cols} FROM curated_urls WHERE collection_id=%s", (collection_id,))
             return [CuratedUrl(**r) for r in await cur.fetchall()]
 
     async def set_curated_edited_by(self, collection_id: str, items: list[tuple[str, str | None]]) -> None:
@@ -477,18 +478,28 @@ class Database:
                 [(eb, collection_id, url) for url, eb in items],
             )
 
-    async def replace_curated(self, collection_id: str, rows: list[CuratedUrl]) -> int:
+    async def replace_curated(self, collection_id: str, rows: list[CuratedUrl], *, text_from_dump: bool = True) -> int:
+        """Bulk-replace the curated set in one transaction; returns row count. With `text_from_dump`
+        (a promote) every row that is in the dump takes the dump's current page text — copied inside
+        PostgreSQL, so the text never travels through the app. A row's own `full_text` is written
+        first and survives only when the dump does not have that URL."""
         async with self._conn() as conn:
             await conn.execute("DELETE FROM curated_urls WHERE collection_id=%s", (collection_id,))
             async with conn.cursor() as cur, cur.copy(
                 "COPY curated_urls (collection_id,url,scraped_title,title,division,document_type,excluded,"
-                "content_hash,edited_by) FROM STDIN"
+                "content_hash,edited_by,full_text) FROM STDIN"
             ) as copy:
                 for r in rows:
                     await copy.write_row((
                         r.collection_id, r.url, r.scraped_title, r.title, r.division, r.document_type,
-                        r.excluded, r.content_hash, r.edited_by,
+                        r.excluded, r.content_hash, r.edited_by, r.full_text,
                     ))
+            if text_from_dump:
+                await conn.execute(
+                    "UPDATE curated_urls c SET full_text = d.full_text FROM dump_urls d"
+                    " WHERE c.collection_id=%s AND d.collection_id=c.collection_id AND d.url=c.url",
+                    (collection_id,),
+                )
             await conn.execute(
                 "UPDATE collections SET curated_count=%s, updated_at=%s WHERE collection_id=%s",
                 (len(rows), utcnow(), collection_id),

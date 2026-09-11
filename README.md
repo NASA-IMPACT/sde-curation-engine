@@ -118,6 +118,14 @@ are covered together). The worker pool (`llm/pool.py`) retries nothing itself �
 retries 429 / 5xx / timeouts `LLM_MAX_RETRIES` times with backoff — but it keeps going past
 per-URL failures and aborts only after ten consecutive non-retryable errors (bad key, bad model).
 
+**The curated set is self-contained**: a promote copies each page's current dump text onto its
+curated row (`curated_urls.full_text`, copied inside PostgreSQL) along with the hash of that text,
+and **Index** exports the curated rows alone — the dump is never consulted at export time. So the
+approved set stays exportable exactly as approved even after a later crawl has replaced the dump,
+and the next cycle diffs the new crawl against it as the source of truth. Rows promoted before the
+engine kept text (the migration backfills them from the dump, which is what the export shipped
+for them anyway) show an empty *Text* size on the Curated URLs table until the next promote.
+
 **Content-aware deltas**: every crawled page gets a `content_hash` (sha256 of its
 whitespace-normalised text) at ingest; a promote carries the current hash onto the curated rows.
 On the next re-scrape a page whose text changed shows as *modified* with a **text changed** badge
@@ -126,7 +134,8 @@ Suggest metadata re-classifies it. Rows promoted before hashing existed have no 
 unchanged, so the first run after an upgrade does not flag everything.
 
 ### Indexing (Phase 5)
-**Index to test** exports the curated, non-excluded URLs as the indexer's contract —
+**Index to test** exports the curated, non-excluded URLs, each with the text it was approved
+with, as the indexer's contract —
 `s3://$COSMOS_INDEX_BUCKET/curated_collections/{key}/{run_id}/documents.jsonl` then
 `manifest.json` (written last = "export complete") — and dispatches
 `api_scraper.py --source WEB_COSMOS --collection {key} --run-id {run_id} --target test` from

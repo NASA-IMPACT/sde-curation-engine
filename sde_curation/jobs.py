@@ -384,11 +384,11 @@ class JobManager:
                 await self.db.update_job(job)
                 self._emit(c, job)
 
-            # 1. export: stream curated (non-excluded) rows to a temp jsonl, upload, THEN the manifest
-            curated = await self.db.load_curated(c.collection_id)
-            full_text = await self.db.dump_full_text(c.collection_id)
+            # 1. export: stream curated (non-excluded) rows — with the text they were approved
+            #    with — to a temp jsonl, upload, THEN the manifest
+            curated = await self.db.load_curated(c.collection_id, with_text=True)
             with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as fh:
-                n = write_jsonl(export_lines(curated, full_text), fh)
+                n = write_jsonl(export_lines(curated), fh)
                 tmp = Path(fh.name)
             try:
                 if n == 0:

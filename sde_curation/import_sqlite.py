@@ -51,6 +51,10 @@ REQUIRED_COLS = {
 
 # Portable versions of the data fix-ups the SQLite `_migrate` ran on every boot.
 BACKFILLS = (
+    # SQLite never stored the approved text on the curated rows; the export shipped the dump text,
+    # so the dump text is what the index holds for them
+    """UPDATE curated_urls c SET full_text = d.full_text FROM dump_urls d
+       WHERE d.collection_id = c.collection_id AND d.url = c.url AND c.full_text IS NULL""",
     # rules that came from an accepted suggestion keep their origin instead of reading as SME
     """UPDATE patterns SET source = s.source FROM pattern_suggestions s
        WHERE s.collection_id = patterns.collection_id AND s.type = patterns.type

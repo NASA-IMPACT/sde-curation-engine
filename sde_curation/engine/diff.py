@@ -127,8 +127,9 @@ def promote(
     curated: list[CuratedUrl], deltas: list[DeltaUrl], content_hashes: dict[str, str | None] | None = None
 ) -> list[CuratedUrl]:
     """Apply deltas to the curated set: tombstones remove, everything else upserts. Every
-    surviving row takes the current dump text hash (`content_hashes`): the export always ships
-    the current dump text, so after a promote that is what the index holds."""
+    surviving row takes the current dump text hash (`content_hashes`); the store copies the
+    matching dump text onto the row at the same time (`Database.replace_curated`), so the
+    curated set carries exactly the text its hash fingerprints and the export ships that."""
     hashes = content_hashes or {}
     by = {c.url: c for c in curated}
     for d in deltas:

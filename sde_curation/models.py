@@ -296,6 +296,9 @@ class CuratedUrl(BaseModel):
     document_type: DocumentType | None = None
     excluded: bool = False
     content_hash: str | None = None  # hash of the text that was promoted (NULL = before hashing existed)
+    full_text: str | None = None  # the text the row was approved with (promote copies it from the dump);
+    # the export ships this, never the dump. Listing queries leave it out and fill `text_len`.
+    text_len: int | None = None
     edited_by: EditedBy | None = None  # carried over from the delta row at promote time
 
 
