@@ -76,7 +76,13 @@ class Settings(BaseSettings):
     # a direct SigV4 query of the index (needs AOSS data access for the engine's principal or
     # VALIDATION_ASSUME_ROLE_ARN); if that is refused (403) we fall back to re-running the same
     # export (changed: 0) just to get a fresh validation.json from the indexer.
+    # AOSS refresh is not a fixed delay (a 10-doc run has taken >45s and <3min to become visible),
+    # so after the initial wait the direct check is repeated every `validation_poll_interval_s`
+    # until it passes or `validation_timeout_s` has elapsed since the wait began; only then does
+    # a short count fail the gate.
     validation_delay_s: float = 30.0
+    validation_poll_interval_s: float = 15.0
+    validation_timeout_s: float = 10 * 60
     validation_assume_role_arn: str | None = None
 
     # ── LLM ────────────────────────────────────────────────────────────

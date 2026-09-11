@@ -131,3 +131,57 @@ async def test_revalidate_direct_when_access_exists(index_client, monkeypatch):
     assert runs[0]["validated_by"] == "direct" and runs[0]["validation"]["title_match_rate"] == 1.0
     assert (await c.post("/api/collections/nope/index/revalidate")).status_code == 404
     await asyncio.sleep(0)
+
+
+async def test_direct_validation_polls_until_index_is_consistent(index_client, monkeypatch):
+    """AOSS makes a bulk upsert searchable some time after the indexer succeeds: a short count on the
+    first check must be re-checked, not failed."""
+    c = index_client
+    s = c.app.state.settings
+    s.validation_delay_s, s.validation_poll_interval_s, s.validation_timeout_s = 0.05, 0.05, 5.0
+    await prepare(c)
+    import sde_curation.jobs as jobs_mod
+
+    calls = []
+
+    async def lagging_direct(settings, *, collection_key, run_id, target, expected_titles, client=None):
+        calls.append(1)
+        exp = {web_id(collection_key, u): t for u, t in expected_titles.items()}
+        visible = dict(list(exp.items())[: len(exp) // 2]) if len(calls) < 3 else exp  # 2 short reads, then all
+        return compare(collection_key, run_id, exp, visible)
+
+    monkeypatch.setattr(jobs_mod, "validate_direct", lagging_direct)
+    await c.post("/api/collections/ex.org/index?target=test")
+    job = await wait_job(c, "ex.org", timeout=40)
+    assert job["state"] == "succeeded", job
+    assert len(calls) == 3 and job["progress"]["validation_attempt"] == 3
+    assert job["progress"]["validated_by"] == "direct" and job["progress"]["validation_ok"] is True and "fallback" not in job["progress"]
+    col = (await c.get("/api/collections/ex.org")).json()
+    assert col["status"] == "config_generated" and col["needs_recuration"] is False
+    hist = (await c.get("/api/collections/ex.org/history")).json()
+    assert "validation FAILED" not in "".join(h["note"] for h in hist)
+
+
+async def test_direct_validation_fails_only_after_timeout(index_client, monkeypatch):
+    c = index_client
+    s = c.app.state.settings
+    s.validation_delay_s, s.validation_poll_interval_s, s.validation_timeout_s = 0.05, 0.05, 0.3
+    await prepare(c)
+    import sde_curation.jobs as jobs_mod
+
+    calls = []
+
+    async def never_consistent(settings, *, collection_key, run_id, target, expected_titles, client=None):
+        calls.append(1)
+        exp = {web_id(collection_key, u): t for u, t in expected_titles.items()}
+        return compare(collection_key, run_id, exp, dict(list(exp.items())[: len(exp) // 2]))
+
+    monkeypatch.setattr(jobs_mod, "validate_direct", never_consistent)
+    await c.post("/api/collections/ex.org/index?target=test")
+    job = await wait_job(c, "ex.org", timeout=40)
+    assert job["state"] == "succeeded" and job["progress"]["validation_ok"] is False
+    assert len(calls) >= 3  # kept re-checking through the window before giving up
+    col = (await c.get("/api/collections/ex.org")).json()
+    assert col["status"] == "curating" and col["needs_recuration"] is True
+    hist = (await c.get("/api/collections/ex.org/history")).json()
+    assert "validation FAILED (direct)" in hist[-1]["note"]

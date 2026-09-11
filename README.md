@@ -171,7 +171,11 @@ the collection to `config_generated`; every run is kept in `index_runs` (see the
 The indexer validates in-process right after its bulk upsert — before OpenSearch Serverless has
 refreshed — so on any run that wrote something its `validation.json` reads `0/N` (reproduced: the
 same export re-run a minute later reads `13/13`). The engine therefore does **not** trust that file.
-After a test run succeeds it waits `VALIDATION_DELAY_S` (30 s) and validates itself:
+After a test run succeeds it waits `VALIDATION_DELAY_S` (30 s) and validates itself. The refresh
+is not a fixed delay (a 10-document run has read `6/10` at 48 s and `10/10` at 2½ min), so the
+direct check is repeated every `VALIDATION_POLL_INTERVAL_S` (15 s) until it passes or
+`VALIDATION_TIMEOUT_S` (10 min) has elapsed; only then does a short count fail the gate. The job
+row shows `n/N visible so far · waiting …s for OpenSearch to refresh` while it polls.
 1. **Direct** (fast): a SigV4 query of the target index for `collection_key`, comparing counts and
    titles exactly like the indexer's `web/validate.py`. Needs `OPENSEARCH_ENDPOINT_TEST/PROD` and
    AOSS **data access** for the engine's principal — or `VALIDATION_ASSUME_ROLE_ARN` naming a role
@@ -311,7 +315,7 @@ are in flight — the ceilings come from the systems behind it.
 | `OPENSEARCH_ENDPOINT_TEST`, `OPENSEARCH_ENDPOINT_PROD`, `SAGEMAKER_ENDPOINT_NAME` | `local` backend (the ECS task def already carries these) |
 | `INDEX_POLL_INTERVAL_S`, `INDEX_STALL_TIMEOUT_S` | status.json polling; the stall timeout also bounds a *started* remote crawl's silence |
 | `SCRAPE_POLL_INTERVAL_S` | `ssm` backend: how often to look at the crawler host. A queued job waits indefinitely (the UI shows for how long); only a dead `watch_inbox.sh` fails it |
-| `VALIDATION_DELAY_S`, `VALIDATION_TITLE_MATCH_THRESHOLD`, `VALIDATION_ASSUME_ROLE_ARN` | validation gate |
+| `VALIDATION_DELAY_S`, `VALIDATION_POLL_INTERVAL_S`, `VALIDATION_TIMEOUT_S`, `VALIDATION_TITLE_MATCH_THRESHOLD`, `VALIDATION_ASSUME_ROLE_ARN` | validation gate: initial wait, then re-check cadence and window for OpenSearch to become consistent |
 | `NOTIFY_WEBHOOK_URL`, `PUBLIC_BASE_URL` | Slack-compatible notifications on every status change |
 | `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.6-luna`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` (per attempt), `LLM_MAX_RETRIES`, `LLM_TEMPERATURE` (unset = model default; reasoning models reject any other value) | LLM assist; any OpenAI-compatible endpoint |
 | `PROMOTE_REMOVAL_WARN_RATIO` (0.25) | share of the curated set that must vanish from a crawl before Promote warns |

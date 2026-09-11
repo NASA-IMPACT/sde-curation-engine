@@ -2,13 +2,17 @@
 # the model's own suggestions: every glob that matches at least one crawled URL becomes a pending
 # suggestion tagged "global", with its match count, for the curator to accept or reject.
 #
-# match:     URL glob, * is the wildcard; write host-agnostic globs (*/login*) so http/https and
-#            trailing-slash variants are all covered.
+# match:     URL glob, * is the wildcard and the glob must match the WHOLE URL; write host-agnostic
+#            globs (*/login*) so http/https and trailing-slash variants are all covered. A glob
+#            with no trailing * only matches URLs that END there (*.pptx), which is how the file
+#            extensions below avoid over-matching (".sh" inside ".shtml", ".nc" inside ".ncsu.edu").
 # rationale: one sentence shown to the curator.
-# source:    sme    — written by a subject-matter expert
+# source:    sme    — written by a subject-matter expert (the strong signals in
+#                     LLM_EXCLUSION_CONTEXT.md §3a are the evidence behind most of these)
 #            cosmos — mined from COSMOS production exclude patterns (script to come)
-version: 1
+version: 2
 patterns:
+  # ---- site chrome ----
   - match: "*/login*"
     rationale: sign-in pages carry no science content
     source: sme
@@ -60,7 +64,7 @@ patterns:
   - match: "*/wp-admin/*"
     rationale: WordPress administration pages are never public content
     source: sme
-  - match: "*/wp-json/*"
+  - match: "*/wp-json*"
     rationale: WordPress REST API endpoints are not pages
     source: sme
   - match: "*?replytocom=*"
@@ -71,4 +75,198 @@ patterns:
     source: sme
   - match: "*/print/*"
     rationale: print views duplicate the page
+    source: sme
+
+  # ---- query strings: paging, sorting, filtering, search ----
+  - match: "*?*"
+    rationale: "broad: curators excluded every query-string URL on 244 of 297 sources; check the matches for filtered views that are the only copy of a page before accepting"
+    source: sme
+  - match: "*?page=*"
+    rationale: pagination views repeat items that are indexed at their own URLs (excluded on 74 of 82 sources)
+    source: sme
+  - match: "*&page=*"
+    rationale: pagination views repeat items that are indexed at their own URLs
+    source: sme
+  - match: "*?format=*"
+    rationale: alternate-format views (xml, json, oEmbed) duplicate the page as a machine format (excluded on 33 of 34 sources)
+    source: sme
+  - match: "*&format=*"
+    rationale: alternate-format views (xml, json, oEmbed) duplicate the page as a machine format
+    source: sme
+  - match: "*?type=*"
+    rationale: type-filtered listing views duplicate the items they list
+    source: sme
+  - match: "*?category=*"
+    rationale: category-filtered listing views duplicate the items they list
+    source: sme
+  - match: "*?c=*"
+    rationale: category-filtered listing views duplicate the items they list
+    source: sme
+  - match: "*?q=*"
+    rationale: search result pages duplicate content that is indexed at its own URL
+    source: sme
+  - match: "*?s=*"
+    rationale: WordPress search result pages duplicate content that is indexed at its own URL
+    source: sme
+  - match: "*?search=*"
+    rationale: search result pages duplicate content that is indexed at its own URL
+    source: sme
+  - match: "*?sort=*"
+    rationale: sorted listing views duplicate the items they list
+    source: sme
+  - match: "*?order=*"
+    rationale: sorted listing views duplicate the items they list
+    source: sme
+  - match: "*?year=*"
+    rationale: year-filtered archive views duplicate the items they list
+    source: sme
+  - match: "*?author=*"
+    rationale: author-filtered archive views duplicate the posts they list
+    source: sme
+  - match: "*?url=*"
+    rationale: redirect and share links that carry another URL as a parameter duplicate that page
+    source: sme
+  - match: "*?C=*"
+    rationale: Apache directory-listing column-sort links (?C=M;O=A) are the same listing four ways
+    source: sme
+
+  # ---- Office, data, media and code files ----
+  - match: "*.ppt"
+    rationale: PowerPoint slides are not indexable content (excluded on 55 of 56 sources)
+    source: sme
+  - match: "*.pptx"
+    rationale: PowerPoint slides are not indexable content (excluded on 44 of 45 sources)
+    source: sme
+  - match: "*.doc"
+    rationale: Word files are not indexable content (excluded on 41 of 43 sources)
+    source: sme
+  - match: "*.docx"
+    rationale: Word files are not indexable content (excluded on all 46 sources)
+    source: sme
+  - match: "*.xls"
+    rationale: Excel files are raw data, not pages (excluded on 23 of 25 sources)
+    source: sme
+  - match: "*.xlsx"
+    rationale: Excel files are raw data, not pages (excluded on all 28 sources)
+    source: sme
+  - match: "*.xml"
+    rationale: XML files are machine formats, not pages
+    source: sme
+  - match: "*.json"
+    rationale: JSON files are machine formats, not pages
+    source: sme
+  - match: "*.txt"
+    rationale: plain-text files are usually raw data, logs or READMEs, not pages
+    source: sme
+  - match: "*.csv"
+    rationale: CSV files are raw data, not pages
+    source: sme
+  - match: "*.dat"
+    rationale: .dat files are raw data, not pages
+    source: sme
+  - match: "*.h5"
+    rationale: HDF5 files are raw data, not pages
+    source: sme
+  - match: "*.nc"
+    rationale: NetCDF files are raw data, not pages
+    source: sme
+  - match: "*.fits"
+    rationale: FITS files are raw data, not pages
+    source: sme
+  - match: "*.kmz"
+    rationale: KMZ map layers are raw data, not pages
+    source: sme
+  - match: "*.zip"
+    rationale: archives are downloads, not pages
+    source: sme
+  - match: "*.tar"
+    rationale: archives are downloads, not pages
+    source: sme
+  - match: "*.gz"
+    rationale: compressed downloads are not pages
+    source: sme
+  - match: "*.jpg"
+    rationale: direct image files have no text to index (gallery pages with captions are kept)
+    source: sme
+  - match: "*.png"
+    rationale: direct image files have no text to index (gallery pages with captions are kept)
+    source: sme
+  - match: "*.gif"
+    rationale: direct image files have no text to index (gallery pages with captions are kept)
+    source: sme
+  - match: "*.ico"
+    rationale: favicons are site chrome
+    source: sme
+  - match: "*.swf"
+    rationale: Flash files are dead media
+    source: sme
+  - match: "*.ps"
+    rationale: PostScript files are legacy print output, not pages
+    source: sme
+  - match: "*.py"
+    rationale: source code files are not documents
+    source: sme
+  - match: "*.ipynb"
+    rationale: notebook source files are not documents (rendered docs pages are kept)
+    source: sme
+  - match: "*.pro"
+    rationale: IDL source files are not documents
+    source: sme
+  - match: "*.sh"
+    rationale: shell scripts are not documents
+    source: sme
+  - match: "*.md"
+    rationale: raw Markdown sources are not documents (the rendered page is kept)
+    source: sme
+  - match: "*.yml"
+    rationale: config files are not documents
+    source: sme
+  - match: "*.toml"
+    rationale: config files are not documents
+    source: sme
+  - match: "*.min.js.download"
+    rationale: saved-page script artifacts are not documents
+    source: sme
+
+  # ---- CMS and feed artifacts ----
+  - match: "*oembed*"
+    rationale: oEmbed endpoints are machine formats, not pages (excluded on every source where they occur)
+    source: sme
+  - match: "*/embed/*"
+    rationale: WordPress embed views duplicate the post
+    source: sme
+  - match: "*/embed"
+    rationale: WordPress embed views duplicate the post
+    source: sme
+  - match: "*/xmlrpc.php?rsd*"
+    rationale: WordPress XML-RPC discovery is a machine endpoint (excluded on 10 sources)
+    source: sme
+  - match: "*.atom"
+    rationale: Atom feeds are machine formats, not pages
+    source: sme
+  - match: "*/node/*"
+    rationale: Drupal /node/N paths duplicate the aliased page URL
+    source: sme
+  - match: "*/taxonomy/*"
+    rationale: Drupal taxonomy term listings are navigation, not content
+    source: sme
+  - match: "*/page/*"
+    rationale: CMS pagination (/page/2) repeats items that are indexed at their own URLs
+    source: sme
+  - match: "*/user/*"
+    rationale: Drupal user profile and login pages are site chrome
+    source: sme
+  - match: "*/@@search*"
+    rationale: Plone search result pages duplicate content that is indexed at its own URL
+    source: sme
+
+  # ---- listings, logistics ----
+  - match: "*agenda*"
+    rationale: meeting agendas are logistics, not science content (excluded on 41 of 52 sources; check for agenda-shaped slugs)
+    source: sme
+  - match: "*/browse*"
+    rationale: browse pages are record listings, not content (excluded on most sources; check for /browser slugs)
+    source: sme
+  - match: "*/cgi-bin/*"
+    rationale: CGI data browsers and directory listings are crawler traps, not pages
     source: sme

@@ -9,7 +9,7 @@
   {%- elif p.queued %}queued {{ job.started_at|since }}{% if p.queue_ahead %} behind {{ p.queue_ahead }} crawl{{ 's' if p.queue_ahead != 1 }}{% endif %}
   {%- elif p.phase == 'dispatch' %}exported {{ p.exported }} · starting indexer
   {%- elif p.phase == 'indexing' %}indexing {{ p.exported }} docs{% if p.waiting_s %} · {{ (p.waiting_s // 60)|int }}m{% endif %}
-  {%- elif p.phase == 'validating' %}validating the test index
+  {%- elif p.phase == 'validating' %}validating the test index{% if p.validation_attempt %} · {{ p.indexed_so_far }}/{{ p.expected_count }} visible so far{% if p.validation_waiting_s %} · waiting {{ p.validation_waiting_s }}s for OpenSearch to refresh{% endif %}{% endif %}
   {%- elif p.phase == 'done' %}validation {{ 'passed' if p.validation_ok else 'failed' }}
   {%- elif p.llm %}LLM calls in progress · {{ p.done or 0 }}/{{ p.total or '?' }}{{ ' calls' if p.llm == 'patterns' else ' URLs' }}{% if p.inflight %} · {{ p.inflight }} in flight{% endif %}{% if p.failed %} · {{ p.failed }} failed{% endif %}
   {%- elif p.docs is defined %}{{ p.docs }} docs{% if p.failed %}, {{ p.failed }} failed{% endif %}

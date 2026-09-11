@@ -438,6 +438,11 @@ class ValidationReport(BaseModel):
     titles_mismatched: list[dict[str, Any]] = Field(default_factory=list)
 
 
+def report_passes(report: dict[str, Any], threshold: float = 0.99) -> bool:
+    """The validation gate: every expected document visible and titles matching at >= threshold."""
+    return bool(report.get("count_matches")) and float(report.get("title_match_rate", 0)) >= threshold
+
+
 class IndexRun(BaseModel):
     """One export + WEB_COSMOS dispatch. status/validation are the indexer's own JSON files."""
 
@@ -456,10 +461,9 @@ class IndexRun(BaseModel):
     started_by: str | None = None
 
     def validation_passes(self, threshold: float = 0.99) -> bool | None:
-        v = self.validation
-        if not v:
+        if not self.validation:
             return None
-        return bool(v.get("count_matches")) and float(v.get("title_match_rate", 0)) >= threshold
+        return report_passes(self.validation, threshold)
 
     @property
     def validation_ok(self) -> bool | None:
