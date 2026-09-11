@@ -129,7 +129,7 @@ async def test_edited_by_survives_promote_and_filters(crawler_client):
     only_mixed = (await c.get("/collections/ex.org?tab=urls&set=curated&edited=mixed")).text
     assert "https://ex.org/p2" in only_mixed and "https://ex.org/p4" not in only_mixed
     csv = (await c.get("/collections/ex.org/urls/curated?format=csv&edited=ai")).text.splitlines()
-    assert csv[0].endswith("edited_by") and len(csv) == 7
+    assert "edited_by" in csv[0] and len(csv) == 7
     # rows promoted without a value (or re-attributed rules) are fixed up by the next recompute, no delta needed
     db = c.app.state.db
     await db.execute("UPDATE curated_urls SET edited_by=NULL WHERE collection_id='ex.org'")

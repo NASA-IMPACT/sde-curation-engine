@@ -52,7 +52,7 @@
   </div>
 
 {% elif step == 'curating' %}
-  <dl class="meta"><dt>Delta URLs</dt><dd>{{ c.delta_count }} ({{ stats.delta_counts.new }} new, {{ stats.delta_counts.modified }} modified, {{ stats.delta_counts.deleted }} removed, {{ stats.delta_counts.excluded }} excluded)</dd>
+  <dl class="meta"><dt>Delta URLs</dt><dd>{{ c.delta_count }} ({{ stats.delta_counts.new }} new, {{ stats.delta_counts.modified }} modified{% if stats.delta_counts.renamed %} incl. {{ stats.delta_counts.renamed }} renamed{% endif %}, {{ stats.delta_counts.deleted }} removed, {{ stats.delta_counts.excluded }} excluded{% if stats.delta_counts.kept %}; {{ stats.delta_counts.kept }} curated kept — not fetched by the last crawl{% endif %})</dd>
       <dt>Patterns</dt><dd>{{ stats.pattern_count }}</dd></dl>
   <div class="inline">
     {% if info.state == 'todo' %}

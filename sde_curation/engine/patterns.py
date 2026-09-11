@@ -1,7 +1,9 @@
 """Pattern resolution — pure functions, no I/O.
 
 Semantics (from COSMOS README_PATTERN_* specs, as distilled in docs/plan.md):
-  * match: exact URL, or glob where `*` matches anything (converted to a regex)
+  * match: exact URL, or glob where `*` matches anything (converted to a regex). An exact URL
+    matches every spelling of that page (http/https, trailing slash, #fragment — the canonical
+    key in engine/urls.py): a per-URL edit survives the page moving to https.
   * exclude/include: a URL is excluded iff some exclude pattern matches AND no include matches
   * field patterns (title / division / document_type): the winner is the pattern with the
     smallest match set ("most specific"); ties broken by the longest pattern string
@@ -18,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..models import Pattern, PatternType
+from .urls import canonical_key
 
 FIELD_TYPES = (PatternType.TITLE, PatternType.DIVISION, PatternType.DOCUMENT_TYPE)
 
@@ -61,14 +64,17 @@ def is_exact(match: str) -> bool:
 
 
 def compile_patterns(patterns: list[Pattern], urls: list[str]) -> list[Compiled]:
-    """An exact match (no `*`) is a set lookup, not a regex scan: per-URL edits and accepted
-    per-URL AI suggestions are exact patterns, and there can be as many of them as URLs."""
-    url_set = set(urls)
+    """An exact match (no `*`) is a dict lookup by canonical key, not a regex scan: per-URL edits
+    and accepted per-URL AI suggestions are exact patterns, and there can be as many of them as
+    URLs. It matches every spelling of its page that the dump has."""
+    by_key: dict[str, list[str]] = {}
+    for u in urls:
+        by_key.setdefault(canonical_key(u), []).append(u)
     out = []
     for p in patterns:
         c = Compiled(p, glob_to_regex(p.match))
         if is_exact(p.match):
-            c.matches = {p.match} if p.match in url_set else set()
+            c.matches = set(by_key.get(canonical_key(p.match), ()))
         else:
             c.matches = {u for u in urls if c.regex.match(u)}
         out.append(c)
@@ -90,9 +96,12 @@ def resolve_all(
     excluded: dict[str, int] = {}
     included: dict[str, int] = {}
     per_field: dict[str, list[Compiled]] = {t: [] for t in FIELD_TYPES}
-    # exact patterns always win (match set of size 1 = most specific; unique per type+match),
-    # so they are resolved by dict lookup instead of scanning the glob list per URL
+    # exact patterns always win (the smallest possible match set = most specific), so they are
+    # resolved by dict lookup on (type, canonical key) instead of scanning the glob list per URL.
+    # Two exact rules for different spellings of one page: the newest (highest id) wins — the
+    # curator's latest edit of that row.
     exact: dict[tuple[str, str], Compiled] = {}
+    key_of = {u: canonical_key(u) for u in urls}
     for c in compiled:
         if c.pattern.type is PatternType.EXCLUDE:
             for u in c.matches:
@@ -102,7 +111,9 @@ def resolve_all(
                 included.setdefault(u, c.pattern.id)  # type: ignore[arg-type]
         elif is_exact(c.pattern.match):
             if c.matches:
-                exact[(c.pattern.type, c.pattern.match)] = c
+                k = (c.pattern.type, canonical_key(c.pattern.match))
+                if k not in exact or (c.pattern.id or 0) > (exact[k].pattern.id or 0):
+                    exact[k] = c
         else:
             per_field[c.pattern.type].append(c)
 
@@ -117,7 +128,7 @@ def resolve_all(
             r.effects["excluded"] = included.get(u, excluded[u])
         b = base.get(u, {})
         for t in FIELD_TYPES:
-            winner = exact.get((t, u)) or next((c for c in per_field[t] if u in c.matches), None)
+            winner = exact.get((t, key_of[u])) or next((c for c in per_field[t] if u in c.matches), None)
             if winner is None:
                 value = b.get(t)
             else:

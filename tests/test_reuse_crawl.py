@@ -63,7 +63,7 @@ async def test_ssm_existing_and_fetch(ssm_env, tmp_path):  # noqa: F811
     res = await s.fetch_existing(COLL, cb)
     assert seen == [{"reused": True}] and res.crawled_at == ex.modified and res.external_ref == "reused"
     assert json.loads(res.documents_path.read_text())[0]["url"] == "https://ex.org/a"
-    assert res.summary["documents_scraped"] == 1
+    assert res.summary["documents_scraped"] == 1 and res.failures_path is None  # no failures log uploaded
     assert s.ssm.commands == []  # no SSM command was issued
 
 
@@ -80,6 +80,8 @@ async def test_ssm_reads_from_the_configured_bucket_folder(ssm_env, tmp_path):  
                   Body=json.dumps([{"url": "https://ex.org/a", "title": "A", "full_text": "t"}]))
     s3.put_object(Bucket="crawl-bkt", Key="sde-curation-engine-prototype/failure_logs/ex.org_failures_summary.json",
                   Body=json.dumps({"documents_scraped": 1}))
+    s3.put_object(Bucket="crawl-bkt", Key="sde-curation-engine-prototype/failure_logs/ex.org_failures.jsonl",
+                  Body='{"url": "https://ex.org/b", "reason": "http_403", "status": 403}\n')
     ex = await s.existing(COLL)
     assert ex and ex.where == "s3://crawl-bkt/sde-curation-engine-prototype/scraped_collections/ex.org.json"
 
@@ -89,3 +91,4 @@ async def test_ssm_reads_from_the_configured_bucket_folder(ssm_env, tmp_path):  
     res = await s.fetch_existing(COLL, cb)
     assert json.loads(res.documents_path.read_text())[0]["url"] == "https://ex.org/a"
     assert res.summary == {"documents_scraped": 1}
+    assert [f["url"] for f in res.failures()] == ["https://ex.org/b"]  # the failures log rides along

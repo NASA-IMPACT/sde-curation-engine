@@ -35,7 +35,7 @@ async def test_hash_flows_from_dump_to_curated_and_flags_changed_text(crawler_cl
         rows.append(DumpUrl(collection_id=CID, url=d.url, scraped_title=d.scraped_title, full_text=text))
     await db.replace_dump(CID, rows)
     r = await c.post(f"/api/collections/{CID}/recompute")
-    assert r.json() == {"new": 0, "modified": 1, "deleted": 0, "excluded": 0, "content_changed": 1}
+    assert r.json() == {"new": 0, "modified": 1, "deleted": 0, "excluded": 0, "content_changed": 1, "renamed": 0, "kept": 0}
 
     r = await c.get(f"/api/collections/{CID}/deltas?content_changed=true")
     assert r.json()["total"] == 1 and r.json()["items"][0]["url"].endswith("/p2")

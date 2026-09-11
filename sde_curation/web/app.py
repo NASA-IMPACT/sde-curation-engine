@@ -28,6 +28,8 @@ from ..backends.scrape import make_scrape_backend
 from ..config import Settings, get_settings
 from ..curation import CurationService
 from ..db import SOURCE_LABEL, ConflictError, Database
+from ..engine.patterns import is_exact
+from ..engine.urls import canonical_key
 from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
 from ..llm.base import LLMError, make_llm
@@ -35,6 +37,7 @@ from ..llm.global_excludes import load_global_excludes
 from ..llm.tasks import METADATA_SYSTEM, PATTERN_SYSTEM
 from ..models import (
     ANONYMOUS_ACTOR,
+    NOT_VISITED,
     Collection,
     CollectionCreate,
     CurationStage,
@@ -235,6 +238,22 @@ def llm_prompts(settings: Settings) -> dict[str, dict[str, str]]:
                      f"<the FULL page text, never cut; every page goes to {settings.openai_model}>"),
         },
     }
+
+
+def failure_label(reason: str | None) -> str:
+    """The crawler's reason code as the curator reads it."""
+    if not reason:
+        return "never seen by the crawl"
+    if reason == NOT_VISITED:
+        return "not visited: the crawl stopped at its page cap"
+    if reason.startswith("challenge"):
+        return "bot-challenge page instead of content"
+    return {
+        "http_404": "HTTP 404 not found", "http_410": "HTTP 410 gone", "http_403": "HTTP 403 forbidden",
+        "http_auth": "authentication required", "http_rate_limit": "rate limited (429/503)",
+        "crawl_unsuccessful": "fetch failed (timeout / connection)", "empty_extract": "page had no text",
+        "extract_error": "text extraction failed", "download_error": "file download failed",
+    }.get(reason, reason.replace("_", " "))
 
 
 def tri_bool(v: str | None) -> bool | None:
@@ -513,6 +532,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             per = 50
         return {
             "q": (qp.get("q") or "").strip() or None, "kind": qp.get("kind") or None,
+            "renamed": "true" if qp.get("renamed") == "true" else None,
+            "unreachable": "true" if qp.get("unreachable") == "true" else None,
             "excluded": tri_bool(qp.get("excluded")), "division": qp.get("division") or None,
             "document_type": qp.get("document_type") or None, "page": page, "per": per,
             "ai": qp.get("ai") if qp.get("ai") in ("pending", "high", "medium", "low") else None,
@@ -529,7 +550,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         elif set_ == "curated":
             rows, total = await d.list_curated(
                 c.collection_id, limit=lp["per"], offset=off, q=lp["q"], excluded=lp["excluded"],
-                edited=lp["edited"],
+                edited=lp["edited"], unreachable=True if lp["unreachable"] else None,
             )
             has_delta = await d.urls_with_deltas(c.collection_id, [r.url for r in rows])
         else:
@@ -538,7 +559,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending",
                 ai_conf=lp["ai"] if lp["ai"] in ("high", "medium", "low") else None,
                 content_changed=True if lp["changed"] else None, edited=lp["edited"],
-                limit=lp["per"], offset=off,
+                renamed=True if lp["renamed"] else None, limit=lp["per"], offset=off,
             )
         # every row can be edited in place, so every table explains which rule set what
         effects = await d.effects_for(c.collection_id, [r["url"] if isinstance(r, dict) else r.url for r in rows])
@@ -547,6 +568,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "effects": effects, "has_delta": has_delta, "divisions": list(Division),
             "doc_types": list(DocumentType), "kinds": ["new", "modified", "deleted"],
             "edited_values": list(EditedBy), "source_label": SOURCE_LABEL,
+            "failure_label": failure_label,
         }
 
     async def tab_context(request: Request, c: Collection, tab: str) -> dict[str, Any]:
@@ -578,6 +600,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     " promoting removes them from the curated URLs and the next index run deletes them.")
         return None
 
+    def crawl_warning(c: Collection, dc: dict[str, int]) -> str | None:
+        """Curated URLs the last crawl could not vouch for are kept as they are, not removed; say
+        so, and why, before the curator wonders where the removals went."""
+        kept = dc.get("kept", 0)
+        if not kept:
+            return None
+        if c.last_crawl_capped:
+            return (f"The last crawl stopped at its page cap ({c.max_pages:,} pages), so {kept} curated URL"
+                    f"{'s' if kept != 1 else ''} it never reached {'are' if kept != 1 else 'is'} kept unchanged"
+                    " (not removed). Raise the cap and re-scrape to review them.")
+        return (f"{kept} curated URL{'s' if kept != 1 else ''} could not be fetched by the last crawl"
+                " (blocked, timed out, challenge page …) and are kept unchanged, not removed. The index keeps"
+                " their last approved text; re-scrape later to check them again.")
+
     async def curate_context(request: Request, c: Collection) -> dict[str, Any]:
         """The guided workspace: ① exclusions (suggested exclude rules) → ② metadata (AI per URL) → ③ promote."""
         d = db(request)
@@ -603,6 +639,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "pattern_calls": -(-candidates // settings.llm_pattern_batch_urls) if candidates else 0,
             "pattern_batch": settings.llm_pattern_batch_urls,
             "removal_warning": removal_warning(c, step["stats"]["delta_counts"]),
+            "crawl_warning": crawl_warning(c, step["stats"]["delta_counts"]),
             "global_excludes": len(load_global_excludes(settings.global_excludes_path).patterns),
             "llm_name": settings.llm_provider, "divisions": list(Division), "doc_types": list(DocumentType),
             "pattern_types": list(PatternType),
@@ -667,19 +704,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             data = [[r[k] for k in cols] for r in rows]
         elif set_ == "curated":
             rows, _ = await d.list_curated(c.collection_id, limit=1_000_000, q=lp["q"], excluded=lp["excluded"],
-                                           edited=lp["edited"])
-            cols = ["url", "excluded", "scraped_title", "title", "division", "document_type", "text_len", "edited_by"]
+                                           edited=lp["edited"], unreachable=True if lp["unreachable"] else None)
+            cols = ["url", "excluded", "scraped_title", "title", "division", "document_type", "text_len", "edited_by",
+                    "crawl_failure"]
             data = [[getattr(r, k) for k in cols] for r in rows]
         else:
             rows, _ = await d.list_deltas(
                 c.collection_id, kind=lp["kind"], excluded=lp["excluded"], q=lp["q"],
                 division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending",
                 ai_conf=lp["ai"] if lp["ai"] in ("high", "medium", "low") else None,
-                content_changed=True if lp["changed"] else None, edited=lp["edited"], limit=1_000_000,
+                content_changed=True if lp["changed"] else None, edited=lp["edited"],
+                renamed=True if lp["renamed"] else None, limit=1_000_000,
             )
             cols = ["kind", "url", "excluded", "content_changed", "edited_by", "scraped_title", "title", "division",
                     "document_type", "title_ai", "title_ai_conf", "division_ai", "division_ai_conf",
-                    "document_type_ai", "document_type_ai_conf", "ai_model"]
+                    "document_type_ai", "document_type_ai_conf", "ai_model", "renamed_from", "crawl_failure"]
             data = [[getattr(r, k) for k in cols] for r in rows]
         buf = io.StringIO()
         w = csv.writer(buf); w.writerow(cols); w.writerows(data)
@@ -692,13 +731,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         d = db(request)
         jobs = await d.list_jobs(c.collection_id, limit=20)
         _, total = await d.list_deltas(c.collection_id, limit=1)
-        counts = {"new": 0, "modified": 0, "deleted": 0, "excluded": 0, "content_changed": 0}
+        counts = {"new": 0, "modified": 0, "deleted": 0, "excluded": 0, "content_changed": 0, "renamed": 0,
+                  "kept": 0}
         if total:
             for k in ("new", "modified", "deleted"):
                 counts[k] = (await d.list_deltas(c.collection_id, kind=k, limit=1))[1]
             counts["excluded"] = (await d.list_deltas(c.collection_id, excluded=True, limit=1))[1]
             counts["content_changed"] = (await d.list_deltas(c.collection_id, content_changed=True, limit=1))[1]
+            counts["renamed"] = (await d.list_deltas(c.collection_id, renamed=True, limit=1))[1]
         curated = await d.load_curated(c.collection_id) if c.curated_count else []
+        counts["kept"] = sum(1 for r in curated if r.crawl_failure)
         runs = await d.list_index_runs(c.collection_id, limit=5)
         failed = jobs[0] if jobs and jobs[0].state == "failed" else None
         stats = {
@@ -993,8 +1035,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Curator edit on one URL: exact-match pattern. Repeating an exclude/include removes it."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
+        # an exact rule matches every spelling of its page, so find it under any spelling
+        key = canonical_key(body.url)
         existing = [p for p in await db(request).list_patterns(collection_id)
-                    if p.match == body.url and p.type == body.type]
+                    if p.type == body.type and is_exact(p.match) and canonical_key(p.match) == key]
         if existing and body.type in (PatternType.EXCLUDE, PatternType.INCLUDE):
             ds = await curation(request).delete_pattern(c, existing[0].id)
         elif existing and existing[0].value == body.value:
@@ -1014,12 +1058,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_deltas(
         request: Request, collection_id: str, kind: str | None = None,
         excluded: str | None = None, q: str | None = None, content_changed: str | None = None,
-        limit: int = 100, offset: int = 0,
+        renamed: str | None = None, limit: int = 100, offset: int = 0,
     ):
         await must_get(request, collection_id)
         rows, total = await db(request).list_deltas(
             collection_id, kind=kind or None, excluded=tri_bool(excluded), q=q or None,
-            content_changed=tri_bool(content_changed), limit=max(1, min(limit, 1000)), offset=max(0, offset),
+            content_changed=tri_bool(content_changed), renamed=tri_bool(renamed),
+            limit=max(1, min(limit, 1000)), offset=max(0, offset),
         )
         return {"total": total, "items": rows}
 

@@ -111,9 +111,9 @@ def test_v2_backfills_curated_text_from_the_dump(pg_url):
         conn.execute("INSERT INTO dump_urls (collection_id,url,full_text) VALUES ('c','https://c/a','body a')")
         conn.execute("INSERT INTO curated_urls (collection_id,url) VALUES ('c','https://c/a'), ('c','https://c/gone')")
         try:
-            assert migrate_sync(conn) == 2
+            assert migrate_sync(conn) == 3
             rows = dict(conn.execute("SELECT url, full_text FROM curated_urls ORDER BY url").fetchall())
             assert rows == {"https://c/a": "body a", "https://c/gone": None}
-            assert migrate_sync(conn) == 2
+            assert migrate_sync(conn) == 3
         finally:
             conn.execute("DROP SCHEMA mig CASCADE")

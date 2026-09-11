@@ -133,6 +133,27 @@ On the next re-scrape a page whose text changed shows as *modified* with a **tex
 Suggest metadata re-classifies it. Rows promoted before hashing existed have no hash and compare as
 unchanged, so the first run after an upgrade does not flag everything.
 
+**URL identity**: a page is the same page under `http` and `https`, with or without a trailing
+slash, with or without a `#fragment` (`engine/urls.py` `canonical_key`: host + path + query).
+Dump and curated rows are paired by exact string first, then by that key, so a site moving to
+https (or a crawler that now drops the slash) produces one *modified* delta per page with a
+**renamed** badge and `renamed_from` (filter: *URL spelling changed*), not a new row plus a
+removal; promote moves the row and its metadata. Exact-URL rules (per-URL edits, accepted AI
+suggestions) match by the same key, so a title or exclusion set under one spelling follows the
+page; a per-URL edit under a new spelling replaces the rule written under the old one.
+
+**Crawl failures are not deletions**: the scrape also ingests the crawler's failures log
+(`dump_failures`: URL, reason, HTTP status) and whether the crawl stopped at its page cap
+(`collections.last_crawl_capped`). A curated URL missing from the dump becomes a *removed* delta
+only when the crawl is evidence it is gone — HTTP 404/410, or never met in a complete crawl
+(the delta says which). A URL the crawler tried and could not fetch (403, rate limit, timeout,
+challenge page, empty extract …) stays in the curated set, flagged **kept** with the reason
+(`curated_urls.crawl_failure`; filter *not fetched by the last crawl*); when the crawl was
+capped, every unmet curated URL stays too (`not_visited`). Kept rows keep the text the index
+holds for them and export as before; the flag comes down when a crawl fetches the page again.
+The Curate tab counts them ("N kept") and explains why. Dumps ingested before this landed have
+no failures log, so their next recompute treats absence as before (removed).
+
 ### Indexing (Phase 5)
 **Index to test** exports the curated, non-excluded URLs, each with the text it was approved
 with, as the indexer's contract —
@@ -313,7 +334,7 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `POST …/recompute` | diff dump vs curated + apply patterns (idempotent) |
 | `GET/POST /…/patterns`, `DELETE …/patterns/{pid}` | pattern CRUD with match counts |
 | `POST …/urls` | per-URL edit `{url, type, value?}`; exclude/include toggles |
-| `GET …/dump?q`, `…/delta?kind&excluded&division&document_type&q&edited&limit&offset` (`…/deltas` still works), `…/curated?q&excluded&edited` | the three URL sets, paginated |
+| `GET …/dump?q`, `…/delta?kind&excluded&division&document_type&q&edited&renamed&limit&offset` (`…/deltas` still works), `…/curated?q&excluded&edited&unreachable` | the three URL sets, paginated |
 | `GET /collections/{id}/urls/{dump\|delta\|curated}?format=csv&…` | CSV export of the filtered set |
 | `POST …/promote` | delta URLs → curated URLs; status `curated` |
 | `POST …/index?target=test\|prod` | export to S3 + dispatch WEB_COSMOS → job (202; 409 unless curated, no delta URLs, something to export; prod needs a validated test run) |

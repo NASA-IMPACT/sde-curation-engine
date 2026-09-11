@@ -193,12 +193,30 @@ UPDATE curated_urls c SET full_text = d.full_text
   FROM dump_urls d WHERE d.collection_id = c.collection_id AND d.url = c.url;
 """
 
-MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2)]
+# V3: URL identity and crawl failures in the diff — a delta may rename a curated row (same page,
+# new spelling), tombstones carry the crawler's reason, curated rows the crawl could not fetch
+# are kept and flagged, and the dump remembers what the crawler failed on and whether it was capped.
+V3 = """
+CREATE TABLE dump_failures (
+  collection_id text NOT NULL REFERENCES collections(collection_id) ON DELETE CASCADE,
+  url text NOT NULL,
+  reason text NOT NULL,
+  status integer,
+  detail text,
+  PRIMARY KEY (collection_id, url)
+);
+ALTER TABLE delta_urls ADD COLUMN renamed_from text;
+ALTER TABLE delta_urls ADD COLUMN crawl_failure text;
+ALTER TABLE curated_urls ADD COLUMN crawl_failure text;
+ALTER TABLE collections ADD COLUMN last_crawl_capped boolean NOT NULL DEFAULT false;
+"""
+
+MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).
 TABLES = (
-    "collections", "status_history", "dump_urls", "delta_urls", "curated_urls", "patterns",
+    "collections", "status_history", "dump_urls", "dump_failures", "delta_urls", "curated_urls", "patterns",
     "pattern_effects", "pattern_suggestions", "index_runs", "job_runs", "users", "audit_log",
 )
 

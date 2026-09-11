@@ -151,7 +151,7 @@
 <dl class="defs">
   <dt>Overview</dt><dd>The clickable pipeline with a panel per step, details, the last job, and Advanced (Re-scrape, manual status override, Delete for admins).</dd>
   <dt>Curate</dt><dd>Exclusions, Metadata, Promote, in the order you work them, with the full rules table underneath.</dd>
-  <dt>URLs</dt><dd>Three sets: Dump URLs, Delta URLs, Curated URLs. Search, filter by change kind, exclusion, division, type, AI confidence, and text changed. Download the filtered rows as CSV.</dd>
+  <dt>URLs</dt><dd>Three sets: Dump URLs, Delta URLs, Curated URLs. Search, filter by change kind, exclusion, division, type, AI confidence, text changed, and URL spelling changed (<b>renamed</b>: the same page under http/https, with or without a trailing slash or #fragment — one modified delta, not a new row plus a removal). A curated URL the last crawl could not fetch (403, timeout, challenge page) or never reached (page cap) is <b>kept</b>, not removed; filter <i>not fetched by the last crawl</i> to see them. A <b>removed</b> delta says why: HTTP 404, or never seen by a complete crawl. Download the filtered rows as CSV.</dd>
   <dt>Activity</dt><dd>Every job, the status history, and the audit trail.</dd>
 </dl>
 <figure><img src="{{ static_url('manual/04-urls-crawl.png') }}" alt="URLs tab, Dump URLs set: the raw crawl with title, content type, depth, text size and state per URL, read-only">

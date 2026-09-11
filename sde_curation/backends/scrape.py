@@ -1,7 +1,8 @@
 """Scrape backends: run the crawl4ai scraper locally (subprocess) or remotely (EC2 via SSM).
 
 Both produce the same thing: a path to the crawler's documents JSON
-(array of {url,title,full_text,content_type,seed,host,depth}) plus the failure summary.
+(array of {url,title,full_text,content_type,seed,host,depth}), the failures JSONL
+(one {url,reason,status,detail,…} per URL the crawler could not fetch) and the failure summary.
 """
 
 from __future__ import annotations
@@ -38,6 +39,16 @@ class ScrapeResult:
     summary: dict[str, Any] = field(default_factory=dict)
     external_ref: str | None = None
     crawled_at: datetime | None = None  # when the documents were produced (reused crawls); None = now
+    failures_path: Path | None = None  # the crawler's failures JSONL, when it produced one
+
+    def failures(self) -> list[dict[str, Any]]:
+        return parse_failures(self.failures_path) if self.failures_path and self.failures_path.is_file() else []
+
+    def capped(self, documents: int, fallback_max_pages: int | None = None) -> bool:
+        """Did the crawl stop at its page cap? The summary knows the cap the crawler ran with;
+        without a summary (local runs that died before writing one) fall back to the job's."""
+        cap = self.summary.get("max_pages") or fallback_max_pages
+        return bool(cap) and documents >= int(cap)
 
 
 @dataclass
@@ -119,6 +130,23 @@ def parse_documents(path: Path) -> list[dict[str, Any]]:
     return data
 
 
+def parse_failures(path: Path) -> list[dict[str, Any]]:
+    """The crawler's failures JSONL: one object per line; a bad line is skipped, not fatal
+    (the file is a log, and losing one record only turns a kept row into a removal)."""
+    out: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict) and rec.get("url") and rec.get("reason"):
+            out.append(rec)
+    return out
+
+
 # ── local subprocess ───────────────────────────────────────────────────
 
 
@@ -135,6 +163,7 @@ class LocalSubprocessScraper:
             "job": self.s.data_dir / "scrape_jobs" / f"{collection_id}.json",
             "log": self.root / "logs" / "jobs" / f"{collection_id}.log",
             "docs": self.root / "output" / "collections" / f"{collection_id}.json",
+            "failures": self.root / "logs" / "collections" / f"{collection_id}_failures.jsonl",
             "summary": self.root / "logs" / "collections" / f"{collection_id}_failures_summary.json",
         }
 
@@ -154,7 +183,8 @@ class LocalSubprocessScraper:
         summary: dict[str, Any] = {}
         if p["summary"].is_file():
             summary = json.loads(p["summary"].read_text(encoding="utf-8"))
-        return ScrapeResult(documents_path=p["docs"], summary=summary, external_ref="reused", crawled_at=ex.modified)
+        return ScrapeResult(documents_path=p["docs"], summary=summary, external_ref="reused", crawled_at=ex.modified,
+                            failures_path=p["failures"])
 
     async def run(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult:
         if not (self.root / "run.py").is_file():
@@ -168,6 +198,7 @@ class LocalSubprocessScraper:
         # run.py truncates the log on start; remove stale outputs so we never ingest an old crawl
         p["docs"].unlink(missing_ok=True)
         p["log"].unlink(missing_ok=True)
+        p["failures"].unlink(missing_ok=True)
 
         cmd = [str(self.python), "run.py", "--job", str(p["job"])]
         if self.s.crawler_s3_bucket:
@@ -203,7 +234,8 @@ class LocalSubprocessScraper:
         summary: dict[str, Any] = {}
         if p["summary"].is_file():
             summary = json.loads(p["summary"].read_text(encoding="utf-8"))
-        return ScrapeResult(documents_path=p["docs"], summary=summary, external_ref=str(proc.pid))
+        return ScrapeResult(documents_path=p["docs"], summary=summary, external_ref=str(proc.pid),
+                            failures_path=p["failures"])
 
     async def _tail(self, log: Path, on_progress: ProgressCb, proc: asyncio.subprocess.Process) -> None:
         """Poll the crawler's job log and push progress snapshots when they change."""
@@ -381,7 +413,9 @@ class SsmRemoteScraper:
 
     async def _download(self, cid: str) -> ScrapeResult:
         docs_key, summary_key = self._docs_key(cid), self._key(f"failure_logs/{cid}_failures_summary.json")
+        failures_key = self._key(f"failure_logs/{cid}_failures.jsonl")
         local = self.s.data_dir / "scrapes" / f"{cid}.json"
+        local_failures = local.with_name(f"{cid}_failures.jsonl")
         local.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(
             self.s3.download_file, self.s.crawler_s3_bucket, docs_key, str(local)
@@ -394,7 +428,15 @@ class SsmRemoteScraper:
             summary = json.loads(obj["Body"].read())
         except self.s3.exceptions.ClientError:
             pass
-        return ScrapeResult(documents_path=local, summary=summary)
+        local_failures.unlink(missing_ok=True)  # never pair a new dump with an older crawl's failures
+        try:
+            await asyncio.to_thread(
+                self.s3.download_file, self.s.crawler_s3_bucket, failures_key, str(local_failures)
+            )
+        except self.s3.exceptions.ClientError:
+            pass
+        return ScrapeResult(documents_path=local, summary=summary,
+                            failures_path=local_failures if local_failures.is_file() else None)
 
     async def _poll(self, cid: str) -> RemotePoll | None:
         status, out = await self._invocation(await self._send(self.poll_script(cid)))

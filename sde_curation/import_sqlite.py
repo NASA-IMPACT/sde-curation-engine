@@ -37,6 +37,9 @@ TS_COLS = {
 }
 JSON_COLS = {("index_runs", "status"), ("index_runs", "validation"), ("job_runs", "progress")}
 IDENTITY_TABLES = ("status_history", "patterns", "pattern_suggestions", "job_runs", "users", "audit_log")
+# Tables that only ever existed in PostgreSQL: nothing to copy, and their absence from the source is fine.
+PG_ONLY_TABLES = {"dump_failures"}
+SQLITE_TABLES = tuple(t for t in TABLES if t not in PG_ONLY_TABLES)
 
 # Columns the last SQLite release added at boot. A file without them was never opened by that
 # release; the importer does not replay ALTERs, so ask for a boot on the old version first.
@@ -100,10 +103,10 @@ def _convert(table: str, col: str, v: Any) -> Any:
 
 def _source_columns(src: sqlite3.Connection) -> dict[str, list[str]]:
     have = {r[0] for r in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    missing = [t for t in TABLES if t not in have]
+    missing = [t for t in SQLITE_TABLES if t not in have]
     if missing:
         raise ImportError_(f"source has no table(s) {missing}: it was never opened by the last SQLite release")
-    cols = {t: [r[1] for r in src.execute(f"PRAGMA table_info({t})")] for t in TABLES}
+    cols = {t: [r[1] for r in src.execute(f"PRAGMA table_info({t})")] for t in SQLITE_TABLES}
     for t, needed in REQUIRED_COLS.items():
         lacking = needed - set(cols[t])
         if lacking:
@@ -134,7 +137,7 @@ def run(sqlite_path: str | Path, dsn: str, *, replace: bool = False,
                 if existing:
                     pg.execute(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE")
                     log(f"truncated {existing} existing rows")
-                for t in TABLES:
+                for t in SQLITE_TABLES:
                     pg_cols = [r[0] for r in pg.execute(
                         "SELECT column_name FROM information_schema.columns WHERE table_schema='public'"
                         " AND table_name=%s ORDER BY ordinal_position", (t,))]
