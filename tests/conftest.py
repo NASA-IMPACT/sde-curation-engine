@@ -142,6 +142,11 @@ FAKE_RUN_PY = textwrap.dedent(
         {"url": f"{job['seed']}/p{i}", "title": f"Page {i}", "full_text": "text " * 5, "content_type": "text/html", "depth": 0}
         for i in range(1, n + 1) if i % 5
     ]))
+    fails = ROOT / "logs" / "collections" / f"{cid}_failures.jsonl"; fails.parent.mkdir(parents=True, exist_ok=True)
+    with fails.open("w") as out:  # p5 is gone (404); every later failure is a 403
+        for i in range(5, n + 1, 5):
+            out.write(json.dumps({"url": f"{job['seed']}/p{i}", "reason": "http_404" if i == 5 else "http_403",
+                                  "status": 404 if i == 5 else 403, "detail": "HTTP", "title": ""}) + "\\n")
     """
 )
 
@@ -159,7 +164,8 @@ def _crawler_app(tmp_path, **extra):
 @pytest.fixture
 async def crawler_client(tmp_path):
     """App wired to a fake crawl4ai `run.py` (see FAKE_RUN_PY): max_pages=13 simulates a crash,
-    every 5th page fails, the rest succeed."""
+    every 5th page fails (p5 with a 404, the others with a 403 — logged to the failures JSONL),
+    the rest succeed."""
     app = _crawler_app(tmp_path)
     async with (
         app.router.lifespan_context(app),

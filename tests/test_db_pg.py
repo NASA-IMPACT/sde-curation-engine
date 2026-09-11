@@ -91,3 +91,29 @@ async def test_health_and_raw_helpers(db):
     assert await db.execute("UPDATE collections SET name=%s WHERE collection_id=%s", ("renamed", "c1")) == 1
     assert (await db.fetch("SELECT name FROM collections"))[0]["name"] == "renamed"
     assert await db.fetchval("SELECT 1 WHERE false") is None
+
+
+def test_v2_backfills_curated_text_from_the_dump(pg_url):
+    """Upgrading a v1 database: curated rows take the dump text (what the export shipped for them),
+    a curated URL the dump no longer has stays NULL, and re-running migrations is a no-op."""
+    import psycopg
+
+    from sde_curation.schema import MIGRATIONS, migrate_sync
+
+    v1 = dict(MIGRATIONS)[1]
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS mig CASCADE; CREATE SCHEMA mig; SET search_path TO mig")
+        conn.execute(v1)
+        conn.execute("CREATE TABLE schema_version (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())")
+        conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+        conn.execute("INSERT INTO collections (collection_id,name,seed_url,division,connector,max_pages,status,created_at,updated_at)"
+                     " VALUES ('c','C','https://c','Earth Science','crawler2',10,'curated',now(),now())")
+        conn.execute("INSERT INTO dump_urls (collection_id,url,full_text) VALUES ('c','https://c/a','body a')")
+        conn.execute("INSERT INTO curated_urls (collection_id,url) VALUES ('c','https://c/a'), ('c','https://c/gone')")
+        try:
+            assert migrate_sync(conn) == 3
+            rows = dict(conn.execute("SELECT url, full_text FROM curated_urls ORDER BY url").fetchall())
+            assert rows == {"https://c/a": "body a", "https://c/gone": None}
+            assert migrate_sync(conn) == 3
+        finally:
+            conn.execute("DROP SCHEMA mig CASCADE")

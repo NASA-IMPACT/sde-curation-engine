@@ -1,6 +1,7 @@
-"""URL normalisation for the pattern job — pure. The same page is usually crawled as http and
-https and with or without a trailing slash; the model should see each page once, and batches
-should be coherent site sections, so URLs are keyed by host + path and sorted by path."""
+"""URL normalisation — pure. The same page is usually crawled as http and https, with or without
+a trailing slash, sometimes with a #fragment. `canonical_key` is the engine's notion of "the same
+page": the diff pairs dump and curated rows by it (engine/diff.py), exact-URL rules match by it
+(engine/patterns.py), and the pattern job shows the model each page once, in site-section order."""
 
 from __future__ import annotations
 
@@ -25,12 +26,13 @@ def dedupe_variants(urls: Iterable[str]) -> list[str]:
     for u in urls:
         k = canonical_key(u)
         cur = best.get(k)
-        if cur is None or _rank(u) < _rank(cur):
+        if cur is None or url_rank(u) < url_rank(cur):
             best[k] = u
     return [best[k] for k in sorted(best)]
 
 
-def _rank(url: str) -> tuple[int, int]:
+def url_rank(url: str) -> tuple[int, int]:
+    """Lower is the preferred spelling of a page: https first, then the shorter string."""
     return (0 if url.startswith("https://") else 1, len(url))
 
 

@@ -221,6 +221,7 @@ class Collection(BaseModel):
     needs_recuration: bool = False
     recuration_reason: str | None = None  # why the flag is up (re-crawl / validation failure)
     last_scraped_at: datetime | None = None  # when the current dump was crawled (or loaded)
+    last_crawl_capped: bool = False  # the current dump stopped at max_pages: absence is not evidence
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     last_run_id: str | None = None  # most recent index run (test or prod)
@@ -265,10 +266,35 @@ class DumpUrl(BaseModel):
     content_hash: str | None = None  # sha256 of the normalised full_text (None = empty/unknown)
 
 
+class DumpFailure(BaseModel):
+    """One URL the crawler tried and could not turn into a document (its failures JSONL)."""
+
+    collection_id: str
+    url: str
+    reason: str  # crawler reason code: http_404, http_403, http_rate_limit, crawl_unsuccessful, challenge_…, …
+    status: int | None = None  # HTTP status when there was one
+    detail: str | None = None
+
+
+# Crawler failure reasons that mean the page is gone, not merely unreachable this time.
+GONE_REASONS = frozenset({"http_404", "http_410"})
+# Pseudo-reason for a curated URL a capped crawl never got to (no failure record either).
+NOT_VISITED = "not_visited"
+
+
+def failure_means_gone(reason: str | None) -> bool:
+    return reason in GONE_REASONS
+
+
 class DeltaUrl(BaseModel):
     collection_id: str
     url: str
     kind: DeltaKind
+    # the curated row this delta replaces when only the URL spelling changed (scheme, trailing
+    # slash, #fragment): promote drops that row and writes this URL in its place
+    renamed_from: str | None = None
+    # tombstones only: the crawler's reason (http_404 …) or None when the crawl simply never saw the URL
+    crawl_failure: str | None = None
     scraped_title: str | None = None
     title: str | None = None
     division: Division | None = None
@@ -296,7 +322,14 @@ class CuratedUrl(BaseModel):
     document_type: DocumentType | None = None
     excluded: bool = False
     content_hash: str | None = None  # hash of the text that was promoted (NULL = before hashing existed)
+    full_text: str | None = None  # the text the row was approved with (promote copies it from the dump);
+    # the export ships this, never the dump. Listing queries leave it out and fill `text_len`.
+    text_len: int | None = None
     edited_by: EditedBy | None = None  # carried over from the delta row at promote time
+    # set by recompute: the current dump lacks this URL but the crawl does not prove it gone
+    # (http_403, timeout, challenge page, or `not_visited` when the crawl hit its page cap), so the
+    # row is kept as it is instead of becoming a removal; None once a crawl fetches it again
+    crawl_failure: str | None = None
 
 
 # ── patterns ───────────────────────────────────────────────────────────

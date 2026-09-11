@@ -31,7 +31,7 @@ def test_new_modified_deleted_unchanged():
     assert by["https://x/b"].kind is DeltaKind.MODIFIED and by["https://x/b"].title == "B"  # curated kept
     assert "https://x/c" not in by
     assert by["https://x/gone"].kind is DeltaKind.DELETED
-    assert ds.counts == {"new": 1, "modified": 1, "deleted": 1, "excluded": 0, "content_changed": 0}
+    assert ds.counts == {"new": 1, "modified": 1, "deleted": 1, "excluded": 0, "content_changed": 0, "renamed": 0, "kept": 0}
 
 
 def test_pattern_change_on_curated_row_creates_modified_delta_and_effects():

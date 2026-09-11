@@ -39,7 +39,7 @@
 <section class="card stage-card {{ s1 }}" id="exclusions">
   <h2><span class="n">1</span> Exclusions <small class="muted">decide what must never be indexed</small> <span class="state-tag {{ s1 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s1] }}</span></h2>
   <p class="muted">{{ c.dump_count }} dump URLs → {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }}
-    ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.content_changed %} · <a href="/collections/{{ cid }}?tab=urls&set=delta&changed=true">{{ dc.content_changed }} text changed</a>{% endif %} · {{ dc.deleted }} removed · <b>{{ dc.excluded }} excluded</b> by rules).
+    ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.renamed %} · <a href="/collections/{{ cid }}?tab=urls&set=delta&renamed=true" title="same page, new URL spelling (http→https, trailing slash, #fragment): one modified delta, not a new row plus a removal">{{ dc.renamed }} renamed</a>{% endif %}{% if dc.content_changed %} · <a href="/collections/{{ cid }}?tab=urls&set=delta&changed=true">{{ dc.content_changed }} text changed</a>{% endif %} · {{ dc.deleted }} removed{% if dc.kept %} · <a href="/collections/{{ cid }}?tab=urls&set=curated&unreachable=true" title="curated URLs the last crawl could not fetch or never reached: kept as approved, not removed">{{ dc.kept }} kept</a>{% endif %} · <b>{{ dc.excluded }} excluded</b> by rules).
     Exclude what should never be searchable (login, feeds, tag pages…); <code>include</code> always beats <code>exclude</code>.</p>
 
   <div class="next"><div class="next-inner">
@@ -102,7 +102,8 @@
 
   <div class="inline stage-foot">
     <a class="small" href="/collections/{{ cid }}?tab=urls&set=delta">Review delta URLs ↗</a>
-    {% if dc.deleted %}<a class="small" href="/collections/{{ cid }}?tab=urls&set=delta&kind=deleted" title="gone from the dump: promote drops them from the curated URLs, the next index run deletes them">{{ dc.deleted }} removed ↗</a>{% endif %}
+    {% if dc.deleted %}<a class="small" href="/collections/{{ cid }}?tab=urls&set=delta&kind=deleted" title="the crawl found them gone (404, or never met in a complete crawl): promote drops them from the curated URLs, the next index run deletes them">{{ dc.deleted }} removed ↗</a>{% endif %}
+    {% if dc.kept %}<a class="small" href="/collections/{{ cid }}?tab=urls&set=curated&unreachable=true" title="the last crawl could not fetch them (or never reached them): kept as approved, not removed">{{ dc.kept }} kept ↗</a>{% endif %}
     <span class="grow"></span>
     {% if stage == 'exclusions' %}
     <button class="primary" hx-post="/api/collections/{{ cid }}/stage" hx-ext="json-enc" hx-vals='{"stage": "metadata"}' hx-swap="none"
@@ -171,8 +172,9 @@
 <section class="card stage-card {{ s3 }}" id="promote">
   <h2><span class="n">3</span> Promote <small class="muted">apply the delta URLs to the curated URLs</small> <span class="state-tag {{ s3 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s3] }}</span></h2>
   <p class="muted">Promoting writes {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }} into the curated URLs
-    ({{ dc.new }} new · {{ dc.modified }} modified · {{ dc.deleted }} removed · {{ dc.excluded }} excluded) and marks the collection <b>Curated</b>, ready to index.</p>
+    ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.renamed %} (of which {{ dc.renamed }} renamed){% endif %} · {{ dc.deleted }} removed · {{ dc.excluded }} excluded) and marks the collection <b>Curated</b>, ready to index.{% if dc.kept %} {{ dc.kept }} curated URL{{ 's' if dc.kept != 1 }} the crawl could not fetch stay as they are.{% endif %}</p>
   {% if removal_warning %}<div class="banner warn">⚠ {{ removal_warning }}</div>{% endif %}
+  {% if crawl_warning %}<div class="banner info">ℹ {{ crawl_warning }} <a class="small" href="/collections/{{ cid }}?tab=urls&set=curated&unreachable=true">Show them ↗</a></div>{% endif %}
   {% if ai_pending_total and curating %}<div class="banner info">⚠ {{ ai_pending_total }} AI suggestion{{ 's are' if ai_pending_total != 1 else ' is' }} still undecided — promoting discards them. Accept or reject them in step 2 first.</div>{% endif %}
   <div class="inline">
     <button class="{{ 'primary' if s3 == 'current' else 'secondary' }}" hx-post="/api/collections/{{ cid }}/promote" hx-swap="none"

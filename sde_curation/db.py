@@ -21,6 +21,7 @@ from .models import (
     CuratedUrl,
     CurationStage,
     DeltaUrl,
+    DumpFailure,
     DumpUrl,
     IndexRun,
     JobRun,
@@ -48,6 +49,11 @@ class ConflictError(Exception):
 async def _scalar(cur: psycopg.AsyncCursor) -> Any:
     row = await cur.fetchone()
     return None if row is None else next(iter(row.values()))
+
+
+# Every curated column except the page text (most of the bytes; only the export reads it).
+_CURATED_COLS = ("collection_id,url,scraped_title,title,division,document_type,excluded,content_hash,edited_by,"
+                 "crawl_failure")
 
 
 class Database:
@@ -196,10 +202,13 @@ class Database:
             )
             return cur.rowcount > 0
 
-    async def set_last_scraped(self, collection_id: str, at: datetime) -> None:
+    async def set_last_scraped(self, collection_id: str, at: datetime, *, capped: bool = False) -> None:
+        """When the dump was crawled, and whether that crawl stopped at its page cap (then a curated
+        URL missing from the dump is not evidence that it is gone)."""
         async with self._conn() as conn:
             await conn.execute(
-                "UPDATE collections SET last_scraped_at=%s WHERE collection_id=%s", (at, collection_id)
+                "UPDATE collections SET last_scraped_at=%s, last_crawl_capped=%s WHERE collection_id=%s",
+                (at, capped, collection_id),
             )
 
     async def set_flag(self, collection_id: str, needs_recuration: bool, reason: str | None = None) -> None:
@@ -233,10 +242,25 @@ class Database:
 
     # ── dump urls ──────────────────────────────────────────────────────
 
-    async def replace_dump(self, collection_id: str, rows: list[DumpUrl]) -> int:
-        """Bulk-replace the dump for a collection in one transaction; returns row count."""
+    async def replace_dump(
+        self, collection_id: str, rows: list[DumpUrl], failures: list[DumpFailure] | None = None,
+    ) -> int:
+        """Bulk-replace the dump for a collection in one transaction; returns row count. `failures`
+        are the URLs the crawler tried and could not fetch (replaced along with the dump: the two
+        together are what one crawl found out)."""
         async with self._conn() as conn:
             await conn.execute("DELETE FROM dump_urls WHERE collection_id=%s", (collection_id,))
+            await conn.execute("DELETE FROM dump_failures WHERE collection_id=%s", (collection_id,))
+            if failures:
+                async with conn.cursor() as cur, cur.copy(
+                    "COPY dump_failures (collection_id,url,reason,status,detail) FROM STDIN"
+                ) as copy:
+                    seen_f: set[str] = set()
+                    for f in failures:
+                        if f.url in seen_f:
+                            continue
+                        seen_f.add(f.url)
+                        await copy.write_row((collection_id, f.url, f.reason, f.status, f.detail))
             async with conn.cursor() as cur, cur.copy(
                 "COPY dump_urls (collection_id,url,scraped_title,full_text,content_type,depth,content_hash)"
                 " FROM STDIN"
@@ -314,7 +338,7 @@ class Database:
 
     async def list_curated(
         self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None,
-        excluded: bool | None = None, edited: str | None = None,
+        excluded: bool | None = None, edited: str | None = None, unreachable: bool | None = None,
     ) -> tuple[list[CuratedUrl], int]:
         where, args = ["collection_id=%s"], [collection_id]
         if q:
@@ -323,11 +347,14 @@ class Database:
             where.append("excluded=%s"); args.append(excluded)
         if edited:
             where.append("edited_by=%s"); args.append(edited)
+        if unreachable is not None:
+            where.append("crawl_failure IS NOT NULL" if unreachable else "crawl_failure IS NULL")
         w = " AND ".join(where)
         async with self._conn() as conn:
             total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM curated_urls WHERE {w}", args))
             cur = await conn.execute(
-                f"SELECT * FROM curated_urls WHERE {w} ORDER BY url LIMIT %s OFFSET %s", [*args, limit, offset]
+                f"SELECT {_CURATED_COLS}, length(full_text) AS text_len FROM curated_urls WHERE {w}"
+                " ORDER BY url LIMIT %s OFFSET %s", [*args, limit, offset]
             )
             return [CuratedUrl(**r) for r in await cur.fetchall()], total
 
@@ -344,19 +371,28 @@ class Database:
             cur = await conn.execute("SELECT url FROM dump_urls WHERE collection_id=%s", (collection_id,))
             return [r["url"] for r in await cur.fetchall()]
 
+    async def load_dump_failures(self, collection_id: str) -> dict[str, str]:
+        """url -> crawler reason for every URL the current crawl tried and could not fetch."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT url, reason FROM dump_failures WHERE collection_id=%s", (collection_id,)
+            )
+            return {r["url"]: r["reason"] for r in await cur.fetchall()}
+
+    async def list_dump_failures(self, collection_id: str) -> list[DumpFailure]:
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT collection_id,url,reason,status,detail FROM dump_failures WHERE collection_id=%s ORDER BY url",
+                (collection_id,),
+            )
+            return [DumpFailure(**r) for r in await cur.fetchall()]
+
     async def dump_content_hashes(self, collection_id: str) -> dict[str, str | None]:
         async with self._conn() as conn:
             cur = await conn.execute(
                 "SELECT url, content_hash FROM dump_urls WHERE collection_id=%s", (collection_id,)
             )
             return {r["url"]: r["content_hash"] for r in await cur.fetchall()}
-
-    async def dump_full_text(self, collection_id: str) -> dict[str, str | None]:
-        async with self._conn() as conn:
-            cur = await conn.execute(
-                "SELECT url, full_text FROM dump_urls WHERE collection_id=%s", (collection_id,)
-            )
-            return {r["url"]: r["full_text"] for r in await cur.fetchall()}
 
     # ── deltas / curated ───────────────────────────────────────────────
 
@@ -377,11 +413,13 @@ class Database:
         self, collection_id: str, *, kind: str | None = None, excluded: bool | None = None,
         q: str | None = None, division: str | None = None, document_type: str | None = None,
         ai_pending: bool = False, ai_conf: str | None = None, content_changed: bool | None = None,
-        edited: str | None = None, limit: int = 100, offset: int = 0,
+        edited: str | None = None, renamed: bool | None = None, limit: int = 100, offset: int = 0,
     ) -> tuple[list[DeltaUrl], int]:
         where, args = ["collection_id=%s"], [collection_id]
         if kind:
             where.append("kind=%s"); args.append(kind)
+        if renamed is not None:
+            where.append("renamed_from IS NOT NULL" if renamed else "renamed_from IS NULL")
         if edited:
             where.append("edited_by=%s"); args.append(edited)
         if excluded is not None:
@@ -399,8 +437,8 @@ class Database:
         if document_type:
             where.append("document_type=%s"); args.append(document_type)
         if q:
-            where.append("(url ILIKE %s OR title ILIKE %s OR scraped_title ILIKE %s)")
-            args += [f"%{q}%"] * 3
+            where.append("(url ILIKE %s OR title ILIKE %s OR scraped_title ILIKE %s OR renamed_from ILIKE %s)")
+            args += [f"%{q}%"] * 4
         w = " AND ".join(where)
         async with self._conn() as conn:
             total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM delta_urls WHERE {w}", args))
@@ -420,16 +458,17 @@ class Database:
             await conn.execute("DELETE FROM delta_urls WHERE collection_id=%s", (collection_id,))
             async with conn.cursor() as cur:
                 async with cur.copy(
-                    "COPY delta_urls (collection_id,url,kind,scraped_title,title,division,document_type,"
-                    "excluded,content_changed,edited_by,title_ai,division_ai,document_type_ai,title_ai_conf,"
-                    "division_ai_conf,document_type_ai_conf,ai_model,ai_content_hash) FROM STDIN"
+                    "COPY delta_urls (collection_id,url,kind,renamed_from,crawl_failure,scraped_title,title,"
+                    "division,document_type,excluded,content_changed,edited_by,title_ai,division_ai,"
+                    "document_type_ai,title_ai_conf,division_ai_conf,document_type_ai_conf,ai_model,"
+                    "ai_content_hash) FROM STDIN"
                 ) as copy:
                     for d in deltas:
                         await copy.write_row((
-                            d.collection_id, d.url, d.kind, d.scraped_title, d.title, d.division, d.document_type,
-                            d.excluded, d.content_changed, d.edited_by, d.title_ai, d.division_ai,
-                            d.document_type_ai, d.title_ai_conf, d.division_ai_conf, d.document_type_ai_conf,
-                            d.ai_model, d.ai_content_hash,
+                            d.collection_id, d.url, d.kind, d.renamed_from, d.crawl_failure, d.scraped_title,
+                            d.title, d.division, d.document_type, d.excluded, d.content_changed, d.edited_by,
+                            d.title_ai, d.division_ai, d.document_type_ai, d.title_ai_conf, d.division_ai_conf,
+                            d.document_type_ai_conf, d.ai_model, d.ai_content_hash,
                         ))
                 if not keep_effects:
                     await cur.execute("DELETE FROM pattern_effects WHERE collection_id=%s", (collection_id,))
@@ -462,9 +501,12 @@ class Database:
             )
         return len(items)
 
-    async def load_curated(self, collection_id: str) -> list[CuratedUrl]:
+    async def load_curated(self, collection_id: str, *, with_text: bool = False) -> list[CuratedUrl]:
+        """The whole curated set. `with_text` also loads the approved page text (the export needs
+        it; the diff and the pages do not, and it is most of the bytes)."""
+        cols = "*" if with_text else _CURATED_COLS
         async with self._conn() as conn:
-            cur = await conn.execute("SELECT * FROM curated_urls WHERE collection_id=%s", (collection_id,))
+            cur = await conn.execute(f"SELECT {cols} FROM curated_urls WHERE collection_id=%s", (collection_id,))
             return [CuratedUrl(**r) for r in await cur.fetchall()]
 
     async def set_curated_edited_by(self, collection_id: str, items: list[tuple[str, str | None]]) -> None:
@@ -477,18 +519,65 @@ class Database:
                 [(eb, collection_id, url) for url, eb in items],
             )
 
-    async def replace_curated(self, collection_id: str, rows: list[CuratedUrl]) -> int:
+    async def set_curated_crawl_failure(self, collection_id: str, items: list[tuple[str, str | None]]) -> None:
+        """Flag (reason) or clear (None) curated rows after a recompute: the current dump lacks the
+        URL but the crawl does not prove it gone, or the crawl fetched it again."""
+        if not items:
+            return
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.executemany(
+                "UPDATE curated_urls SET crawl_failure=%s WHERE collection_id=%s AND url=%s",
+                [(reason, collection_id, url) for url, reason in items],
+            )
+
+    async def count_curated_unreachable(self, collection_id: str) -> int:
         async with self._conn() as conn:
-            await conn.execute("DELETE FROM curated_urls WHERE collection_id=%s", (collection_id,))
+            return await _scalar(await conn.execute(
+                "SELECT COUNT(*) FROM curated_urls WHERE collection_id=%s AND crawl_failure IS NOT NULL",
+                (collection_id,),
+            ))
+
+    async def replace_curated(self, collection_id: str, rows: list[CuratedUrl], *, text_from_dump: bool = True) -> int:
+        """Bulk-replace the curated set in one transaction; returns row count. With `text_from_dump`
+        (a promote) every row that is in the dump takes the dump's current page text — copied inside
+        PostgreSQL, so the text never travels through the app. A row's own `full_text` is written
+        first; a row written without text keeps the text it already had in the table (a promote
+        loads the curated set without text, and a row the dump lacks — kept through a crawl
+        failure — must not lose the text the index holds for it)."""
+        async with self._conn() as conn:
+            await conn.execute(
+                "CREATE TEMP TABLE curated_in (LIKE curated_urls INCLUDING DEFAULTS) ON COMMIT DROP"
+            )
             async with conn.cursor() as cur, cur.copy(
-                "COPY curated_urls (collection_id,url,scraped_title,title,division,document_type,excluded,"
-                "content_hash,edited_by) FROM STDIN"
+                "COPY curated_in (collection_id,url,scraped_title,title,division,document_type,excluded,"
+                "content_hash,edited_by,full_text,crawl_failure) FROM STDIN"
             ) as copy:
                 for r in rows:
                     await copy.write_row((
                         r.collection_id, r.url, r.scraped_title, r.title, r.division, r.document_type,
-                        r.excluded, r.content_hash, r.edited_by,
+                        r.excluded, r.content_hash, r.edited_by, r.full_text, r.crawl_failure,
                     ))
+            await conn.execute(
+                "DELETE FROM curated_urls c WHERE c.collection_id=%s"
+                " AND NOT EXISTS (SELECT 1 FROM curated_in i WHERE i.url=c.url)",
+                (collection_id,),
+            )
+            await conn.execute(
+                "INSERT INTO curated_urls (collection_id,url,scraped_title,title,division,document_type,excluded,"
+                "content_hash,edited_by,full_text,crawl_failure)"
+                " SELECT collection_id,url,scraped_title,title,division,document_type,excluded,content_hash,"
+                "edited_by,full_text,crawl_failure FROM curated_in"
+                " ON CONFLICT (collection_id, url) DO UPDATE SET scraped_title=EXCLUDED.scraped_title,"
+                " title=EXCLUDED.title, division=EXCLUDED.division, document_type=EXCLUDED.document_type,"
+                " excluded=EXCLUDED.excluded, content_hash=EXCLUDED.content_hash, edited_by=EXCLUDED.edited_by,"
+                " full_text=COALESCE(EXCLUDED.full_text, curated_urls.full_text), crawl_failure=EXCLUDED.crawl_failure"
+            )
+            if text_from_dump:
+                await conn.execute(
+                    "UPDATE curated_urls c SET full_text = d.full_text FROM dump_urls d"
+                    " WHERE c.collection_id=%s AND d.collection_id=c.collection_id AND d.url=c.url",
+                    (collection_id,),
+                )
             await conn.execute(
                 "UPDATE collections SET curated_count=%s, updated_at=%s WHERE collection_id=%s",
                 (len(rows), utcnow(), collection_id),

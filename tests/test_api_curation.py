@@ -19,7 +19,7 @@ async def test_recompute_requires_dump(crawler_client):
 async def test_full_flow(crawler_client):
     await setup(crawler_client)  # 8 docs (p1..p10 minus multiples of 5)
     r = await crawler_client.post("/api/collections/ex.org/recompute")
-    assert r.status_code == 200 and r.json() == {"new": 8, "modified": 0, "deleted": 0, "excluded": 0, "content_changed": 0}
+    assert r.status_code == 200 and r.json() == {"new": 8, "modified": 0, "deleted": 0, "excluded": 0, "content_changed": 0, "renamed": 0, "kept": 0}
     c = (await crawler_client.get("/api/collections/ex.org")).json()
     assert c["status"] == "curating" and c["delta_count"] == 8
 
@@ -108,7 +108,7 @@ async def test_shrunk_dump_after_promote_yields_tombstones(crawler_client):
             for i in (1, 2, 3, 4, 6)]
     await db.replace_dump("ex.org", rows)
     counts = (await crawler_client.post("/api/collections/ex.org/recompute")).json()
-    assert counts == {"new": 0, "modified": 1, "deleted": 3, "excluded": 0, "content_changed": 0}  # p7,p8,p9 gone; p1 retitled
+    assert counts == {"new": 0, "modified": 1, "deleted": 3, "excluded": 0, "content_changed": 0, "renamed": 0, "kept": 0}  # p7,p8,p9 gone; p1 retitled
     c = (await crawler_client.get("/api/collections/ex.org")).json()
     assert c["status"] == "curating"
     r = await crawler_client.post("/api/collections/ex.org/promote")

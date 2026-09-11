@@ -35,6 +35,7 @@ from .llm.tasks import suggest_metadata_one, suggest_patterns_batch
 from .models import (
     SYSTEM_ACTOR,
     Collection,
+    DumpFailure,
     DumpUrl,
     IndexRun,
     JobKind,
@@ -164,12 +165,15 @@ class JobManager:
                 else:
                     result = await self.scraper.run(c, on_progress)
                 docs = parse_documents(result.documents_path)
-                n = await self.ingest_dump(c.collection_id, docs)
+                failures = result.failures()
+                n = await self.ingest_dump(c.collection_id, docs, failures)
                 crawled_at = result.crawled_at or utcnow()
-                await self.db.set_last_scraped(c.collection_id, crawled_at)
+                capped = result.capped(n, c.max_pages)
+                await self.db.set_last_scraped(c.collection_id, crawled_at, capped=capped)
                 # deltas computed against the previous dump are now meaningless
                 await self.db.replace_deltas(c.collection_id, [], [])
-                job.progress = {**job.progress, "docs": n, "summary": _brief(result.summary)}
+                job.progress = {**job.progress, "docs": n, "failures": len(failures), "capped": capped,
+                                "summary": _brief(result.summary)}
                 job.external_ref = result.external_ref or job.external_ref
                 note = (f"loaded existing crawl from {crawled_at:%Y-%m-%d %H:%M}Z: {n} documents" if reuse
                         else f"scrape ok: {n} documents")
@@ -384,11 +388,11 @@ class JobManager:
                 await self.db.update_job(job)
                 self._emit(c, job)
 
-            # 1. export: stream curated (non-excluded) rows to a temp jsonl, upload, THEN the manifest
-            curated = await self.db.load_curated(c.collection_id)
-            full_text = await self.db.dump_full_text(c.collection_id)
+            # 1. export: stream curated (non-excluded) rows — with the text they were approved
+            #    with — to a temp jsonl, upload, THEN the manifest
+            curated = await self.db.load_curated(c.collection_id, with_text=True)
             with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as fh:
-                n = write_jsonl(export_lines(curated, full_text), fh)
+                n = write_jsonl(export_lines(curated), fh)
                 tmp = Path(fh.name)
             try:
                 if n == 0:
@@ -515,7 +519,9 @@ class JobManager:
 
         await self._guarded(c, job, body)
 
-    async def ingest_dump(self, collection_id: str, docs: list[dict[str, Any]]) -> int:
+    async def ingest_dump(
+        self, collection_id: str, docs: list[dict[str, Any]], failures: list[dict[str, Any]] | None = None,
+    ) -> int:
         rows = [
             DumpUrl(
                 collection_id=collection_id,
@@ -528,7 +534,15 @@ class JobManager:
             for d in docs
             if d.get("url")
         ]
-        n = await self.db.replace_dump(collection_id, rows)
+        fails = [
+            DumpFailure(
+                collection_id=collection_id, url=f["url"], reason=str(f["reason"]),
+                status=f["status"] if isinstance(f.get("status"), int) else None,
+                detail=(str(f.get("detail") or "")[:500] or None),
+            )
+            for f in failures or []
+        ]
+        n = await self.db.replace_dump(collection_id, rows, fails)
         return n
 
 

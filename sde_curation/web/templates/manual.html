@@ -144,14 +144,14 @@
 <dl class="defs">
   <dt>Dump URLs</dt><dd>Every URL the last crawl found. Raw, but you can exclude or include a row right there.</dd>
   <dt>Delta URLs</dt><dd>What will change in the curated URLs when you promote: new · modified · removed · excluded.</dd>
-  <dt>Curated URLs</dt><dd>The approved set. Included rows are what gets exported to the index. Every field is still editable; an edit becomes a delta URL.</dd>
+  <dt>Curated URLs</dt><dd>The approved set: metadata plus the page text each row was approved with. Included rows, with that text, are what gets exported to the index. Every field is still editable; an edit becomes a delta URL.</dd>
   <dt>Rules</dt><dd>Every rule in force for this collection, including exact-URL rules from per-row edits and accepted AI suggestions, each with its source (AI, AI edited, SME, global list).</dd>
 </dl>
 <h3>The four tabs</h3>
 <dl class="defs">
   <dt>Overview</dt><dd>The clickable pipeline with a panel per step, details, the last job, and Advanced (Re-scrape, manual status override, Delete for admins).</dd>
   <dt>Curate</dt><dd>Exclusions, Metadata, Promote, in the order you work them, with the full rules table underneath.</dd>
-  <dt>URLs</dt><dd>Three sets: Dump URLs, Delta URLs, Curated URLs. Search, filter by change kind, exclusion, division, type, AI confidence, and text changed. Download the filtered rows as CSV.</dd>
+  <dt>URLs</dt><dd>Three sets: Dump URLs, Delta URLs, Curated URLs. Search, filter by change kind, exclusion, division, type, AI confidence, text changed, and URL spelling changed (<b>renamed</b>: the same page under http/https, with or without a trailing slash or #fragment — one modified delta, not a new row plus a removal). A curated URL the last crawl could not fetch (403, timeout, challenge page) or never reached (page cap) is <b>kept</b>, not removed; filter <i>not fetched by the last crawl</i> to see them. A <b>removed</b> delta says why: HTTP 404, or never seen by a complete crawl. Download the filtered rows as CSV.</dd>
   <dt>Activity</dt><dd>Every job, the status history, and the audit trail.</dd>
 </dl>
 <figure><img src="{{ static_url('manual/04-urls-crawl.png') }}" alt="URLs tab, Dump URLs set: the raw crawl with title, content type, depth, text size and state per URL, read-only">
@@ -198,6 +198,7 @@
   <li id="disappear"><b>When pages disappear from the crawl.</b> Say the first crawl found 100 dump URLs and the next one 90. Start curating lists the 10 as <b>removed</b> delta URLs. Promote drops them from the curated URLs, and the next index run deletes them from the index. That is the right outcome for pages a site took down. It is the wrong outcome for a crawl that stopped early, so Promote warns you when a large share of the curated URLs vanished at once: re-scrape instead. To keep a page out of the index while it is still on the site, <b>exclude</b> it; that is the "delete from the index" action.</li>
   <li><b>An identical re-crawl returns straight to Curated.</b> Recompute never demotes a collection when nothing changed.</li>
   <li><b>Modified includes "text changed".</b> Each page carries a hash of its text. A page whose title and metadata did not move but whose body did shows as modified with a text changed badge, and Suggest metadata re-classifies it. Pages promoted before this existed compare as unchanged the first time.</li>
+  <li><b>The curated URLs keep their text.</b> Promote copies each page's text from the dump onto its curated row, next to the hash, and an index run ships the curated rows alone. A later re-scrape replaces the dump but not what was approved, so the curated URLs are the source of truth for the next cycle. The Text column on the Curated URLs table is the size of that text; a dash means the row was promoted before the engine kept it, and the next promote fills it.</li>
   <li><b>Max pages caps the crawl.</b> If the Dump URLs count sits exactly at the cap, the site is bigger than the crawl. Raise the cap and re-scrape.</li>
   <li><b>The Curator filter means who created the collection</b>, not who is working on it. There is no assignment field.</li>
   <li><b>The manual status override still obeys the data.</b> Advanced › Set status will not put a collection in Scraped without a crawl, or in Curated with delta URLs outstanding.</li>

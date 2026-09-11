@@ -34,15 +34,16 @@ def curated():
     return [
         CuratedUrl(collection_id="ex.org", url="https://ex.org/b", scraped_title="B scraped", title=None, division=None),
         CuratedUrl(collection_id="ex.org", url="https://ex.org/a", scraped_title="A", title="A title", division="Earth Science",
-                   document_type="Data"),
+                   document_type="Data", full_text="text a"),
         CuratedUrl(collection_id="ex.org", url="https://ex.org/x", scraped_title="X", excluded=True),
     ]
 
 
 def test_export_lines_and_manifest(tmp_path):
-    lines = list(export_lines(curated(), {"https://ex.org/a": "text a", "https://ex.org/b": None}))
+    lines = list(export_lines(curated()))
     assert [ln.url for ln in lines] == ["https://ex.org/a", "https://ex.org/b"]  # sorted, excluded dropped
     assert lines[1].title == "B scraped" and lines[0].division == "Earth Science"
+    assert lines[0].full_text == "text a" and lines[1].full_text is None  # the row's own text, no dump lookup
     p = tmp_path / "d.jsonl"
     with p.open("w") as fh:
         n = write_jsonl(iter(lines), fh)
@@ -67,7 +68,7 @@ def test_export_matches_indexer_contract(monkeypatch):
             return {"Body": io.BytesIO(json.dumps(m).encode())}
 
     manifest = load_manifest(FakeS3(), "b", "ex.org", "r1")
-    for ln in export_lines(curated(), {}):
+    for ln in export_lines(curated()):
         doc = to_web_document(ln.model_dump(exclude_none=True), manifest)
         assert doc["id"] == make_web_id("ex.org", ln.url) and doc["public_visibility"] is True
         assert doc["division"] in ("Earth Science", "Heliophysics")  # per-URL or manifest default
