@@ -43,6 +43,7 @@ from .models import (
     JobState,
     Pattern,
     Status,
+    report_passes,
     utcnow,
 )
 
@@ -452,15 +453,15 @@ class JobManager:
         await self._guarded(c, job, body)
 
     async def _validate(self, c: Collection, job: JobRun, run: IndexRun, s3: S3, backend: IndexBackend, progress) -> None:
-        """Wait for the index to refresh, then validate directly (fast); on 403 fall back to a
-        second pass of the same export (changed: 0) purely to get a fresh validation.json."""
+        """Wait for the index to refresh, then validate directly (fast), re-checking until the
+        documents are visible or the validation timeout passes — OpenSearch Serverless makes a bulk
+        upsert searchable some unpredictable time after the indexer reports success. On 403 fall
+        back to a second pass of the same export (changed: 0) purely to get a fresh validation.json."""
         await progress({"phase": "validating", "validation_delay_s": int(self.s.validation_delay_s)})
         await asyncio.sleep(self.s.validation_delay_s)
         expected = await self._expected_titles(c.collection_id)
         try:
-            report = await validate_direct(
-                self.s, collection_key=c.collection_id, run_id=run.run_id, target=run.target, expected_titles=expected
-            )
+            report = await self._validate_direct_until_visible(c, run, expected, progress)
             run.validated_by = "direct"
         except NoIndexAccess as e:
             log.warning("direct validation unavailable (%s) — falling back to a second indexer pass", e)
@@ -493,6 +494,30 @@ class JobManager:
                 c.collection_id, Status.CURATING, force=True, actor=SYSTEM_ACTOR,
                 note=f"validation FAILED ({run.validated_by}): {report['indexed_count']}/{report['expected_count']} indexed, titles {report['title_match_rate']:.1%} — needs re-curation",
             )
+
+    async def _validate_direct_until_visible(self, c: Collection, run: IndexRun, expected: dict[str, str], progress) -> dict[str, Any]:
+        """Poll `validate_direct` until the report passes the gate or `validation_timeout_s` elapses;
+        returns the last report either way. A short count is only a failure once the index has had
+        the whole window to catch up."""
+        started, attempt = time.monotonic(), 0
+        while True:
+            attempt += 1
+            report = await validate_direct(
+                self.s, collection_key=c.collection_id, run_id=run.run_id, target=run.target, expected_titles=expected
+            )
+            ok = report_passes(report, self.s.validation_title_match_threshold)
+            waited = time.monotonic() - started
+            await progress({"phase": "validating", "validation_attempt": attempt, "validation_waiting_s": int(waited),
+                            "indexed_so_far": report["indexed_count"], "expected_count": report["expected_count"]})
+            if ok or waited + self.s.validation_poll_interval_s > self.s.validation_timeout_s:
+                if not ok:
+                    log.warning("validation still short after %ds (%d attempts): %d/%d — failing the gate",
+                                waited, attempt, report["indexed_count"], report["expected_count"])
+                return report
+            log.info("index not yet consistent for %s: %d/%d after %ds — re-checking in %ss",
+                     c.collection_id, report["indexed_count"], report["expected_count"], waited,
+                     self.s.validation_poll_interval_s)
+            await asyncio.sleep(self.s.validation_poll_interval_s)
 
     async def _expected_titles(self, collection_id: str) -> dict[str, str]:
         curated = await self.db.load_curated(collection_id)

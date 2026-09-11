@@ -246,7 +246,7 @@ async def index_client(tmp_path, monkeypatch):
         data_dir=tmp_path / "data", crawler_root=croot, crawler_python=Path(sys.executable),
         indexer_root=iroot, indexer_python=Path(sys.executable), cosmos_index_bucket="cosmos-idx",
         index_poll_interval_s=0.1, index_stall_timeout_s=20, scrape_poll_interval_s=0.05, llm_provider="fake",
-        validation_delay_s=0.1,
+        validation_delay_s=0.1, validation_poll_interval_s=0.05, validation_timeout_s=1.0,
     )
     app = create_app(settings)
     async with app.router.lifespan_context(app), AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
