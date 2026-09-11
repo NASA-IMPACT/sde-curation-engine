@@ -85,25 +85,29 @@ Sizing lives in `config.py` (`EnvConfig`):
 
 | Environment | Instance | Multi-AZ | Backups | Deletion protection | Approx. cost |
 |---|---|---|---|---|---|
-| dev | `db.t4g.medium` (2 vCPU burstable, 4 GiB) | no | 7 days | no | ~$50 / month |
-| test | `db.t4g.large` (2 vCPU burstable, 8 GiB) | no | 7 days | no | ~$97 / month |
-| prod | `db.t4g.large` (2 vCPU burstable, 8 GiB) | yes | 35 days | yes | ~$195 / month |
+| dev | `db.m6i.large` (2 vCPU dedicated x86, 8 GiB) | no | 7 days | no | ~$130 / month |
+| test | `db.m6i.large` (2 vCPU dedicated x86, 8 GiB) | no | 7 days | no | ~$130 / month |
+| prod | `db.m6i.large` (2 vCPU dedicated x86, 8 GiB) | yes | 35 days | yes | ~$255 / month |
 
 No new SSM parameters, so `infra/envs/<env>.json` and `make infra-seed` are untouched.
 
 ### Sizing decisions
 
 `sqlite-vs-rds.md` proposed the cheapest sane floor (`db.t4g.micro` dev/test, `db.t4g.medium`
-Multi-AZ prod, ~$130/month for the three). On 2026-09-11 that was raised to the table above:
-`db.t4g.medium` for dev, `db.t4g.large` for test and prod, ~$340/month for the three. Reasons:
-headroom for 100k-URL collections with full page text during bulk replaces (the micro has 1 GiB
-of RAM), and test sized like prod so what passes there is representative.
+Multi-AZ prod, ~$130/month for the three). On 2026-09-11 that was raised first to `t4g.medium`
+(dev) and `t4g.large` (test, prod) for headroom on 100k-URL collections with full page text, and
+so that test is sized like prod.
 
-All `t4g` classes are burstable Graviton: 2 vCPUs, a CPU baseline (about 10% of one vCPU on the
-micro, 20% on the medium and large) with bursts to both vCPUs while credits last; RDS unlimited
-mode bills a sustained burst rather than throttling it. Dedicated-compute classes of the same
-shape (`db.m6g.large`, `db.m7g.large`, `db.m6i.large`, 2 vCPU / 8 GiB, ~$110–125/month
-single-AZ) buy nothing for this workload and were not chosen.
+The first two dev deploys that day failed with RDS `insufficient-capacity` for `db.t4g.medium`
+in every AZ it tried ("availability zone null"), about 25 minutes in each time, and the orphaned
+instance had to be deleted by hand after each rollback. Burstable classes (`t4g`, `t3`) live in
+small, shared pools that run dry; the decision was to stop guessing and put every environment on
+`db.m6i.large`: dedicated x86 compute, 2 vCPU / 8 GiB, no CPU-credit model, and RDS keeps `m6i`
+in much larger pools. About $515/month for the three environments versus ~$130 for the original
+floor; the difference buys predictable capacity and no burst accounting.
+
+Alongside, the RDS subnet group was widened from the task's two AZs (a, b) to the five where the
+class is orderable (`db_azs` in `config.py`), so RDS has more places to look for capacity.
 
 `infra/config.py` (`EnvConfig.db_instance_class`, `db_multi_az`, `db_backup_days`,
 `db_deletion_protection`, per environment in `CONFIGS`) is the single source of truth;

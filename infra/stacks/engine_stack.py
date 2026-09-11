@@ -104,14 +104,16 @@ class CurationEngineStack(Stack):
         db_sg.add_ingress_rule(svc_sg, ec2.Port.tcp(DB_PORT), "Postgres from service")
 
         # ── RDS PostgreSQL: the state store ────────────────────────────
-        # Sits in the same (public) subnets as the task because the default VPC has no private
-        # ones; it is not publicly accessible and only the service SG may connect. Credentials are
-        # a generated Secrets Manager secret (username/password JSON) the task reads by field.
+        # Sits in public subnets because the default VPC has no private ones; it is not publicly
+        # accessible and only the service SG may connect. Its subnet group spans cfg.db_azs (wider
+        # than the task's AZs) so RDS has more places to find capacity. Credentials are a generated
+        # Secrets Manager secret (username/password JSON) the task reads by field.
+        db_subnets = ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC, availability_zones=list(cfg.db_azs))
         db = rds.DatabaseInstance(
             self, "Db",
             engine=rds.DatabaseInstanceEngine.postgres(version=rds.PostgresEngineVersion.VER_17),
             instance_type=ec2.InstanceType(cfg.db_instance_class),
-            vpc=vpc, vpc_subnets=public, publicly_accessible=False, security_groups=[db_sg],
+            vpc=vpc, vpc_subnets=db_subnets, publicly_accessible=False, security_groups=[db_sg],
             credentials=rds.Credentials.from_generated_secret("engine", secret_name=cfg.secret_name("db")),
             database_name=DB_NAME, instance_identifier=f"{cfg.name}-db", port=DB_PORT,
             allocated_storage=20, max_allocated_storage=100, storage_type=rds.StorageType.GP3,

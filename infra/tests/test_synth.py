@@ -14,6 +14,8 @@ VPC_CONTEXT = {
     "availabilityZones": [], "subnetGroups": [{"name": "Public", "type": "Public", "subnets": [
         {"subnetId": "subnet-a", "cidr": "172.31.0.0/20", "availabilityZone": "us-east-1a", "routeTableId": "rtb-a"},
         {"subnetId": "subnet-b", "cidr": "172.31.16.0/20", "availabilityZone": "us-east-1b", "routeTableId": "rtb-b"},
+        {"subnetId": "subnet-c", "cidr": "172.31.32.0/20", "availabilityZone": "us-east-1c", "routeTableId": "rtb-c"},
+        {"subnetId": "subnet-e", "cidr": "172.31.64.0/20", "availabilityZone": "us-east-1e", "routeTableId": "rtb-e"},
     ]}],
 }
 
@@ -76,12 +78,14 @@ def test_rds_postgres_is_private_encrypted_and_backed_up(template):
     template.resource_count_is("AWS::RDS::DBInstance", 1)
     template.has_resource_properties("AWS::RDS::DBInstance", {
         "Engine": "postgres", "EngineVersion": Match.string_like_regexp("^17"), "DBName": "engine",
-        "DBInstanceClass": "db.t4g.medium", "PubliclyAccessible": False, "StorageEncrypted": True,
+        "DBInstanceClass": "db.m6i.large", "PubliclyAccessible": False, "StorageEncrypted": True,
         "StorageType": "gp3", "AllocatedStorage": "20", "MaxAllocatedStorage": 100,
         "MultiAZ": False, "BackupRetentionPeriod": 7, "DeletionProtection": False,
         "EnablePerformanceInsights": True, "EnableCloudwatchLogsExports": ["postgresql"],
     })
     template.has_resource("AWS::RDS::DBInstance", {"DeletionPolicy": "Snapshot", "UpdateReplacePolicy": "Snapshot"})
+    # the subnet group is wider than the task's AZs (a, b) but never includes us-east-1e
+    template.has_resource_properties("AWS::RDS::DBSubnetGroup", {"SubnetIds": ["subnet-a", "subnet-b", "subnet-c"]})
     # only the service may reach port 5432
     template.has_resource_properties("AWS::EC2::SecurityGroupIngress", {
         "FromPort": 5432, "ToPort": 5432, "IpProtocol": "tcp",
@@ -99,10 +103,10 @@ def test_rds_postgres_is_private_encrypted_and_backed_up(template):
 
 def test_prod_database_is_multi_az_and_protected():
     synth("prod").has_resource_properties("AWS::RDS::DBInstance", {
-        "DBInstanceClass": "db.t4g.large", "MultiAZ": True, "BackupRetentionPeriod": 35, "DeletionProtection": True,
+        "DBInstanceClass": "db.m6i.large", "MultiAZ": True, "BackupRetentionPeriod": 35, "DeletionProtection": True,
     })
     synth("test").has_resource_properties("AWS::RDS::DBInstance", {
-        "DBInstanceClass": "db.t4g.large", "MultiAZ": False, "BackupRetentionPeriod": 7, "DeletionProtection": False,
+        "DBInstanceClass": "db.m6i.large", "MultiAZ": False, "BackupRetentionPeriod": 7, "DeletionProtection": False,
     })
 
 
