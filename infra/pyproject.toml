@@ -3,7 +3,7 @@
 [project]
 name = "sde-curation-engine-infra"
 version = "0.1.0"
-description = "AWS CDK app deploying sde-curation-engine (ECS Fargate + EFS + ALB + CloudFront)"
+description = "AWS CDK app deploying sde-curation-engine (ECS Fargate + RDS PostgreSQL + EFS + ALB + CloudFront)"
 requires-python = ">=3.12"
 dependencies = [
     "aws-cdk-lib==2.267.0",

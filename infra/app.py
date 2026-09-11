@@ -25,7 +25,7 @@ CurationEngineStack(
     f"CurationEngine-{cfg.env.value}",
     cfg=cfg,
     env=cdk.Environment(account=account, region=cfg.region),
-    description=f"SDE Curation Engine ({cfg.env.value}): Fargate + EFS + ALB + CloudFront",
+    description=f"SDE Curation Engine ({cfg.env.value}): Fargate + RDS PostgreSQL + EFS + ALB + CloudFront",
 )
 
 for k, v in {"Project": "SDE", "ManagedBy": "AWS CDK", "Environment": cfg.env.value,

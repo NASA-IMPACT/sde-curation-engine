@@ -132,7 +132,7 @@ async def test_edited_by_survives_promote_and_filters(crawler_client):
     assert csv[0].endswith("edited_by") and len(csv) == 7
     # rows promoted without a value (or re-attributed rules) are fixed up by the next recompute, no delta needed
     db = c.app.state.db
-    await db.conn.execute("UPDATE curated_urls SET edited_by=NULL WHERE collection_id='ex.org'"); await db.conn.commit()
+    await db.execute("UPDATE curated_urls SET edited_by=NULL WHERE collection_id='ex.org'")
     r = await c.post("/api/collections/ex.org/recompute")
     assert r.json()["modified"] == 0 and (await coll(c))["status"] == "curated"
     cur = {r["url"]: r for r in (await c.get("/api/collections/ex.org/curated?limit=100")).json()["items"]}
@@ -142,45 +142,6 @@ async def test_edited_by_survives_promote_and_filters(crawler_client):
                                     for i in (0, 1, 2, 3, 5, 6, 7)])
     await c.post("/api/collections/ex.org/recompute")
     assert (await delta(c, "https://ex.org/p4"))["kind"] == "deleted" and (await delta(c, "https://ex.org/p4"))["edited_by"] == "ai"
-
-
-async def test_pattern_source_backfill_on_migration(tmp_path):
-    """Rules accepted from suggestions before `source` existed read as llm / global, not sme."""
-    import aiosqlite
-
-    from sde_curation.db import Database
-
-    path = tmp_path / "old.db"
-    async with aiosqlite.connect(path) as conn:
-        await conn.executescript("""
-            CREATE TABLE collections (collection_id TEXT PRIMARY KEY, name TEXT NOT NULL, seed_url TEXT NOT NULL,
-              division TEXT NOT NULL, document_type TEXT, connector TEXT NOT NULL, max_pages INTEGER NOT NULL,
-              status TEXT NOT NULL, needs_recuration INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL, dump_count INTEGER NOT NULL DEFAULT 0, delta_count INTEGER NOT NULL DEFAULT 0,
-              curated_count INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, collection_id TEXT NOT NULL, type TEXT NOT NULL,
-              match TEXT NOT NULL, value TEXT, created_at TEXT NOT NULL, created_by TEXT, UNIQUE (collection_id, type, match));
-            CREATE TABLE pattern_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, collection_id TEXT NOT NULL, type TEXT NOT NULL,
-              match TEXT NOT NULL, value TEXT, rationale TEXT, matches INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'pending',
-              source TEXT NOT NULL DEFAULT 'llm', created_at TEXT NOT NULL, decided_by TEXT, UNIQUE (collection_id, type, match));
-            INSERT INTO collections VALUES ('k','k','https://k','General',NULL,'crawler2',10,'curated',0,'2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00',0,0,0);
-            INSERT INTO patterns (collection_id,type,match,value,created_at) VALUES ('k','exclude','*/login*',NULL,'2026-01-01T00:00:00+00:00'),
-              ('k','exclude','*/feed*',NULL,'2026-01-01T00:00:00+00:00'), ('k','title','https://k/p','T','2026-01-01T00:00:00+00:00');
-            INSERT INTO pattern_suggestions (collection_id,type,match,state,source,created_at) VALUES
-              ('k','exclude','*/login*','accepted','global','t'), ('k','exclude','*/feed*','accepted','llm','t'), ('k','exclude','*/tag*','rejected','llm','t');
-            INSERT INTO patterns (collection_id,type,match,value,created_at) VALUES ('k','division','https://k/q','Heliophysics','2026-01-01T00:00:00+00:00');
-            CREATE TABLE audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, collection_id TEXT, action TEXT NOT NULL, detail TEXT);
-            INSERT INTO audit_log (at,actor,collection_id,action,detail) VALUES ('t','alice','k','ai.accept','division https://k/q → Heliophysics');
-        """)
-        await conn.commit()
-    db = await Database(path).connect()
-    try:
-        assert {p.match: str(p.source) for p in await db.list_patterns("k")} == {
-            "*/login*": "global", "*/feed*": "llm", "https://k/p": "sme", "https://k/q": "llm"}
-        c = await db.get_collection("k")
-        assert c is not None and c.recuration_reason is None
-    finally:
-        await db.close()
 
 
 # ── 3. suggest exclusions only for delta URLs ────────────────────────

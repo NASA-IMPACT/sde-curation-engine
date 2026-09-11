@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,11 +18,19 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # ── local state ────────────────────────────────────────────────────
-    data_dir: Path = _REPO_ROOT / "data"
-    db_path: Path | None = None  # defaults to data_dir / "engine.db"
-    # "exclusive" when engine.db lives on a network file system (EFS): SQLite's WAL index cannot
-    # be shared over NFS, so the single engine process holds the file exclusively instead.
-    db_locking_mode: Literal["normal", "exclusive"] = "normal"
+    data_dir: Path = _REPO_ROOT / "data"  # collections/<id>/*.yaml, index logs, scrape jobs
+
+    # ── database (PostgreSQL) ──────────────────────────────────────────
+    # Either one URL (local dev, tests) or the parts (ECS: host/port/name as env, user/password
+    # injected from the RDS-generated secret). `resolved_database_url` combines them.
+    database_url: str | None = None
+    db_host: str | None = None
+    db_port: int = 5432
+    db_name: str = "engine"
+    db_user: str | None = None
+    db_password: str | None = None
+    db_sslmode: Literal["disable", "prefer", "require", "verify-ca", "verify-full"] = "prefer"
+    db_pool_size: int = Field(default=8, ge=1, le=64)  # connections per engine process
 
     # ── sibling repos ──────────────────────────────────────────────────
     crawler_root: Path = _PROJECTS / "sde-crawl4ai-scraper-v1"
@@ -106,7 +115,7 @@ class Settings(BaseSettings):
     # "http", so the deployment sets this explicitly instead of sniffing the scheme.
     auth_cookie_secure: bool = False
 
-    @field_validator("data_dir", "db_path", "crawler_root", "crawler_python", "indexer_root",
+    @field_validator("data_dir", "crawler_root", "crawler_python", "indexer_root",
                      "indexer_python", mode="after")
     @classmethod
     def _absolute(cls, v: Path | None) -> Path | None:
@@ -117,8 +126,13 @@ class Settings(BaseSettings):
 
     # ── derived ────────────────────────────────────────────────────────
     @property
-    def resolved_db_path(self) -> Path:
-        return self.db_path or (self.data_dir / "engine.db")
+    def resolved_database_url(self) -> str:
+        if self.database_url:
+            return self.database_url
+        if not (self.db_host and self.db_user):
+            raise ValueError("set DATABASE_URL, or DB_HOST + DB_USER (+ DB_PASSWORD, DB_NAME, DB_PORT)")
+        auth = quote(self.db_user, safe="") + (f":{quote(self.db_password, safe='')}" if self.db_password else "")
+        return f"postgresql://{auth}@{self.db_host}:{self.db_port}/{self.db_name}?sslmode={self.db_sslmode}"
 
     @property
     def resolved_crawler_python(self) -> Path:

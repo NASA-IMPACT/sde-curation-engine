@@ -1,4 +1,4 @@
-.PHONY: install requirements requirements-check run test lint docker-build docker-run infra-install infra-test infra-seed bootstrap-github synth diff deploy destroy redeploy logs
+.PHONY: install requirements requirements-check db-up db-down db-shell run test lint docker-build docker-run infra-install infra-test infra-seed bootstrap-github synth diff deploy destroy redeploy logs
 # Dependencies: pyproject.toml + uv.lock are the source of truth; requirements*.txt are exported
 # from the lock (`make requirements`) so pip-only developers, CI and the Docker image install the
 # exact same versions. `make install` uses uv when it is on PATH and plain venv+pip otherwise;
@@ -28,19 +28,32 @@ requirements-check:  ## fail if requirements*.txt are stale vs the lock files (C
 	  && $(MAKE) -s requirements \
 	  && for f in $(REQ_FILES); do cmp -s "$$f" "$$tmp/$$f" || { echo "$$f is out of date: run 'make requirements' and commit"; exit 1; }; done \
 	  && echo "requirements*.txt match uv.lock"
-run:
+# ── PostgreSQL (docker-compose.yml) ────────────────────────────────────
+# The app and the tests need a PostgreSQL. `make db-up` starts one in Docker on localhost:5432
+# (DATABASE_URL=postgresql://engine:engine@localhost:5432/engine, the .env.example default).
+DB_URL ?= postgresql://engine:engine@localhost:5432/engine
+db-up:  ## start the local PostgreSQL and wait until it accepts connections
+	docker compose up -d --wait postgres
+db-down:  ## stop it (data stays in the `pgdata` volume; `docker compose down -v` wipes it)
+	docker compose down
+db-shell:  ## psql into the local database
+	docker compose exec postgres psql -U engine -d engine
+run: db-up
 	$(VENV)/bin/uvicorn sde_curation.web.app:app --reload --port 8080
-test:
+test:  ## tests: reuse TEST_DATABASE_URL when set, else testcontainers starts a throwaway PostgreSQL
 	$(VENV)/bin/python -m pytest -q
+test-local: db-up  ## tests against the compose database (what CI does with a service container)
+	TEST_DATABASE_URL=$(DB_URL) $(VENV)/bin/python -m pytest -q
 lint:
 	$(VENV)/bin/python -m ruff check sde_curation tests
 
 # ── container ──────────────────────────────────────────────────────────
 docker-build:
 	docker build --platform linux/amd64 -t sde-curation-engine:local .
-docker-run:  ## local smoke of the image: fake LLM, login password "dev", state in ./.docker-data
+docker-run: db-up  ## local smoke of the image: fake LLM, login password "dev", YAML/logs in ./.docker-data
 	mkdir -p .docker-data && docker run --rm -p 8080:8080 -e LLM_PROVIDER=fake -e APP_PASSWORD=dev \
-	  -e DB_LOCKING_MODE=exclusive -v $(PWD)/.docker-data:/data sde-curation-engine:local
+	  -e DATABASE_URL=postgresql://engine:engine@host.docker.internal:5432/engine \
+	  -v $(PWD)/.docker-data:/data sde-curation-engine:local
 
 # ── AWS (CDK, infra/) ──────────────────────────────────────────────────
 ENV ?= dev

@@ -1,6 +1,7 @@
-"""CurationEngine-<env>: one Fargate task (SQLite on EFS) behind ALB + CloudFront/WAF, with a
-task role that can drive the dev crawler (SSM) and the WEB_COSMOS indexer (ecs:RunTask) and read
-the OpenSearch Serverless web index for validation."""
+"""CurationEngine-<env>: one Fargate task behind ALB + CloudFront/WAF, its state in RDS
+PostgreSQL (per-collection YAML and logs on EFS), with a task role that can drive the dev crawler
+(SSM) and the WEB_COSMOS indexer (ecs:RunTask) and read the OpenSearch Serverless web index for
+validation."""
 
 from __future__ import annotations
 
@@ -44,6 +45,9 @@ from aws_cdk import (
     aws_opensearchserverless as aoss,
 )
 from aws_cdk import (
+    aws_rds as rds,
+)
+from aws_cdk import (
     aws_secretsmanager as sm,
 )
 from aws_cdk import (
@@ -59,6 +63,8 @@ from config import PARAMS, EnvConfig
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTAINER_PORT = 8080
 DATA_DIR = "/data"
+DB_NAME = "engine"
+DB_PORT = 5432
 POSIX_UID = "1000"  # matches the `app` user in the Dockerfile
 # Managed prefix list of CloudFront origin-facing IPs (same id in every account of a region).
 CLOUDFRONT_ORIGIN_PREFIX_LIST = {"us-east-1": "pl-3b927c52"}
@@ -94,8 +100,29 @@ class CurationEngineStack(Stack):
         svc_sg.add_ingress_rule(alb_sg, ec2.Port.tcp(CONTAINER_PORT), "from ALB")
         efs_sg = ec2.SecurityGroup(self, "EfsSg", vpc=vpc, description=f"{cfg.name} EFS", allow_all_outbound=False)
         efs_sg.add_ingress_rule(svc_sg, ec2.Port.tcp(2049), "NFS from service")
+        db_sg = ec2.SecurityGroup(self, "DbSg", vpc=vpc, description=f"{cfg.name} database", allow_all_outbound=False)
+        db_sg.add_ingress_rule(svc_sg, ec2.Port.tcp(DB_PORT), "Postgres from service")
 
-        # ── EFS: DATA_DIR (SQLite + per-collection yaml) ───────────────
+        # ── RDS PostgreSQL: the state store ────────────────────────────
+        # Sits in the same (public) subnets as the task because the default VPC has no private
+        # ones; it is not publicly accessible and only the service SG may connect. Credentials are
+        # a generated Secrets Manager secret (username/password JSON) the task reads by field.
+        db = rds.DatabaseInstance(
+            self, "Db",
+            engine=rds.DatabaseInstanceEngine.postgres(version=rds.PostgresEngineVersion.VER_17),
+            instance_type=ec2.InstanceType(cfg.db_instance_class),
+            vpc=vpc, vpc_subnets=public, publicly_accessible=False, security_groups=[db_sg],
+            credentials=rds.Credentials.from_generated_secret("engine", secret_name=cfg.secret_name("db")),
+            database_name=DB_NAME, instance_identifier=f"{cfg.name}-db", port=DB_PORT,
+            allocated_storage=20, max_allocated_storage=100, storage_type=rds.StorageType.GP3,
+            storage_encrypted=True,
+            multi_az=cfg.db_multi_az, backup_retention=Duration.days(cfg.db_backup_days),
+            deletion_protection=cfg.db_deletion_protection, removal_policy=RemovalPolicy.SNAPSHOT,
+            enable_performance_insights=True, auto_minor_version_upgrade=True,
+            cloudwatch_logs_exports=["postgresql"],
+        )
+
+        # ── EFS: DATA_DIR (per-collection yaml, index logs, scrape jobs) ─
         fs = efs.FileSystem(
             self, "Data", vpc=vpc, vpc_subnets=public, security_group=efs_sg, encrypted=True,
             lifecycle_policy=efs.LifecyclePolicy.AFTER_30_DAYS,
@@ -141,7 +168,10 @@ class CurationEngineStack(Stack):
         )
         environment = {
             "DATA_DIR": DATA_DIR,
-            "DB_LOCKING_MODE": "exclusive",  # engine.db is on EFS
+            "DB_HOST": db.instance_endpoint.hostname,
+            "DB_PORT": db.db_instance_endpoint_port,
+            "DB_NAME": DB_NAME,
+            "DB_SSLMODE": "require",
             "AUTH_COOKIE_SECURE": "true",  # viewers only ever reach us over CloudFront HTTPS
             "AWS_REGION": cfg.region,
             "SCRAPE_BACKEND": "ssm",
@@ -172,6 +202,8 @@ class CurationEngineStack(Stack):
             logging=ecs.LogDrivers.aws_logs(stream_prefix="engine", log_group=log_group),
             environment=environment,
             secrets={
+                "DB_USER": ecs.Secret.from_secrets_manager(db.secret, "username"),
+                "DB_PASSWORD": ecs.Secret.from_secrets_manager(db.secret, "password"),
                 "OPENAI_API_KEY": ecs.Secret.from_secrets_manager(secrets["openai_api_key"]),
                 "APP_PASSWORD": ecs.Secret.from_secrets_manager(secrets["app_password"]),
                 "SESSION_SECRET": ecs.Secret.from_secrets_manager(secrets["session_secret"]),
@@ -183,7 +215,7 @@ class CurationEngineStack(Stack):
         )
         container.add_mount_points(ecs.MountPoint(container_path=DATA_DIR, source_volume="data", read_only=False))
 
-        # Single writer to SQLite + in-process job registry → never two tasks at once.
+        # The job registry and per-collection locks are in-process → never two tasks at once.
         service = ecs.FargateService(
             self, "Service", cluster=cluster, task_definition=task_def, service_name=cfg.name,
             desired_count=1, min_healthy_percent=0, max_healthy_percent=100,
@@ -252,6 +284,8 @@ class CurationEngineStack(Stack):
         cdk.CfnOutput(self, "ServiceName", value=service.service_name)
         cdk.CfnOutput(self, "TaskRoleArn", value=task_role.role_arn)
         cdk.CfnOutput(self, "EfsId", value=fs.file_system_id)
+        cdk.CfnOutput(self, "DbEndpoint", value=f"{db.instance_endpoint.hostname}:{db.db_instance_endpoint_port}/{DB_NAME}")
+        cdk.CfnOutput(self, "SecretDb", value=db.secret.secret_name)
         cdk.CfnOutput(self, "LogGroupName", value=log_group.log_group_name)
         for key, secret in secrets.items():
             cdk.CfnOutput(self, f"Secret{key.title().replace('_', '')}", value=secret.secret_name)

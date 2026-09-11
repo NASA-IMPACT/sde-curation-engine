@@ -43,8 +43,7 @@ async def invariants(client, cid):
     c = (await client.get(f"/api/collections/{cid}")).json()
     db = client.app.state.db
     for table, col in (("dump_urls", "dump_count"), ("delta_urls", "delta_count"), ("curated_urls", "curated_count")):
-        cur = await db.conn.execute(f"SELECT COUNT(*) FROM {table} WHERE collection_id=?", (cid,))
-        assert (await cur.fetchone())[0] == c[col], f"{col} drift"
+        assert await db.fetchval(f"SELECT COUNT(*) FROM {table} WHERE collection_id=%s", (cid,)) == c[col], f"{col} drift"
     st = c["status"]
     if st in ("curating", "curated", "config_generated", "live"):
         assert c["dump_count"] > 0 or c["curated_count"] > 0, f"{st} with no data"
@@ -57,8 +56,8 @@ async def invariants(client, cid):
         assert j["state"] != "queued"
     # provenance: every row written by the code carries an actor ("anonymous"/"system" here)
     for table, col in (("status_history", "actor"), ("patterns", "created_by"), ("job_runs", "started_by")):
-        cur = await db.conn.execute(f"SELECT COUNT(*) FROM {table} WHERE collection_id=? AND {col} IS NULL", (cid,))
-        assert (await cur.fetchone())[0] == 0, f"{table}.{col} missing actor"
+        n = await db.fetchval(f"SELECT COUNT(*) FROM {table} WHERE collection_id=%s AND {col} IS NULL", (cid,))
+        assert n == 0, f"{table}.{col} missing actor"
     return c
 
 

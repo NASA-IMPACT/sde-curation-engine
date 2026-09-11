@@ -1,7 +1,7 @@
 # infra — AWS CDK for sde-curation-engine
 
-One stack per environment, `CurationEngine-<env>`: ECS Fargate (1 task, SQLite on EFS) → ALB (HTTP,
-CloudFront-only) → CloudFront (HTTPS + WAF). The task role can drive the crawler EC2 box over SSM,
+One stack per environment, `CurationEngine-<env>`: ECS Fargate (1 task) + RDS PostgreSQL (state) +
+EFS (per-collection YAML, logs) → ALB (HTTP, CloudFront-only) → CloudFront (HTTPS + WAF). The task role can drive the crawler EC2 box over SSM,
 dispatch the WEB_COSMOS indexer with `ecs:RunTask`, and read the OpenSearch Serverless web index
 for validation.
 
@@ -63,7 +63,9 @@ Changing an account value later: edit `envs/<env>.json`, `make infra-seed`, `mak
 ## What the stack sets on the container
 | Var | Source |
 |---|---|
-| `DATA_DIR`, `DB_LOCKING_MODE` | `/data` (EFS access point `/engine`), `exclusive` (SQLite WAL over NFS needs it) |
+| `DATA_DIR` | `/data` (EFS access point `/engine`): per-collection YAML, index logs, scrape jobs |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_SSLMODE` | the RDS instance endpoint, `engine`, `require` |
+| secrets → `DB_USER`, `DB_PASSWORD` | fields of the generated `/sde-curation-engine/<env>/db` secret |
 | `SCRAPE_BACKEND` / `INDEX_BACKEND` | `ssm` / `ecs` |
 | `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET` | SSM `crawler_instance_id`, `crawler_bucket` |
 | `INDEXING_ECS_CLUSTER`, `INDEXING_TASK_FAMILY` | SSM `indexing_cluster_name`, `indexing_task_family` |
@@ -80,13 +82,24 @@ carries the `ecs:RunTask`/`iam:PassRole` statements of `CosmosIndexingDispatchRo
 without touching policies owned by other stacks.
 
 ## Operating notes
-- **Single task by design** (SQLite + in-process jobs). A deploy replaces the task
+- **Single task by design** (in-process job registry and locks). A deploy replaces the task
   (`minHealthyPercent=0`), so in-flight jobs are marked failed on restart — deploy when idle.
+- **Database**: RDS PostgreSQL 17, `db.t4g.medium` single-AZ in dev, `db.t4g.large` single-AZ in
+  test and Multi-AZ in prod (`config.py`), 20 GB gp3 autoscaling to 100 GB, encrypted, not publicly accessible, only
+  the service security group may connect. Automated backups with point-in-time recovery (7 days;
+  35 in prod), deletion protection in prod, and a final snapshot on stack deletion. Performance
+  Insights and the PostgreSQL log in CloudWatch are on.
+- **Query the database**: from a shell in the task (below) — `python -c` with `psycopg` and the
+  `DB_*` env, or `apt-get`-free: `python -m sde_curation.import_sqlite --help` shows the env it
+  reads. For `psql` from a laptop, add an SSM-reachable bastion or a temporary ingress rule on
+  the `DbSg` security group; the instance itself is never public.
+- **Moving an existing SQLite `engine.db`**: `docs/rds-cutover.md`.
 - **SSE through CloudFront**: origin read timeout 60 s, the stream pings every 15 s, the UI also polls.
 - **ALB is reachable only from CloudFront** (security group admits the `com.amazonaws.global.cloudfront.origin-facing` prefix list); hitting the ALB DNS directly times out on purpose.
 - **WAF**: AWS managed common rule set (with `SizeRestrictions_BODY` set to count so big pattern edits pass) + 1000 req / 5 min / IP.
 - **Shell into the task**: `aws ecs execute-command --cluster sde-curation-engine-dev --task <arn> --container engine --interactive --command bash --profile sde-dev` (needs the session-manager plugin).
-- **EFS is retained** on `cdk destroy`; delete it by hand if you really want the data gone.
+- **EFS is retained** on `cdk destroy` and the database becomes a final snapshot; delete both by
+  hand if you really want the data gone.
 
 ## Adding test / prod
 Same steps against that account's profile: bootstrap with the `sde` qualifier, write

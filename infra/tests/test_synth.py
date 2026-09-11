@@ -18,14 +18,18 @@ VPC_CONTEXT = {
 }
 
 
-@pytest.fixture(scope="module")
-def template() -> Template:
-    cfg = get_config("dev")
+def synth(env: str) -> Template:
+    cfg = get_config(env)
     key = f"vpc-provider:account={ACCOUNT}:filter.isDefault=true:region={REGION}:returnAsymmetricSubnets=true"
     app = cdk.App(context={key: VPC_CONTEXT, "@aws-cdk/core:bootstrapQualifier": "sde"})
-    stack = CurationEngineStack(app, "CurationEngine-dev", cfg=cfg,
+    stack = CurationEngineStack(app, f"CurationEngine-{env}", cfg=cfg,
                                 env=cdk.Environment(account=ACCOUNT, region=REGION))
     return Template.from_stack(stack)
+
+
+@pytest.fixture(scope="module")
+def template() -> Template:
+    return synth("dev")
 
 
 def test_every_account_value_is_a_deploy_time_ssm_parameter(template):
@@ -51,16 +55,54 @@ def test_efs_mounted_at_data(template):
             "MountPoints": [{"ContainerPath": "/data", "SourceVolume": "data", "ReadOnly": False}],
             "Environment": Match.array_with([  # insertion order
                 {"Name": "DATA_DIR", "Value": "/data"},
-                {"Name": "DB_LOCKING_MODE", "Value": "exclusive"},
+                {"Name": "DB_HOST", "Value": {"Fn::GetAtt": [Match.any_value(), "Endpoint.Address"]}},
+                {"Name": "DB_NAME", "Value": "engine"},
+                {"Name": "DB_SSLMODE", "Value": "require"},
                 {"Name": "SCRAPE_BACKEND", "Value": "ssm"},
                 {"Name": "INDEX_BACKEND", "Value": "ecs"},
                 {"Name": "CRAWLER_INSTANCE_ID", "Value": {"Ref": Match.any_value()}},
                 {"Name": "INDEXING_SUBNETS", "Value": '["subnet-a", "subnet-b"]'},
             ]),
-            "Secrets": Match.array_with([Match.object_like({"Name": "OPENAI_API_KEY"}),
+            "Secrets": Match.array_with([Match.object_like({"Name": "DB_USER"}),
+                                         Match.object_like({"Name": "DB_PASSWORD"}),
+                                         Match.object_like({"Name": "OPENAI_API_KEY"}),
                                          Match.object_like({"Name": "APP_PASSWORD"})]),
         })],
         "Volumes": [Match.object_like({"EFSVolumeConfiguration": Match.object_like({"TransitEncryption": "ENABLED"})})],
+    })
+
+
+def test_rds_postgres_is_private_encrypted_and_backed_up(template):
+    template.resource_count_is("AWS::RDS::DBInstance", 1)
+    template.has_resource_properties("AWS::RDS::DBInstance", {
+        "Engine": "postgres", "EngineVersion": Match.string_like_regexp("^17"), "DBName": "engine",
+        "DBInstanceClass": "db.t4g.medium", "PubliclyAccessible": False, "StorageEncrypted": True,
+        "StorageType": "gp3", "AllocatedStorage": "20", "MaxAllocatedStorage": 100,
+        "MultiAZ": False, "BackupRetentionPeriod": 7, "DeletionProtection": False,
+        "EnablePerformanceInsights": True, "EnableCloudwatchLogsExports": ["postgresql"],
+    })
+    template.has_resource("AWS::RDS::DBInstance", {"DeletionPolicy": "Snapshot", "UpdateReplacePolicy": "Snapshot"})
+    # only the service may reach port 5432
+    template.has_resource_properties("AWS::EC2::SecurityGroupIngress", {
+        "FromPort": 5432, "ToPort": 5432, "IpProtocol": "tcp",
+        "SourceSecurityGroupId": {"Fn::GetAtt": [Match.string_like_regexp("^ServiceSg"), "GroupId"]},
+    })
+    # the password is the generated secret's JSON field, never a plain env var
+    props = template.to_json()["Resources"]
+    (task_def,) = [r for r in props.values() if r["Type"] == "AWS::ECS::TaskDefinition"]
+    env = {e["Name"] for e in task_def["Properties"]["ContainerDefinitions"][0]["Environment"]}
+    assert "DB_PASSWORD" not in env and "DB_LOCKING_MODE" not in env
+    (secret,) = [r for r in props.values() if r["Type"] == "AWS::SecretsManager::Secret"
+                 and r["Properties"].get("Name") == "/sde-curation-engine/dev/db"]
+    assert secret["Properties"]["GenerateSecretString"]["SecretStringTemplate"] == '{"username":"engine"}'
+
+
+def test_prod_database_is_multi_az_and_protected():
+    synth("prod").has_resource_properties("AWS::RDS::DBInstance", {
+        "DBInstanceClass": "db.t4g.large", "MultiAZ": True, "BackupRetentionPeriod": 35, "DeletionProtection": True,
+    })
+    synth("test").has_resource_properties("AWS::RDS::DBInstance", {
+        "DBInstanceClass": "db.t4g.large", "MultiAZ": False, "BackupRetentionPeriod": 7, "DeletionProtection": False,
     })
 
 
