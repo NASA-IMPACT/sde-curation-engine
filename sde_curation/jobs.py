@@ -26,7 +26,7 @@ from .engine.export import (
     write_jsonl,
 )
 from .engine.patterns import match_counts
-from .engine.urls import batches, dedupe_variants
+from .engine.urls import batches, dedupe_variants, duplicate_docs
 from .events import EventBus
 from .llm.base import LLMError, LLMProvider
 from .llm.global_excludes import global_exclude_hits, load_global_excludes
@@ -547,6 +547,15 @@ class JobManager:
     async def ingest_dump(
         self, collection_id: str, docs: list[dict[str, Any]], failures: list[dict[str, Any]] | None = None,
     ) -> int:
+        """Store the crawl as the collection's dump. A site that links to the same page as http and
+        https, with and without a trailing slash, with a #fragment, or under two paths that
+        redirect to one (`/map`, `/maps`) gets it crawled once per spelling; only the preferred
+        spelling is kept (a URL alone on its page stays), so the dump curators work from lists
+        each page once. Redirects are known from the crawler's `final_url`."""
+        drop = duplicate_docs(docs)
+        if drop:
+            log.info("dump %s: dropping %d documents that are another URL of a page also present",
+                     collection_id, len(drop))
         rows = [
             DumpUrl(
                 collection_id=collection_id,
@@ -556,8 +565,8 @@ class JobManager:
                 content_type=d.get("content_type"),
                 depth=d.get("depth"),
             )
-            for d in docs
-            if d.get("url")
+            for i, d in enumerate(docs)
+            if d.get("url") and i not in drop
         ]
         fails = [
             DumpFailure(

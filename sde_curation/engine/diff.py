@@ -11,7 +11,7 @@ recompute(dump, curated, patterns, failures, capped) -> deltas
             not evidence it is gone — the row is kept and flagged (`crawl_failure`)
 
 URL identity. Rows are matched by exact string first, then by canonical key (host + path + query:
-no scheme, no trailing slash, no #fragment — `engine.urls.canonical_key`). A curated URL whose
+no scheme, no www., no trailing slash, no #fragment — `engine.urls.canonical_key`). A curated URL whose
 only change is the spelling is one `modified` delta carrying `renamed_from`, not a new row plus a
 tombstone; promote moves the row. Two dump spellings of one curated page: the better one
 (https, then shorter) is the rename, the other is `new`.
