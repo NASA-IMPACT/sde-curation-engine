@@ -8,8 +8,8 @@ Invariants checked after every call:
   * there is always a forward action (next_action is never 'disabled' for a reachable status < curated)
 """
 
-import re
 import asyncio
+import re
 
 import pytest
 
