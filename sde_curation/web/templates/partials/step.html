@@ -109,6 +109,8 @@
            disabled=(c.status not in ('curated','config_generated','live') or not stats.exportable or c.delta_count > 0),
            confirm='Export ' ~ stats.exportable ~ ' URLs and index them into the TEST index?') }}
     {% if r and r.state == 'succeeded' %}{{ btn('Re-validate', '/api/collections/' ~ cid ~ '/index/revalidate', 'Check the test index against the curated set now (direct query, or a second indexer pass)') }}{% endif %}
+    <a class="button secondary" href="{{ settings.test_frontend_url }}" target="_blank" rel="noopener"
+       title="Open the test search front end in a new tab to verify what was indexed before promoting to prod">Open test front end ↗</a>
     {% if info.state == 'todo' and c.status not in ('curated','config_generated','live') %}<span class="muted">Promote the deltas in step 3 first.</span>{% endif %}
   </div>
 
@@ -130,6 +132,8 @@
            'Export the curated set and run the PRODUCTION indexer', primary=True,
            disabled=(not gate or c.status not in ('config_generated','live') or c.delta_count > 0),
            confirm='Index ' ~ stats.exportable ~ ' URLs into the PRODUCTION index?') }}
+    <a class="button secondary" href="{{ settings.prod_frontend_url }}" target="_blank" rel="noopener"
+       title="Open the production search front end in a new tab to verify what is live">Open prod front end ↗</a>
     {% if not gate %}<span class="muted small">{% if not t %}Run "Index to test" first.{% elif t.validation %}Test validation did not pass — fix the deltas, re-index to test, or Re-validate.{% else %}Test run not validated yet — Re-validate.{% endif %}</span>{% endif %}
   </div>
 {% endif %}

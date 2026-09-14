@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     indexing_security_groups: list[str] = Field(default_factory=list)
     indexing_assign_public_ip: bool = True
     web_index_name: str = "sde-web-subset"  # the indexer's working index; live sde-web only at cutover
+    # Search front ends the curator opens from steps 5/6 to eyeball what the indexer wrote.
+    test_frontend_url: str = "http://d2vsr84ys2zd7q.cloudfront.net/"
+    prod_frontend_url: str = "https://science.data.nasa.gov/science-discovery-engine/search/sde/home"
     opensearch_endpoint_test: str | None = None  # local index backend only (ECS task def carries these)
     opensearch_endpoint_prod: str | None = None
     sagemaker_endpoint_name: str | None = None

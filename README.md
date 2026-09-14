@@ -316,6 +316,7 @@ are in flight — the ceilings come from the systems behind it.
 | `AWS_PROFILE` | local runs only: the AWS CLI/SSO profile boto3 uses (the app exports it); unset in ECS |
 | `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET`, `CRAWLER_S3_PREFIX` | needed for `ssm`; the prefix is the folder inside the bucket the crawler writes to (`<prefix>/scraped_collections/…`), empty = bucket root |
 | `INDEX_BACKEND` (`local`\|`ecs`), `COSMOS_INDEX_BUCKET`, `WEB_INDEX_NAME` | indexing target bucket / index |
+| `TEST_FRONTEND_URL`, `PROD_FRONTEND_URL` | search front ends the "Open test / prod front end" buttons on steps 5 and 6 link to, so the curator can verify what was indexed |
 | `INDEXING_ECS_CLUSTER`, `INDEXING_TASK_FAMILY`, `INDEXING_CONTAINER_NAME`, `INDEXING_SUBNETS`, `INDEXING_SECURITY_GROUPS`, `INDEXING_DISPATCH_ROLE_ARN` | `ecs` backend |
 | `OPENSEARCH_ENDPOINT_TEST`, `OPENSEARCH_ENDPOINT_PROD`, `SAGEMAKER_ENDPOINT_NAME` | `local` backend (the ECS task def already carries these) |
 | `INDEX_POLL_INTERVAL_S`, `INDEX_STALL_TIMEOUT_S` | status.json polling; the stall timeout also bounds a *started* remote crawl's silence |
