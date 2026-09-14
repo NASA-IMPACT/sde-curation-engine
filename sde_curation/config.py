@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(default=8, ge=1, le=64)  # connections per engine process
 
     # ── sibling repos ──────────────────────────────────────────────────
-    crawler_root: Path = _PROJECTS / "sde-crawl4ai-scraper-v1"
+    crawler_root: Path = _PROJECTS / "sde-crawl4ai-scraper"
     crawler_python: Path | None = None  # defaults to crawler_root/.venv/bin/python
     indexer_root: Path = _PROJECTS / "sde-api-scrapers"
     indexer_python: Path | None = None  # defaults to indexer_root/.venv/bin/python
@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     indexing_security_groups: list[str] = Field(default_factory=list)
     indexing_assign_public_ip: bool = True
     web_index_name: str = "sde-web-subset"  # the indexer's working index; live sde-web only at cutover
+    # Search front ends the curator opens from steps 5/6 to eyeball what the indexer wrote.
+    test_frontend_url: str = "http://d2vsr84ys2zd7q.cloudfront.net/"
+    prod_frontend_url: str = "https://science.data.nasa.gov/science-discovery-engine/search/sde/home"
     opensearch_endpoint_test: str | None = None  # local index backend only (ECS task def carries these)
     opensearch_endpoint_prod: str | None = None
     sagemaker_endpoint_name: str | None = None

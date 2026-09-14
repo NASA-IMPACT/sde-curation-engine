@@ -41,7 +41,7 @@ async def test_hash_flows_from_dump_to_curated_and_flags_changed_text(crawler_cl
     assert r.json()["total"] == 1 and r.json()["items"][0]["url"].endswith("/p2")
     assert r.json()["items"][0]["content_changed"] is True and r.json()["items"][0]["kind"] == "modified"
 
-    html = (await c.get(f"/collections/{CID}?tab=urls&set=delta&changed=true")).text
+    html = (await c.get(f"/collections/{CID}?tab=delta&changed=true")).text
     assert "text changed" in html and "/p2" in html
     csv = (await c.get(f"/collections/{CID}/urls/delta?format=csv&changed=true")).text
     assert csv.splitlines()[0].split(",")[3] == "content_changed" and len(csv.splitlines()) == 2
@@ -83,7 +83,7 @@ async def test_promote_copies_text_and_export_survives_a_recrawl(crawler_client)
     r = await c.get(f"/api/collections/{CID}/curated")
     assert "full_text" not in r.json()["items"][0] or r.json()["items"][0]["full_text"] is None
     assert r.json()["items"][0]["text_len"] > 0
-    html = (await c.get(f"/collections/{CID}?tab=urls&set=curated")).text
+    html = (await c.get(f"/collections/{CID}?tab=curated")).text
     assert f">{len(text):,}<" in html
     csv = (await c.get(f"/collections/{CID}/urls/curated?format=csv")).text.splitlines()
     assert "text_len" in csv[0].split(",")

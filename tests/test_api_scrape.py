@@ -43,3 +43,28 @@ async def test_rescrape_of_live_collection_flags_recuration(crawler_client):
     await wait_job(crawler_client, "ex.org")
     c = (await crawler_client.get("/api/collections/ex.org")).json()
     assert c["status"] == "scraped" and c["needs_recuration"] is True and c["delta_count"] == 0
+
+
+async def test_ingest_keeps_one_spelling_per_page(crawler_client):
+    """A site that links to the same page as http/https, with/without a trailing slash, with a
+    #fragment, or under a path that redirects to it gets it crawled once per spelling; curators
+    must see it once, under the preferred spelling. A URL alone on its page is not touched."""
+    await crawler_client.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 5})
+    jobs = crawler_client.app.state.jobs
+    docs = [
+        {"url": "http://ex.org/a", "title": "A (http)", "full_text": "a"},
+        {"url": "https://ex.org/a", "title": "A", "full_text": "a"},
+        {"url": "https://ex.org/map/", "title": "Map (slash)", "full_text": "m"},
+        {"url": "https://ex.org/map", "title": "Map", "full_text": "m"},
+        {"url": "https://ex.org/faq#top", "title": "FAQ", "full_text": "f"},
+        {"url": "https://ex.org/faq", "title": "FAQ", "full_text": "f"},
+        {"url": "https://ex.org/maps", "final_url": "https://ex.org/map", "title": "Map", "full_text": "m"},  # redirect
+        {"url": "https://www.ex.org/map/", "title": "Map (www)", "full_text": "m"},
+        {"url": "http://ex.org/only-http", "title": "B", "full_text": "b"},
+        {"url": "https://ex.org/only-slash/", "title": "C", "full_text": "c"},
+    ]
+    assert await jobs.ingest_dump("ex.org", docs) == 5
+    dump = (await crawler_client.get("/api/collections/ex.org/dump?limit=10")).json()
+    assert sorted(i["url"] for i in dump["items"]) == [
+        "http://ex.org/only-http", "https://ex.org/a", "https://ex.org/faq", "https://ex.org/map", "https://ex.org/only-slash/",
+    ]

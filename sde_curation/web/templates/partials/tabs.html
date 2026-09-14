@@ -1,11 +1,13 @@
 {% set cid = c.collection_id %}
+{# Shown under pipeline steps 3 Curating and 4 Curated only. Links keep the selected step. #}
 <nav class="tabs" role="tablist" aria-label="collection sections">
-  {% for t, label in [('overview','Overview'), ('curate','Curate'), ('urls','URLs'), ('activity','Activity')] %}
-  <a role="tab" aria-selected="{{ 'true' if tab == t else 'false' }}" class="tab {% if tab == t %}active{% endif %}"
-     href="/collections/{{ cid }}?tab={{ t }}{% if t == 'urls' %}&set={{ 'delta' if c.delta_count else 'curated' if c.curated_count else 'dump' }}{% endif %}">
-    {{ label }}
-    {% if t == 'urls' %}<span class="count" title="dump URLs">{{ c.dump_count }}</span>{% if c.delta_count %}<span class="count warn" title="delta URLs">{{ c.delta_count }}</span>{% endif %}{% if c.curated_count %}<span class="count ok" title="curated URLs">{{ c.curated_count }}</span>{% endif %}
-    {% elif t == 'curate' and stats and stats.pattern_count %}<span class="count">{{ stats.pattern_count }}</span>{% endif %}
-  </a>
+  {% for t, label, n, cls, hint in [('overview', 'Overview', none, '', 'This step: what it did, its actions, details and last job'),
+                                   ('dump', 'Dump URLs', c.dump_count, '', 'Every URL the last crawl found (raw)'),
+                                   ('curate', 'Curate', stats.pattern_count if stats else 0, '', 'Exclusions, metadata, promote, and the rules in force'),
+                                   ('delta', 'Delta URLs', c.delta_count, 'warn', 'What will change in the curated URLs when you promote'),
+                                   ('curated', 'Curated URLs', c.curated_count, 'ok', 'The approved set; included rows are exported to the index'),
+                                   ('activity', 'Activity', none, '', 'Jobs, status history and audit trail')] %}
+  <a role="tab" aria-selected="{{ 'true' if tab == t else 'false' }}" class="tab {% if tab == t %}active{% endif %}" title="{{ hint }}"
+     href="/collections/{{ cid }}?step={{ selected }}&tab={{ t }}">{{ label }}{% if n is not none %} <span class="count {{ cls }} {% if not n %}zero{% endif %}">{{ n }}</span>{% endif %}</a>
   {% endfor %}
 </nav>

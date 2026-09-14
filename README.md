@@ -6,7 +6,7 @@ Lightweight FastAPI app that drives the SDE curation pipeline:
 1 Backlog → 2 Scraped → 3 Curating → 4 Curated → 5 Test index → 6 Live
 ```
 
-It wraps two existing repos — `../sde-crawl4ai-scraper-v1` (crawling) and
+It wraps two existing repos — `../sde-crawl4ai-scraper` (crawling) and
 `../sde-api-scrapers` (WEB_COSMOS indexing) — behind a small web UI with a live dashboard,
 a clickable pipeline stepper, and a curation grid. Plan and phase status: `docs/plan.md`;
 workflow background: `docs/workflow.md`.
@@ -24,9 +24,9 @@ make lint
 ```
 
 Crawler prerequisite (one-off): the local scrape backend runs `run.py` from
-`../sde-crawl4ai-scraper-v1` with its own Python 3.11 venv:
+`../sde-crawl4ai-scraper` with its own Python 3.11 venv:
 ```bash
-cd ../sde-crawl4ai-scraper-v1
+cd ../sde-crawl4ai-scraper
 python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m playwright install chromium
 ```
@@ -41,13 +41,14 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
 ## Using it
 1. **Dashboard** (`/`): add a collection (seed URL, name, division, max pages). Each row shows
    status, counts (dump URLs / delta URLs / curated URLs), last job, and **one button — the next step**.
-2. **Collection workbench** (`/collections/{id}`) — one page, four tabs, a sticky header:
+2. **Collection workbench** (`/collections/{id}`) — one page, a sticky header, the pipeline stepper always on top, and under steps Curating / Curated six tabs (Overview · Dump URLs · Curate · Delta URLs · Curated URLs · Activity; Start curating lands on Dump URLs):
    - **Header**: name, seed link, status badge (icon + label), ⚠ *needs re-curation*, running-job
-     chip with **cancel**, and count chips that are links — **Dump URLs · Delta URLs (new/mod/removed/excl) ·
-     Curated · Patterns** — plus the one **Next** action for the current step.
-   - **Overview**: the clickable pipeline stepper (each step's panel shows what it did, its primary
-     action, and a redo where sensible), details, last job, *Advanced* (re-scrape, manual status, delete).
-   - **URLs**: sub-tabs **Dump URLs** (raw crawl: title, type, depth, text size, state) · **Delta URLs**
+     chip with **cancel**, and the one **Next** action for the current step. The counts
+     (**Dump URLs · Delta URLs · Curated URLs**, rules on **Curate**) sit on the tab row.
+   - **Pipeline stepper**: each step's panel shows what it did, its primary action, and a redo where
+     sensible, with details, last job and *Advanced* (re-scrape, manual status, delete). Under the
+     other steps this panel is all there is; under Curating / Curated it is the **Overview** tab.
+   - **Dump URLs** (first tab; raw crawl: title, type, depth, text size, state) · **Delta URLs**
      (kind badge, scraped → effective title, division, type, exclude — all editable inline; AI badges)
      · **Curated** (read-only approved set with a **Curate ↗** jump when a delta exists). Search,
      kind / excluded / division / type filters, page size, paging, ⇩ CSV of the filtered rows.
@@ -55,7 +56,7 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
    - **Patterns & AI**: add a pattern, the pattern table (match counts link to the matching delta URLs),
      ✨ suggestions with Accept/Reject, Recompute and Promote.
    - **Activity**: all jobs and the status history.
-   Old `/collections/{id}/curate` links (and `set=deltas`) redirect into URLs › Delta URLs.
+   Old `/collections/{id}/curate` links (and `set=deltas`) redirect into the Delta URLs tab.
    Step panel actions:
 
    | Step | Panel actions |
@@ -241,6 +242,10 @@ their value on the next "Start curating" / recompute.
 - Status changes — even manual overrides — must respect the data: `scraped`/`curating` need a
   dump; `curated` and later need a promoted set and no delta URLs.
 - Recompute never demotes when nothing changed; an identical re-crawl returns straight to `curated`.
+- "Load existing crawl" only offers a *finished* crawl. Crawler v2 rewrites the S3 documents
+  object every 100 pages as a checkpoint, so a documents object newer than its failure summary
+  (or with no summary) is a crawl still running on the host: the workbench shows it as *crawl in
+  progress* and refuses to ingest it.
 - A re-scrape (or "load existing") clears the delta URLs and flags ⚠ *needs re-curation* whenever
   something was promoted; a failed test-index validation raises the same flag. The reason is kept
   (`recuration_reason`) and shown on the badge. "Start curating" clears it when nothing changed.
@@ -311,6 +316,7 @@ are in flight — the ceilings come from the systems behind it.
 | `AWS_PROFILE` | local runs only: the AWS CLI/SSO profile boto3 uses (the app exports it); unset in ECS |
 | `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET`, `CRAWLER_S3_PREFIX` | needed for `ssm`; the prefix is the folder inside the bucket the crawler writes to (`<prefix>/scraped_collections/…`), empty = bucket root |
 | `INDEX_BACKEND` (`local`\|`ecs`), `COSMOS_INDEX_BUCKET`, `WEB_INDEX_NAME` | indexing target bucket / index |
+| `TEST_FRONTEND_URL`, `PROD_FRONTEND_URL` | search front ends the "Open test / prod front end" buttons on steps 5 and 6 link to, so the curator can verify what was indexed |
 | `INDEXING_ECS_CLUSTER`, `INDEXING_TASK_FAMILY`, `INDEXING_CONTAINER_NAME`, `INDEXING_SUBNETS`, `INDEXING_SECURITY_GROUPS`, `INDEXING_DISPATCH_ROLE_ARN` | `ecs` backend |
 | `OPENSEARCH_ENDPOINT_TEST`, `OPENSEARCH_ENDPOINT_PROD`, `SAGEMAKER_ENDPOINT_NAME` | `local` backend (the ECS task def already carries these) |
 | `INDEX_POLL_INTERVAL_S`, `INDEX_STALL_TIMEOUT_S` | status.json polling; the stall timeout also bounds a *started* remote crawl's silence |

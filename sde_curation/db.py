@@ -56,6 +56,39 @@ _CURATED_COLS = ("collection_id,url,scraped_title,title,division,document_type,e
                  "crawl_failure")
 
 
+
+# ── column sorting ────────────────────────────────────────────────────
+# Sortable columns per table, keyed by the name the UI sends (?sort=…). Each maps to one or more
+# SQL expressions; an unknown key falls back to the table's default order, so user input never
+# reaches the SQL. The default order is always appended as the tiebreak so paging stays stable.
+DUMP_SORTS: dict[str, tuple[str, ...]] = {
+    "url": ("d.url",), "scraped_title": ("d.scraped_title",), "content_type": ("d.content_type",),
+    "depth": ("d.depth",), "text_len": ("text_len",), "excluded": ("excluded",),
+    "vs_curated": ("in_deltas", "in_curated"),
+}
+DELTA_SORTS: dict[str, tuple[str, ...]] = {
+    "kind": ("kind",), "url": ("url",), "excluded": ("excluded",), "title": ("COALESCE(title, scraped_title)",),
+    "division": ("division",), "document_type": ("document_type",), "edited_by": ("edited_by",),
+}
+CURATED_SORTS: dict[str, tuple[str, ...]] = {
+    "url": ("url",), "excluded": ("excluded",), "title": ("COALESCE(title, scraped_title)",),
+    "division": ("division",), "document_type": ("document_type",), "text_len": ("text_len",),
+    "edited_by": ("edited_by",),
+}
+AUDIT_SORTS: dict[str, tuple[str, ...]] = {
+    "at": ("id",), "actor": ("actor",), "collection": ("collection_id",), "action": ("action",),
+}
+
+
+def order_by(sorts: dict[str, tuple[str, ...]], sort: str | None, desc: bool, default: str) -> str:
+    """`ORDER BY …` for a whitelisted column (NULLS LAST either way) with the default order as the
+    tiebreak; the default alone when `sort` is unknown or unset."""
+    exprs = sorts.get(sort or "")
+    if not exprs:
+        return f" ORDER BY {default}"
+    d = "DESC" if desc else "ASC"
+    return " ORDER BY " + ", ".join(f"{e} {d} NULLS LAST" for e in exprs) + f", {default}"
+
 class Database:
     def __init__(self, dsn: str, *, pool_size: int = 8, connect_timeout_s: float = 30.0):
         self.dsn = dsn
@@ -284,7 +317,8 @@ class Database:
             return n
 
     async def list_dump(
-        self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None
+        self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None,
+        sort: str | None = None, desc: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
         """Dump rows (no full_text) plus `text_len` and `in_curated` / `in_deltas` flags."""
         where, args = ["d.collection_id=%s"], [collection_id]
@@ -302,7 +336,8 @@ class Database:
                     FROM dump_urls d
                     LEFT JOIN curated_urls c ON c.collection_id=d.collection_id AND c.url=d.url
                     LEFT JOIN delta_urls x ON x.collection_id=d.collection_id AND x.url=d.url
-                    WHERE {w} ORDER BY d.url LIMIT %s OFFSET %s""", [*args, limit, offset],
+                    WHERE {w}{order_by(DUMP_SORTS, sort, desc, "d.url")} LIMIT %s OFFSET %s""",
+                [*args, limit, offset],
             )
             return list(await cur.fetchall()), total
 
@@ -339,6 +374,7 @@ class Database:
     async def list_curated(
         self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None,
         excluded: bool | None = None, edited: str | None = None, unreachable: bool | None = None,
+        sort: str | None = None, desc: bool = False,
     ) -> tuple[list[CuratedUrl], int]:
         where, args = ["collection_id=%s"], [collection_id]
         if q:
@@ -354,7 +390,7 @@ class Database:
             total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM curated_urls WHERE {w}", args))
             cur = await conn.execute(
                 f"SELECT {_CURATED_COLS}, length(full_text) AS text_len FROM curated_urls WHERE {w}"
-                " ORDER BY url LIMIT %s OFFSET %s", [*args, limit, offset]
+                f"{order_by(CURATED_SORTS, sort, desc, 'url')} LIMIT %s OFFSET %s", [*args, limit, offset]
             )
             return [CuratedUrl(**r) for r in await cur.fetchall()], total
 
@@ -414,6 +450,7 @@ class Database:
         q: str | None = None, division: str | None = None, document_type: str | None = None,
         ai_pending: bool = False, ai_conf: str | None = None, content_changed: bool | None = None,
         edited: str | None = None, renamed: bool | None = None, limit: int = 100, offset: int = 0,
+        sort: str | None = None, desc: bool = False,
     ) -> tuple[list[DeltaUrl], int]:
         where, args = ["collection_id=%s"], [collection_id]
         if kind:
@@ -443,7 +480,8 @@ class Database:
         async with self._conn() as conn:
             total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM delta_urls WHERE {w}", args))
             cur = await conn.execute(
-                f"SELECT * FROM delta_urls WHERE {w} ORDER BY kind, url LIMIT %s OFFSET %s",
+                f"SELECT * FROM delta_urls WHERE {w}{order_by(DELTA_SORTS, sort, desc, 'kind, url')}"
+                " LIMIT %s OFFSET %s",
                 [*args, limit, offset],
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
@@ -774,16 +812,30 @@ class Database:
     async def deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> list[dict[str, Any]]:
         return [r async for r in self.iter_deltas_for_llm(collection_id, only_missing=only_missing)]
 
-    async def deltas_with_ai(self, collection_id: str, field: str) -> list[tuple[str, str]]:
-        """(url, suggested value) for every pending, non-removed URL with an AI suggestion for `field`."""
+    async def deltas_with_ai(self, collection_id: str, field: str, url: str | None = None) -> list[tuple[str, str]]:
+        """(url, suggested value) for every pending, non-removed URL with an AI suggestion for `field`
+        (just that one row when `url` is given)."""
         assert field in ("title", "division", "document_type")
+        sql = (f"SELECT url, {field}_ai AS v FROM delta_urls WHERE collection_id=%s AND kind!='deleted'"
+               f" AND {field}_ai IS NOT NULL")
+        args: list[Any] = [collection_id]
+        if url is not None:
+            sql += " AND url=%s"; args.append(url)
+        async with self._conn() as conn:
+            cur = await conn.execute(sql + " ORDER BY url", args)
+            return [(r["url"], r["v"]) for r in await cur.fetchall()]
+
+    async def list_delta_ai(self, collection_id: str, limit: int = 500) -> list[DeltaUrl]:
+        """Pending, non-removed delta URLs that carry at least one AI suggestion, by URL — the
+        review table under Curate › Metadata."""
         async with self._conn() as conn:
             cur = await conn.execute(
-                f"SELECT url, {field}_ai AS v FROM delta_urls WHERE collection_id=%s AND kind!='deleted'"
-                f" AND {field}_ai IS NOT NULL ORDER BY url",
-                (collection_id,),
+                "SELECT * FROM delta_urls WHERE collection_id=%s AND kind!='deleted'"
+                " AND (title_ai IS NOT NULL OR division_ai IS NOT NULL OR document_type_ai IS NOT NULL)"
+                " ORDER BY url LIMIT %s",
+                (collection_id, limit),
             )
-            return [(r["url"], r["v"]) for r in await cur.fetchall()]
+            return [DeltaUrl(**r) for r in await cur.fetchall()]
 
     async def delta_ai_counts(self, collection_id: str) -> dict[str, Any]:
         """Pending AI suggestions per field, plus `by_conf`: suggestions (field-level) per confidence."""
@@ -801,13 +853,14 @@ class Database:
         return {"title": r["t"] or 0, "division": r["d"] or 0, "document_type": r["dt"] or 0,
                 "by_conf": {"high": r["hi"] or 0, "medium": r["med"] or 0, "low": r["lo"] or 0}}
 
-    async def clear_delta_ai_field(self, collection_id: str, field: str) -> int:
+    async def clear_delta_ai_field(self, collection_id: str, field: str, url: str | None = None) -> int:
         assert field in ("title", "division", "document_type")
+        sql = f"UPDATE delta_urls SET {field}_ai=NULL, {field}_ai_conf=NULL WHERE collection_id=%s AND {field}_ai IS NOT NULL"
+        args: list[Any] = [collection_id]
+        if url is not None:
+            sql += " AND url=%s"; args.append(url)
         async with self._conn() as conn:
-            cur = await conn.execute(
-                f"UPDATE delta_urls SET {field}_ai=NULL, {field}_ai_conf=NULL WHERE collection_id=%s AND {field}_ai IS NOT NULL",
-                (collection_id,),
-            )
+            cur = await conn.execute(sql, args)
             return cur.rowcount
 
     async def clear_delta_ai(self, collection_id: str, url: str, field: str) -> None:
@@ -1023,12 +1076,25 @@ class Database:
                 (utcnow(), actor, collection_id, action, detail),
             )
 
-    async def list_audit(self, collection_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_audit(
+        self, collection_id: str | None = None, limit: int = 100, *, q: str | None = None, before: int | None = None,
+        sort: str | None = None, desc: bool = True, offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Newest first by default; `sort` (an AUDIT_SORTS key) + `desc` order by another column,
+        with `offset` for paging since `before` only pages by id. audit_log has no foreign key on collections on purpose: rows outlive the
+        collection they name, so the global ledger still shows what was done to a deleted one.
+        `q` matches actor, action, collection id or detail (case-insensitive substring); `before`
+        pages by row id (the id of the last row shown)."""
+        where, args = [], []
+        if collection_id is not None:
+            where.append("collection_id=%s"); args.append(collection_id)
+        if q:
+            where.append("(actor ILIKE %s OR action ILIKE %s OR collection_id ILIKE %s OR detail ILIKE %s)")
+            args += [f"%{q}%"] * 4
+        if before is not None:
+            where.append("id < %s"); args.append(before)
+        sql = ("SELECT * FROM audit_log" + (" WHERE " + " AND ".join(where) if where else "")
+               + order_by(AUDIT_SORTS, sort, desc, "id DESC") + " LIMIT %s OFFSET %s")
         async with self._conn() as conn:
-            if collection_id is None:
-                cur = await conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT %s", (limit,))
-            else:
-                cur = await conn.execute(
-                    "SELECT * FROM audit_log WHERE collection_id=%s ORDER BY id DESC LIMIT %s", (collection_id, limit)
-                )
+            cur = await conn.execute(sql, (*args, limit, offset))
             return list(await cur.fetchall())

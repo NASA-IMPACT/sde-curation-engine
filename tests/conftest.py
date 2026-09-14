@@ -136,7 +136,7 @@ FAKE_RUN_PY = textwrap.dedent(
             st = "fail" if i % 5 == 0 else "ok"
             out.write(f"  {i:<5} {st:<10} {0:<6} {job['seed']}/p{i}\\n"); out.flush()
             time.sleep(0.02)
-        out.write(f"  ... {n - n // 5} docs / {n // 5} failed  (cap {n})\\n")
+        out.write(f"  ... {n - n // 5} docs / {n // 5} failures logged  (cap {n})\\n")
         out.write("\\n# exit=0 elapsed_s=0.5\\n")
     docs.write_text(json.dumps([
         {"url": f"{job['seed']}/p{i}", "title": f"Page {i}", "full_text": "text " * 5, "content_type": "text/html", "depth": 0}

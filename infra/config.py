@@ -23,7 +23,7 @@ class Environment(str, Enum):
 
 # key → what it is. Every one is a plain String parameter; every one is required.
 PARAMS: dict[str, str] = {
-    "crawler_instance_id": "EC2 instance of the crawler (sde-crawl4ai-scraper-v1, SdeCrawlerStack)",
+    "crawler_instance_id": "EC2 instance of the crawler (sde-crawl4ai-scraper, SdeCrawlerStack)",
     "crawler_bucket": "S3 bucket the crawler writes <crawler_s3_prefix>/scraped_collections/ and failure_logs/ to",
     "indexing_cluster_name": "ECS cluster of the WEB_COSMOS indexer (sde-api-scrapers)",
     "indexing_task_family": "task definition family of the WEB_COSMOS indexer",

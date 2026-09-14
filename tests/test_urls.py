@@ -5,13 +5,15 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from sde_curation.engine.urls import batches, canonical_key, dedupe_variants
+from sde_curation.engine.urls import batches, canonical_key, dedupe_variants, duplicate_docs
 from sde_curation.llm.global_excludes import DEFAULT_PATH, global_exclude_hits, load_global_excludes
 from sde_curation.models import GlobalExcludeList
 
 
-def test_canonical_key_ignores_scheme_slash_and_fragment():
+def test_canonical_key_ignores_scheme_www_slash_and_fragment():
     assert canonical_key("https://Ex.org/a/") == canonical_key("http://ex.org/a#top") == "ex.org/a"
+    assert canonical_key("https://www.ex.org/a") == canonical_key("https://WWW.ex.org/a/") == "ex.org/a"
+    assert canonical_key("https://wwwx.org/a") == "wwwx.org/a"  # only a www. label, not any www prefix
     assert canonical_key("https://ex.org/") == "ex.org/"
     assert canonical_key("https://ex.org/map?obs=1") == "ex.org/map?obs=1" != canonical_key("https://ex.org/map")
 
@@ -20,6 +22,26 @@ def test_dedupe_prefers_https_and_sorts_by_path():
     urls = ["http://ex.org/b", "https://ex.org/b/", "https://ex.org/a", "http://ex.org/a/x", "https://ex.org/b"]
     assert dedupe_variants(urls) == ["https://ex.org/a", "http://ex.org/a/x", "https://ex.org/b"]
     assert batches(list(range(7)), 3) == [[0, 1, 2], [3, 4, 5], [6]] and batches([], 3) == []
+
+
+def test_duplicate_docs_collapse_redirects_onto_the_resolved_page():
+    docs = [
+        {"url": "https://ex.org/maps", "final_url": "https://ex.org/map"},  # redirected: drop
+        {"url": "https://ex.org/map", "final_url": "https://ex.org/map"},
+        {"url": "http://ex.org/map/", "final_url": "https://ex.org/map/"},  # a spelling of the same page: drop
+        {"url": "https://ex.org/old", "final_url": "https://ex.org/new"},  # resolved page not crawled itself: kept
+        {"url": "https://ex.org/x"},  # no final_url recorded (older crawler): dedupe on url
+        {"url": "http://ex.org/x"},
+        {"url": ""},
+    ]
+    assert duplicate_docs(docs) == {0, 2, 5}
+    # the aurorasaurus.org case: every page crawled on the apex host and again on www.
+    site = [{"url": "https://ex.org/map/"}, {"url": "https://www.ex.org/map"}, {"url": "https://www.ex.org/x"},
+            {"url": "https://ex.org/x"}, {"url": "https://www.ex.org/only-www"}]
+    assert duplicate_docs(site) == {1, 2}
+    # when no requested URL is the resolved page itself, the usual preference (https, shorter) decides
+    both = [{"url": "http://ex.org/a", "final_url": "https://ex.org/z"}, {"url": "https://ex.org/b", "final_url": "https://ex.org/z"}]
+    assert duplicate_docs(both) == {0}
 
 
 def test_global_excludes_load_validate_and_hit():

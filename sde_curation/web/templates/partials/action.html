@@ -3,7 +3,13 @@
    HX-Redirect header drives navigation, so there must be no swap target. #}
 {% set a = next_action(c, job) %}
 {% set swap = 'hx-target="closest tr" hx-swap="outerHTML"' if in_row else 'hx-swap="none"' %}
-{% if a.kind == 'post' %}
+{# the crawler host is already working on this collection (its S3 object is a mid-run checkpoint):
+   dropping another job would only crawl the site again — wait instead #}
+{% set crawling = a.label == 'Scrape' and stats is defined and stats and stats.existing_crawl and not stats.existing_crawl.complete %}
+{% if crawling %}
+  <button disabled title="A crawl for this collection is already running on the crawler host — wait for it to finish">Scrape</button>
+  <small class="muted">crawl in progress on the host</small>
+{% elif a.kind == 'post' %}
   <button class="primary" title="{{ a.hint }}" hx-post="{{ a.url }}{% if a.then %}?then={{ a.then|urlencode }}{% endif %}" {% if a.confirm %}hx-confirm="{{ a.confirm }}"{% endif %}
           {% if a.then %}hx-swap="none"{% else %}{{ swap|safe }}{% endif %}>{{ a.label }}</button>
 {% elif a.kind == 'link' %}

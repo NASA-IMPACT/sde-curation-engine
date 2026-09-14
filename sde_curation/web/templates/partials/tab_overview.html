@@ -1,5 +1,8 @@
-{# Overview: the clickable pipeline with its step panel, details, last job, advanced. #}
-{% include "partials/pipeline.html" %}
+{# The panel of the selected pipeline step, details, last job, advanced. Shown alone under most
+   steps; under Curating / Curated it is the Overview tab. #}
+<div id="step-panel" class="next">
+  {% include "partials/step.html" %}
+</div>
 
 <div class="cols">
   <section class="card">

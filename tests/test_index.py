@@ -170,6 +170,10 @@ async def test_index_to_test_end_to_end(index_client):
     assert runs[0]["run_id"] == run_id and runs[0]["target"] == "test" and runs[0]["state"] == "succeeded"
     page = (await c.get("/collections/ex.org?tab=overview&step=config_generated")).text
     assert run_id in page and "count_matches" not in page and "counts match" in page
+    # steps 5/6 link the curator to the search front ends so they can eyeball what got indexed
+    assert 'href="http://d2vsr84ys2zd7q.cloudfront.net/"' in page and "Open test front end" in page
+    live = (await c.get("/collections/ex.org?tab=overview&step=live")).text
+    assert 'href="https://science.data.nasa.gov/science-discovery-engine/search/sde/home"' in live and "Open prod front end" in live
 
 
 async def test_index_failure_is_surfaced(index_client):
