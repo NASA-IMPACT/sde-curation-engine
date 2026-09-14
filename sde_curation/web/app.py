@@ -902,7 +902,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if ex is None:
             return None
         loaded = c.last_scraped_at is not None and ex.modified <= c.last_scraped_at
-        return {"modified": ex.modified, "where": ex.where, "size": ex.size, "already_loaded": loaded}
+        # loadable: a finished crawl the collection has not ingested yet. A checkpoint of a crawl
+        # still running on the host is shown but never offered (it would ingest a truncated dump).
+        return {"modified": ex.modified, "where": ex.where, "size": ex.size, "already_loaded": loaded,
+                "complete": ex.complete, "loadable": ex.complete and not loaded}
 
     @app.get("/api/collections/{collection_id}/crawl/existing")
     async def api_existing_crawl(request: Request, collection_id: str):

@@ -242,6 +242,10 @@ their value on the next "Start curating" / recompute.
 - Status changes — even manual overrides — must respect the data: `scraped`/`curating` need a
   dump; `curated` and later need a promoted set and no delta URLs.
 - Recompute never demotes when nothing changed; an identical re-crawl returns straight to `curated`.
+- "Load existing crawl" only offers a *finished* crawl. Crawler v2 rewrites the S3 documents
+  object every 100 pages as a checkpoint, so a documents object newer than its failure summary
+  (or with no summary) is a crawl still running on the host: the workbench shows it as *crawl in
+  progress* and refuses to ingest it.
 - A re-scrape (or "load existing") clears the delta URLs and flags ⚠ *needs re-curation* whenever
   something was promoted; a failed test-index validation raises the same flag. The reason is kept
   (`recuration_reason`) and shown on the badge. "Start curating" clears it when nothing changed.

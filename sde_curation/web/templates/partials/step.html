@@ -27,12 +27,16 @@
   {% set ex = stats.existing_crawl %}
   <dl class="meta"><dt>Seed</dt><dd><a href="{{ c.seed_url }}" target="_blank" rel="noopener">{{ c.seed_url }}</a></dd>
       <dt>Max pages</dt><dd>{{ c.max_pages }}</dd><dt>Division</dt><dd>{{ c.division }}</dd>
-      {% if ex %}<dt>Existing crawl</dt><dd>{{ ex.modified.strftime('%Y-%m-%d %H:%M') }}Z{% if ex.already_loaded %} <span class="muted">(loaded)</span>{% else %} <span class="muted">(not loaded yet)</span>{% endif %} <small class="muted">{{ ex.where }}</small></dd>{% endif %}</dl>
+      {% if ex %}<dt>Existing crawl</dt><dd>{{ ex.modified.strftime('%Y-%m-%d %H:%M') }}Z{% if not ex.complete %} <span class="err">(crawl in progress — checkpoint, not loadable)</span>{% elif ex.already_loaded %} <span class="muted">(loaded)</span>{% else %} <span class="muted">(not loaded yet)</span>{% endif %} <small class="muted">{{ ex.where }}</small></dd>{% endif %}</dl>
+  {% if ex and not ex.complete %}<p class="muted">The crawler is still writing this collection on the crawler host (or died mid-run): the object above is a partial checkpoint. Wait for the crawl to finish, then reload this page to load it.</p>{% endif %}
   <div class="inline">
-    {% if ex and not ex.already_loaded %}{{ load_existing(ex, info.state == 'current') }}{% endif %}
+    {% if ex and ex.loadable %}{{ load_existing(ex, info.state == 'current') }}{% endif %}
+    {% set crawling = ex and not ex.complete %}
     {{ btn('Scrape' if info.state == 'current' else 'Re-scrape', '/api/collections/' ~ cid ~ '/scrape',
-           'Run the crawler on the seed URL' ~ ('; a newer crawl will flag the collection for re-curation' if info.state == 'done' else ''),
-           primary=(info.state == 'current' and not (ex and not ex.already_loaded)), confirm=('Re-run the crawl? Existing dump is replaced.' if info.state == 'done' else None)) }}
+           ('A crawl for this collection is already running on the crawler host — wait for it to finish' if crawling else
+            'Run the crawler on the seed URL' ~ ('; a newer crawl will flag the collection for re-curation' if info.state == 'done' else '')),
+           primary=(info.state == 'current' and not (ex and ex.loadable)), disabled=crawling,
+           confirm=('Re-run the crawl? Existing dump is replaced.' if info.state == 'done' else None)) }}
   </div>
 
 {% elif step == 'scraped' %}
@@ -42,13 +46,17 @@
       {% if sj %}<span class="job j-{{ sj.state }}">{{ sj.state }}</span>{% if sj.progress.reused %} <span class="muted">(loaded from existing crawl)</span>{% endif %}{% if sj.error %} <span class="err">{{ sj.error }}</span>{% endif %}{% endif %}</dd>
       <dt>Dump URLs</dt><dd>{{ c.dump_count }}{% if sj and sj.progress.failed %}, {{ sj.progress.failed }} failed to fetch{% endif %}</dd>
       {% if sj and sj.progress.summary and sj.progress.summary.failures_by_reason %}<dt>Failures</dt><dd>{{ sj.progress.summary.failures_by_reason }}</dd>{% endif %}
-      {% if ex and not ex.already_loaded %}<dt>Newer crawl</dt><dd>{{ ex.modified.strftime('%Y-%m-%d %H:%M') }}Z <small class="muted">{{ ex.where }}</small></dd>{% endif %}</dl>
+      {% if ex and not ex.complete %}<dt>Crawl in progress</dt><dd>checkpoint {{ ex.modified.strftime('%Y-%m-%d %H:%M') }}Z <span class="muted">(partial, not loadable until the crawler finishes)</span> <small class="muted">{{ ex.where }}</small></dd>
+      {% elif ex and not ex.already_loaded %}<dt>Newer crawl</dt><dd>{{ ex.modified.strftime('%Y-%m-%d %H:%M') }}Z <small class="muted">{{ ex.where }}</small></dd>{% endif %}</dl>
   {% else %}<p class="muted">Not scraped yet.</p>{% endif %}
   <div class="inline">
     {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Compute what changed vs. the curated set, then look through the dump URLs before curating',
            primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=dump') }}
-    {% if ex and not ex.already_loaded %}{{ load_existing(ex, False) }}{% endif %}
-    {{ btn('Re-scrape', '/api/collections/' ~ cid ~ '/scrape', 'Run the crawler again', confirm='Re-run the crawl? Existing dump is replaced.') }}
+    {% if ex and ex.loadable %}{{ load_existing(ex, False) }}{% endif %}
+    {% set crawling = ex and not ex.complete %}
+    {{ btn('Re-scrape', '/api/collections/' ~ cid ~ '/scrape',
+           'A crawl for this collection is already running on the crawler host — wait for it to finish' if crawling else 'Run the crawler again',
+           disabled=crawling, confirm='Re-run the crawl? Existing dump is replaced.') }}
   </div>
 
 {% elif step == 'curating' %}

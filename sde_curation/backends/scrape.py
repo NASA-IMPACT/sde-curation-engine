@@ -60,6 +60,20 @@ class ExistingCrawl:
     modified: datetime
     where: str
     size: int | None = None
+    # False when the file is a mid-run checkpoint (crawler v2 rewrites the S3 documents object every
+    # N pages / M seconds) rather than the output of a finished crawl: loading it would ingest a
+    # truncated collection, so the UI must not offer it and fetch_existing must refuse it.
+    complete: bool = True
+
+
+def crawl_complete(documents_modified: datetime, summary_modified: datetime | None) -> bool:
+    """Is the S3 documents object a finished crawl? run.py uploads documents, then the failures log,
+    then the failure summary — and the summary only exists once the crawl (retry pass included)
+    is over. So the object is final iff the summary is at least as new as it. A newer documents
+    object is a checkpoint of a crawl still running (or one that died before finishing); no
+    summary at all means the collection's first crawl has not finished yet. Both timestamps have
+    1-second resolution, hence >= rather than >."""
+    return summary_modified is not None and summary_modified >= documents_modified
 
 
 class ScrapeBackend(Protocol):
@@ -318,7 +332,8 @@ class SsmRemoteScraper:
     running waits for the whole batch. We therefore track two phases:
 
     * queued  — our job file is in the inbox and our log has not been touched since we
-      submitted. No clock runs: a queue can legitimately be days long. Only a dead watcher
+      submitted (or, when a job for the collection was already in the inbox, since we attached
+      to it — we never drop a duplicate). No clock runs: a queue can legitimately be days long. Only a dead watcher
       (or the job file disappearing) fails it; the UI shows how long it has waited.
     * running — the crawler rewrote our log after submission. The stall clock
       (INDEX_STALL_TIMEOUT_S) restarts on every change to the log tail.
@@ -400,18 +415,27 @@ class SsmRemoteScraper:
         return self._key(f"scraped_collections/{cid}.json")
 
     async def existing(self, collection: Collection) -> ExistingCrawl | None:
-        key = self._docs_key(collection.collection_id)
+        cid = collection.collection_id
+        key = self._docs_key(cid)
         try:
             r = await asyncio.to_thread(self.s3.head_object, Bucket=self.s.crawler_s3_bucket, Key=key)
         except self.s3.exceptions.ClientError:
             return None
+        summary = await self._head(self._key(f"failure_logs/{cid}_failures_summary.json"))
         return ExistingCrawl(modified=r["LastModified"], where=f"s3://{self.s.crawler_s3_bucket}/{key}",
-                             size=r.get("ContentLength"))
+                             size=r.get("ContentLength"),
+                             complete=crawl_complete(r["LastModified"], summary[1] if summary else None))
 
     async def fetch_existing(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult:
         ex = await self.existing(collection)
         if ex is None:
             raise ScrapeError(f"no existing crawl in {ex.where if ex else self.s.crawler_s3_bucket} — run the crawler")
+        if not ex.complete:
+            raise ScrapeError(
+                f"{ex.where} is a checkpoint written at {ex.modified:%Y-%m-%d %H:%M}Z by a crawl that has not "
+                "finished (its failure summary is older or missing): the crawler is still working on this "
+                "collection, or died mid-run. Wait for it to finish, or run the crawler."
+            )
         await on_progress({"reused": True})
         result = await self._download(collection.collection_id)
         result.external_ref, result.crawled_at = "reused", ex.modified
@@ -456,11 +480,20 @@ class SsmRemoteScraper:
         # timestamp so a write landing in the same second still counts.
         submitted = datetime.now(UTC).replace(microsecond=0)
 
-        cmd_id = await self._send(self.remote_script(build_job(collection)))
-        status, out = await self._invocation(cmd_id)
-        if status != "Success":
-            raise ScrapeError(f"SSM job drop {status}: {out[-400:]}")
-        await on_progress({"ssm_command": cmd_id, "processed": 0, "docs": 0, "failed": 0, "queued": True})
+        # A job file for this collection already in the inbox is a crawl queued or running on the
+        # host (run.py moves it to jobs/done only when it finishes). Dropping ours would overwrite
+        # that file and make the watcher crawl the site a second time after the current batch —
+        # so follow the job that is already there instead.
+        already = await self._poll(cid)
+        if already is not None and already.inbox:
+            cmd_id = None
+            await on_progress({"attached": True, "processed": 0, "docs": 0, "failed": 0, "queued": True})
+        else:
+            cmd_id = await self._send(self.remote_script(build_job(collection)))
+            status, out = await self._invocation(cmd_id)
+            if status != "Success":
+                raise ScrapeError(f"SSM job drop {status}: {out[-400:]}")
+            await on_progress({"ssm_command": cmd_id, "processed": 0, "docs": 0, "failed": 0, "queued": True})
 
         def uploaded(now: tuple[str, datetime] | None) -> bool:
             return now is not None and now != before and (before is None or now[1] >= submitted)
@@ -511,7 +544,7 @@ class SsmRemoteScraper:
                 )
 
         result = await self._download(cid)
-        result.external_ref = cmd_id
+        result.external_ref = cmd_id or "attached"
         return result
 
 

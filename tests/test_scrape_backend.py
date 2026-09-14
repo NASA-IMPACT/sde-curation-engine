@@ -264,7 +264,7 @@ async def test_ssm_queued_behind_batch_then_runs(ssm_env):
 
     assert json.loads(res.documents_path.read_text())[0]["url"] == "https://ex.org/a"
     assert res.summary["documents_scraped"] == 1
-    assert seen[0]["ssm_command"] == "cmd-1" and seen[0]["queued"] is True
+    assert seen[0]["ssm_command"] == "cmd-2" and seen[0]["queued"] is True  # cmd-1 checked the inbox
     assert {"queued": True, "queue_ahead": 2} in seen, seen
     started = seen.index({"queued": False, "queue_ahead": 0})
     assert all(s.get("queued") for s in seen[:started]), "no crawl progress before the log was fresh"
@@ -339,3 +339,42 @@ async def test_ssm_exit_zero_without_upload(ssm_env):
     host.on_poll = lambda n: host.start_crawl(["# s3 skipped (no bucket)", "# exit=0 elapsed_s=1.0"])
     with pytest.raises(ScrapeError, match="uploaded no documents object"):
         await make().run(coll(5), lambda p: asyncio.sleep(0))
+
+
+async def test_ssm_attaches_to_a_job_already_in_the_inbox(ssm_env):
+    """pds.nasa.gov: Scrape was pressed while the host was mid-crawl on the same collection.
+    Dropping a second job file would overwrite the one in the inbox and crawl the site again
+    after the batch; the engine must follow the running job and ingest its final upload."""
+    host, make, upload = ssm_env
+    host.inbox.add("ex.org.json")  # queued or running on the host already
+    seen, cb = await progress_recorder()
+
+    def on_poll(n):
+        if n == 2:
+            host.start_crawl(PAGES[:1])
+        if n == 4:
+            host.tail = PAGES + ["# s3 documents=...", "# exit=0 elapsed_s=9.0"]
+            upload()
+
+    host.on_poll = on_poll
+    s = make()
+    res = await s.run(coll(5), cb)
+    drops = [c for c in s.ssm.commands if "cat >" in c["Parameters"]["commands"][0]]
+    assert drops == [], "dropped a duplicate job file"
+    assert seen[0] == {"attached": True, "processed": 0, "docs": 0, "failed": 0, "queued": True}
+    assert res.external_ref == "attached" and json.loads(res.documents_path.read_text())[0]["url"] == "https://ex.org/a"
+
+
+async def test_ssm_drops_the_job_when_the_inbox_has_no_file_for_it(ssm_env):
+    host, make, upload = ssm_env
+
+    def on_poll(n):
+        if n == 2:
+            host.start_crawl(PAGES + ["# exit=0 elapsed_s=1.0"])
+            upload()
+
+    host.on_poll = on_poll
+    s = make()
+    seen, cb = await progress_recorder()
+    await s.run(coll(5), cb)
+    assert "ex.org.json" in host.inbox and "ssm_command" in seen[0] and "attached" not in seen[0]
