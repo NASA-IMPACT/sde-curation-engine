@@ -127,7 +127,7 @@ def next_action(c: Collection, job) -> dict:
                 "hint": "Run the crawler on the seed URL"}
     if c.status is Status.SCRAPED:
         return {"label": "Start curating", "kind": "post", "url": f"/api/collections/{cid}/recompute",
-                "then": f"/collections/{cid}?tab=curate", "hint": "Compute what changed vs. the curated set"}
+                "then": f"/collections/{cid}?tab=dump", "hint": "Compute what changed vs. the curated set, then look through the dump URLs"}
     if c.status is Status.CURATING:
         return {"label": "Open curation", "kind": "link", "url": f"/collections/{cid}?tab=curate",
                 "hint": "Settle the exclusions, set metadata, then promote"}
@@ -504,12 +504,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """The collections table (outerHTML swap) + out-of-band filter counts."""
         return templates.TemplateResponse(request, "partials/rows.html", {**await dashboard_context(request), "oob": True})
 
-    TABS = ("overview", "curate", "urls", "activity")
+    # The pipeline stepper (backlog → scraped → curating → curated → test index → live) is always at
+    # the top; a collection opens at its current step. The tab row (Overview · Dump URLs · Curate ·
+    # Delta URLs · Curated URLs · Activity) only exists under steps 3 Curating and 4 Curated; every
+    # other step shows its panel alone. The three URL sets share one template (tab_urls.html).
+    TABS = ("overview", "dump", "curate", "delta", "curated", "activity")
+    TABBED_STEPS = (Status.CURATING, Status.CURATED)
     TAB_ALIASES = {"patterns": "curate"}  # old links / bookmarks
 
-    def norm_tab(tab: str | None) -> str:
+    def norm_tab(tab: str | None, set_: str | None = None) -> str:
         tab = TAB_ALIASES.get(tab or "", tab or "")
+        if tab == "urls":  # old links: ?tab=dump|delta|curated
+            tab = norm_set(set_) or "dump"
         return tab if tab in TABS else "overview"
+
+    def tab_template(tab: str) -> str:
+        return "partials/tab_urls.html" if tab in SETS else f"partials/tab_{tab}.html"
+
+    def selected_step(c: Collection, step: str | None, tab: str) -> tuple[Status, str]:
+        """Which pipeline step is open, and which tab. A tab other than Overview only exists under
+        Curating / Curated, so a link straight to a URL set or Curate pulls the stepper there."""
+        sel = Status(step) if step in {s.value for s in Status} else c.status
+        if tab != "overview" and sel not in TABBED_STEPS:
+            sel = Status.CURATED if _ORDER[c.status] >= _ORDER[Status.CURATED] else Status.CURATING
+        return sel, tab
     # The three URL sets, named the same everywhere: dump_urls / delta_urls / curated_urls tables,
     # dump_count / delta_count / curated_count, ?set=dump|delta|curated, and the labels
     # "Dump URLs" / "Delta URLs" / "Curated URLs". ("deltas" is accepted for old links.)
@@ -571,18 +589,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "failure_label": failure_label,
         }
 
-    async def tab_context(request: Request, c: Collection, tab: str) -> dict[str, Any]:
+    async def tab_context(request: Request, c: Collection, tab: str, sel: Status) -> dict[str, Any]:
         d = db(request)
         job = await d.latest_job(c.collection_id)
-        ctx: dict[str, Any] = {"c": c, "job": job, "tab": tab, "statuses": list(Status)}
+        ctx: dict[str, Any] = {"c": c, "job": job, "tab": tab, "statuses": list(Status),
+                               "selected": sel, "tabbed": sel in TABBED_STEPS, "tab_template": tab_template(tab)}
         if tab == "overview":
-            step = request.query_params.get("step")
-            sel = Status(step) if step in {s.value for s in Status} else c.status
-            ctx.update(await step_context(request, c, sel)); ctx["selected"] = sel
-        elif tab == "urls":
-            set_ = norm_set(request.query_params.get("set")) or (
-                "delta" if c.delta_count else "curated" if c.curated_count else "dump")
-            ctx.update(await urls_context(request, c, set_))
+            ctx.update(await step_context(request, c, sel))
+        elif tab in SETS:
+            ctx.update(await urls_context(request, c, tab))
         elif tab == "curate":
             ctx.update(await curate_context(request, c))
         else:
@@ -661,12 +676,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"c": c, "job": ctx["job"], "stats": ctx["stats"]}
 
     @app.get("/collections/{collection_id}", response_class=HTMLResponse)
-    async def collection_page(request: Request, collection_id: str, tab: str = "overview"):
+    async def collection_page(request: Request, collection_id: str, tab: str = "overview", set: str | None = None,
+                              step: str | None = None):
         c = await must_get(request, collection_id)
-        tab = norm_tab(tab)
+        sel, tab = selected_step(c, step, norm_tab(tab, set))
         ctx = await header_context(request, c)
-        ctx.update(await tab_context(request, c, tab))
-        ctx["selected"] = ctx.get("selected", c.status)
+        ctx.update(await tab_context(request, c, tab, sel))
         return templates.TemplateResponse(request, "collection.html", ctx)
 
     @app.get("/collections/{collection_id}/header", response_class=HTMLResponse)
@@ -677,10 +692,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/collections/{collection_id}/tab/{tab}", response_class=HTMLResponse)
     async def collection_tab(request: Request, collection_id: str, tab: str):
         c = await must_get(request, collection_id)
-        tab = norm_tab(tab)
-        ctx = await tab_context(request, c, tab)
-        ctx["selected"] = ctx.get("selected", c.status)
-        return templates.TemplateResponse(request, f"partials/tab_{tab}.html", ctx)
+        sel, tab = selected_step(c, request.query_params.get("step"), norm_tab(tab, request.query_params.get("set")))
+        ctx = await tab_context(request, c, tab, sel)
+        return templates.TemplateResponse(request, tab_template(tab), ctx)
 
     @app.get("/collections/{collection_id}/urls/{set_}")
     async def collection_urls(request: Request, collection_id: str, set_: str, format: str | None = None):
@@ -761,10 +775,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "steps": pipeline_steps(c), "stats": stats}
 
     @app.get("/collections/{collection_id}/pipeline", response_class=HTMLResponse)
-    async def collection_pipeline(request: Request, collection_id: str):
+    async def collection_pipeline(request: Request, collection_id: str, step: str | None = None):
+        """The stepper alone (refreshed on SSE / polling); `step` keeps the curator's selection lit."""
         c = await must_get(request, collection_id)
         ctx = await step_context(request, c, c.status)
-        ctx["selected"] = c.status
+        ctx["selected"] = Status(step) if step in {s.value for s in Status} else c.status
         return templates.TemplateResponse(request, "partials/pipeline_inner.html", ctx)
 
     @app.get("/collections/{collection_id}/step/{step}", response_class=HTMLResponse)
@@ -1107,11 +1122,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/collections/{collection_id}/curate", include_in_schema=False)
     async def curate_page(request: Request, collection_id: str):
-        """Old curation page → the URLs › Deltas tab of the workbench (filters preserved)."""
+        """Old curation page → the Delta URLs tab of the workbench (filters preserved)."""
         await must_get(request, collection_id)
         qs = str(request.url.query)
         return RedirectResponse(
-            f"/collections/{collection_id}?tab=urls&set=delta" + (f"&{qs}" if qs else ""), status_code=302
+            f"/collections/{collection_id}?tab=delta" + (f"&{qs}" if qs else ""), status_code=302
         )
 
     # ── indexing ───────────────────────────────────────────────────────

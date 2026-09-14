@@ -45,8 +45,8 @@
       {% if ex and not ex.already_loaded %}<dt>Newer crawl</dt><dd>{{ ex.modified.strftime('%Y-%m-%d %H:%M') }}Z <small class="muted">{{ ex.where }}</small></dd>{% endif %}</dl>
   {% else %}<p class="muted">Not scraped yet.</p>{% endif %}
   <div class="inline">
-    {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Compute what changed vs. the curated set and open the curation workspace',
-           primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=curate') }}
+    {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute', 'Compute what changed vs. the curated set, then look through the dump URLs before curating',
+           primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=dump') }}
     {% if ex and not ex.already_loaded %}{{ load_existing(ex, False) }}{% endif %}
     {{ btn('Re-scrape', '/api/collections/' ~ cid ~ '/scrape', 'Run the crawler again', confirm='Re-run the crawl? Existing dump is replaced.') }}
   </div>
@@ -57,8 +57,8 @@
   <div class="inline">
     {% if info.state == 'todo' %}
       {{ btn('Start curating', '/api/collections/' ~ cid ~ '/recompute',
-             'Scrape first' if c.dump_count == 0 else 'Compute the delta URLs (dump vs. curated) and open the curation workspace',
-             primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=curate') }}
+             'Scrape first' if c.dump_count == 0 else 'Compute the delta URLs (dump vs. curated), then look through the dump URLs before curating',
+             primary=True, disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=dump') }}
     {% else %}
       <a class="button primary" href="/collections/{{ cid }}?tab=curate">Open curation</a>
       {{ btn('Recompute delta URLs', '/api/collections/' ~ cid ~ '/recompute', 'Re-run the diff of the dump URLs against the curated URLs (safe to repeat)', disabled=(c.dump_count == 0)) }}

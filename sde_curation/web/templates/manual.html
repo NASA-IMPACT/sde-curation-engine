@@ -98,7 +98,7 @@
 
   <li id="s-exclusions">
     <h3>Exclusions: decide what must never be indexed</h3>
-    <p>Press <b>Start curating</b>. The engine computes the delta URLs and opens the Curate tab at section 1. Press <b>✨ Suggest exclusions</b>. It first applies the team's global exclude list, then sends the <b>included delta URLs</b> and titles to the model in batches and asks for exclude globs. On a first pass that is the whole dump; after a re-crawl only what changed, so 90 delta URLs on a 100k-page site cost one call. The button tells you how many URLs and how many calls before you press it; it stays disabled until you have started curating.</p>
+    <p>Press <b>Start curating</b>. The engine computes the delta URLs and opens the <b>Dump URLs</b> tab so you see everything the crawl found before deciding anything; when you have seen enough, open the <b>Curate</b> tab at section 1. Press <b>✨ Suggest exclusions</b>. It first applies the team's global exclude list, then sends the <b>included delta URLs</b> and titles to the model in batches and asks for exclude globs. On a first pass that is the whole dump; after a re-crawl only what changed, so 90 delta URLs on a 100k-page site cost one call. The button tells you how many URLs and how many calls before you press it; it stays disabled until you have started curating.</p>
     <figure><img src="{{ static_url('manual/03-exclusions.png') }}" alt="Curate tab, Exclusions section, with eight suggested exclude rules listed with their source, match count, and rationale, plus Accept and Reject buttons">
     <figcaption><b>Exclusion suggestions.</b> Each row is a glob, where it came from (<i>global list</i> or <i>AI</i>), how many dump URLs it matches, and why. Match counts link to the URLs. Accept one, edit one, accept all of a type, or accept all.</figcaption></figure>
     <p>Every suggestion has three options. <b>Accept</b> creates a real exclude rule and recomputes the delta URLs. <b>Edit</b> turns the glob into a text box so you can narrow or widen it (say <code>*/tag/*</code> to <code>*/blog/tag/*</code>) and then <b>Save &amp; accept</b>: the rule is created with your glob and recorded as <i>AI, edited</i>. <b>Reject</b> dismisses it. You can also add an exclude or include rule by hand: a glob with <code>*</code>, or an exact URL. When every suggestion is decided, press <b>Continue to metadata</b>.</p>
@@ -110,8 +110,8 @@
     <p>Press <b>✨ Suggest metadata</b>. It makes one model call per included delta URL that has not been classified yet, sending the full page text. Each answer carries a title, a division, and a document type, each with a confidence: <b>high</b> means explicit in the text, <b>medium</b> a strong inference, <b>low</b> a guess. Answers are saved as they arrive, so cancelling keeps what finished.</p>
     <figure><img src="{{ static_url('manual/05-metadata.png') }}" alt="Curate tab at the Metadata step: Exclusions marked done, the Suggest metadata card with its last run, and a review bar showing 66 AI suggestions with accept-all buttons per field and confidence counts">
     <figcaption><b>Metadata section after a run.</b> The review bar counts suggestions by field and by confidence, with an accept-all per field. Section 3 below already warns that promoting now would discard the undecided suggestions.</figcaption></figure>
-    <p>To see the suggestions on the rows themselves, press <b>Review one by one</b> or open <b>URLs › Delta URLs</b>. Each AI badge shows the proposed value and its confidence, with ✓ to accept, ✎ to edit it first (the title opens in an editor prefilled with the suggestion; for division and type the dropdown jumps to the suggested value so you can pick another), and ✕ to dismiss. A value you change before accepting is recorded as <i>AI, edited</i>. Filter the table by confidence to review only the medium and low ones by hand and accept the rest in bulk.</p>
-    <figure><img src="{{ static_url('manual/06-urls-pending.png') }}" alt="URLs tab, Delta URLs set, with AI badges under the title, division, and document type cells showing the proposed value, its confidence, and accept and dismiss buttons">
+    <p>To see the suggestions on the rows themselves, press <b>Review one by one</b> or open the <b>Delta URLs</b> tab. Each AI badge shows the proposed value and its confidence, with ✓ to accept, ✎ to edit it first (the title opens in an editor prefilled with the suggestion; for division and type the dropdown jumps to the suggested value so you can pick another), and ✕ to dismiss. A value you change before accepting is recorded as <i>AI, edited</i>. Filter the table by confidence to review only the medium and low ones by hand and accept the rest in bulk.</p>
+    <figure><img src="{{ static_url('manual/06-urls-pending.png') }}" alt="Delta URLs tab, with AI badges under the title, division, and document type cells showing the proposed value, its confidence, and accept and dismiss buttons">
     <figcaption><b>Delta URLs with AI badges.</b> The title column shows the scraped title above the effective one. Division and type are dropdowns you can set directly. Every edit here becomes an exact-URL rule. The <b>Edited by</b> column says who set the row's values: <b>AI</b> (accepted suggestions), <b>SME</b> (typed or toggled by a curator), or <b>AI + SME</b>; hover it to see the rule behind each field. The same column, and the same filter, exist on the Curated URLs and Dump URLs tables.</figcaption></figure>
     <div class="tip"><span class="eyebrow">Why the Rules count jumps</span><p>Accepting 22 titles, 22 divisions, and 22 types adds 66 rules, one exact-URL rule per accepted value. That is expected. It is what makes every accepted value visible and reversible in the rules table. Exclude suggestions are globs and stay few.</p></div>
     <figure><img src="{{ static_url('manual/07-rules.png') }}" alt="The Rules table: eight exclude globs followed by exact-URL title rules, each with its match count, when it was added, who added it, and a delete button">
@@ -140,22 +140,26 @@
 
 <h2 id="screens">Screens reference</h2>
 <h3>The workbench header</h3>
-<p>Sticky on every tab. Name, seed link, status badge, the running job with a cancel button, and four count chips that are also links:</p>
+<p>Sticky on every view. Name, seed link, status badge, the running job with a cancel button, and the <b>Next</b> action. The counts sit on the tab row under Curating / Curated:</p>
 <dl class="defs">
   <dt>Dump URLs</dt><dd>Every URL the last crawl found. Raw, but you can exclude or include a row right there.</dd>
   <dt>Delta URLs</dt><dd>What will change in the curated URLs when you promote: new · modified · removed · excluded.</dd>
   <dt>Curated URLs</dt><dd>The approved set: metadata plus the page text each row was approved with. Included rows, with that text, are what gets exported to the index. Every field is still editable; an edit becomes a delta URL.</dd>
   <dt>Rules</dt><dd>Every rule in force for this collection, including exact-URL rules from per-row edits and accepted AI suggestions, each with its source (AI, AI edited, SME, global list).</dd>
 </dl>
-<h3>The four tabs</h3>
+<h3>The pipeline and the six tabs</h3>
+<p>The six-step pipeline is always at the top. A collection opens at its current step, and clicking a step shows that step's panel: what it did, its actions, details, the last job, and Advanced (Re-scrape, manual status override, Delete for admins). Under steps <b>3 Curating</b> and <b>4 Curated</b> a row of tabs appears, in the order you work: look at what the crawl found, curate, check what will change, check what was approved.</p>
 <dl class="defs">
-  <dt>Overview</dt><dd>The clickable pipeline with a panel per step, details, the last job, and Advanced (Re-scrape, manual status override, Delete for admins).</dd>
+  <dt>Overview</dt><dd>The step's panel, details and last job.</dd>
+  <dt>Dump URLs</dt><dd>Every URL the last crawl found, raw: title, content type, depth, text size and state. Start curating lands here, so you see the whole crawl before deciding anything.</dd>
   <dt>Curate</dt><dd>Exclusions, Metadata, Promote, in the order you work them, with the full rules table underneath.</dd>
-  <dt>URLs</dt><dd>Three sets: Dump URLs, Delta URLs, Curated URLs. Search, filter by change kind, exclusion, division, type, AI confidence, text changed, and URL spelling changed (<b>renamed</b>: the same page under http/https, with or without a trailing slash or #fragment — one modified delta, not a new row plus a removal). A curated URL the last crawl could not fetch (403, timeout, challenge page) or never reached (page cap) is <b>kept</b>, not removed; filter <i>not fetched by the last crawl</i> to see them. A <b>removed</b> delta says why: HTTP 404, or never seen by a complete crawl. Download the filtered rows as CSV.</dd>
+  <dt>Delta URLs</dt><dd>What will change in the curated URLs when you promote: new, modified, removed, excluded.</dd>
+  <dt>Curated URLs</dt><dd>The approved set; included rows are exported to the index.</dd>
   <dt>Activity</dt><dd>Every job, the status history, and the audit trail.</dd>
 </dl>
-<figure><img src="{{ static_url('manual/04-urls-crawl.png') }}" alt="URLs tab, Dump URLs set: the raw crawl with title, content type, depth, text size and state per URL, read-only">
-<figcaption><b>URLs › Dump URLs.</b> The raw crawl. Use it to check what the crawler actually found before deciding anything; ✗/✓ on a row excludes or includes it.</figcaption></figure>
+<p>All three URL tables have the same controls. Search, filter by change kind, exclusion, division, type, AI confidence, text changed, and URL spelling changed (<b>renamed</b>: the same page under http/https, with or without a trailing slash or #fragment — one modified delta, not a new row plus a removal). A curated URL the last crawl could not fetch (403, timeout, challenge page) or never reached (page cap) is <b>kept</b>, not removed; filter <i>not fetched by the last crawl</i> to see them. A <b>removed</b> delta says why: HTTP 404, or never seen by a complete crawl. Download the filtered rows as CSV.</p>
+<figure><img src="{{ static_url('manual/04-urls-crawl.png') }}" alt="Dump URLs tab: the raw crawl with title, content type, depth, text size and state per URL, read-only">
+<figcaption><b>Dump URLs.</b> The raw crawl. Use it to check what the crawler actually found before deciding anything; ✗/✓ on a row excludes or includes it.</figcaption></figure>
 <h3>The Jobs page</h3>
 <p><code>/jobs</code> lists every running or queued job across all collections, who started it, and live progress, with the recent history underneath. The dashboard carries a compact version of the same strip.</p>
 <figure><img src="{{ static_url('manual/09-jobs.png') }}" alt="Jobs page: one running scrape with a cancel button, and a table of six recent jobs with kind, state, who started them, start time, duration and result">
@@ -207,8 +211,8 @@
   <li><b>A malformed model reply fails the job and writes nothing.</b> A bad API key or model name aborts after ten consecutive errors. Per-URL failures never abort.</li>
   <li><b>Validation waits on purpose.</b> The thirty-second pause after a test run is the index refresh window, not a stall.</li>
   <li><b>Prod indexing is gated on the latest test run.</b> A new test run after a passed one resets the gate until it passes too.</li>
-  <li><b>CSV export follows your filters.</b> The download on the URLs tab contains exactly the rows you are looking at.</li>
-  <li><b>Old links still work.</b> Links to the previous curate page, and <code>set=deltas</code> links, redirect into URLs › Delta URLs.</li>
+  <li><b>CSV export follows your filters.</b> The download on each URL tab contains exactly the rows you are looking at.</li>
+  <li><b>Old links still work.</b> Links to the previous curate page, and <code>set=deltas</code> links, redirect into the Delta URLs tab.</li>
   <li><b>Delete is admin only and permanent.</b> It removes the collection, its crawl, its rules, and its history from the engine. Crawler output in S3 is untouched.</li>
 </ul>
 

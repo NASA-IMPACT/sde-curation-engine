@@ -192,10 +192,10 @@ async def test_metadata_suggestions_flow(crawler_client):
     assert d["title_ai_conf"] == "high" and d["document_type_ai_conf"] == "low" and d["ai_model"] == "fake"
     assert len(d["ai_content_hash"]) == 64
     assert d["title"] is None and d["document_type"] is None  # effective fields untouched
-    page = (await c.get("/collections/ex.org?tab=urls&set=delta")).text
+    page = (await c.get("/collections/ex.org?tab=delta")).text
     assert "AI: Page 2" in page and 'class="ai conf-high"' in page and 'class="ai conf-low"' in page
     assert (await c.get("/api/collections/ex.org/delta?q=p2")).json()["total"] == 1
-    low = (await c.get("/collections/ex.org?tab=urls&set=delta&ai=low")).text
+    low = (await c.get("/collections/ex.org?tab=delta&ai=low")).text
     assert "AI: Documentation" in low
     curate = (await c.get("/collections/ex.org?tab=curate")).text
     assert "conf-high" in curate and "8 classified" in curate and "tokens in" in curate

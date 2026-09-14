@@ -41,13 +41,14 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
 ## Using it
 1. **Dashboard** (`/`): add a collection (seed URL, name, division, max pages). Each row shows
    status, counts (dump URLs / delta URLs / curated URLs), last job, and **one button — the next step**.
-2. **Collection workbench** (`/collections/{id}`) — one page, four tabs, a sticky header:
+2. **Collection workbench** (`/collections/{id}`) — one page, a sticky header, the pipeline stepper always on top, and under steps Curating / Curated six tabs (Overview · Dump URLs · Curate · Delta URLs · Curated URLs · Activity; Start curating lands on Dump URLs):
    - **Header**: name, seed link, status badge (icon + label), ⚠ *needs re-curation*, running-job
-     chip with **cancel**, and count chips that are links — **Dump URLs · Delta URLs (new/mod/removed/excl) ·
-     Curated · Patterns** — plus the one **Next** action for the current step.
-   - **Overview**: the clickable pipeline stepper (each step's panel shows what it did, its primary
-     action, and a redo where sensible), details, last job, *Advanced* (re-scrape, manual status, delete).
-   - **URLs**: sub-tabs **Dump URLs** (raw crawl: title, type, depth, text size, state) · **Delta URLs**
+     chip with **cancel**, and the one **Next** action for the current step. The counts
+     (**Dump URLs · Delta URLs · Curated URLs**, rules on **Curate**) sit on the tab row.
+   - **Pipeline stepper**: each step's panel shows what it did, its primary action, and a redo where
+     sensible, with details, last job and *Advanced* (re-scrape, manual status, delete). Under the
+     other steps this panel is all there is; under Curating / Curated it is the **Overview** tab.
+   - **Dump URLs** (first tab; raw crawl: title, type, depth, text size, state) · **Delta URLs**
      (kind badge, scraped → effective title, division, type, exclude — all editable inline; AI badges)
      · **Curated** (read-only approved set with a **Curate ↗** jump when a delta exists). Search,
      kind / excluded / division / type filters, page size, paging, ⇩ CSV of the filtered rows.
@@ -55,7 +56,7 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
    - **Patterns & AI**: add a pattern, the pattern table (match counts link to the matching delta URLs),
      ✨ suggestions with Accept/Reject, Recompute and Promote.
    - **Activity**: all jobs and the status history.
-   Old `/collections/{id}/curate` links (and `set=deltas`) redirect into URLs › Delta URLs.
+   Old `/collections/{id}/curate` links (and `set=deltas`) redirect into the Delta URLs tab.
    Step panel actions:
 
    | Step | Panel actions |

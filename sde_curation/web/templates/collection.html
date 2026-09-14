@@ -15,9 +15,11 @@
   {% include "partials/header.html" %}
 </div>
 
-{% include "partials/tabs.html" %}
+{# The pipeline stepper is always visible; clicking a step swaps #tab-body (and the URL) to that step. #}
+{% include "partials/pipeline.html" %}
 
-<div id="tab-body" data-tab="{{ tab }}">
-  {% include "partials/tab_" ~ tab ~ ".html" %}
+<div id="tab-body" data-tab="{{ tab }}" data-step="{{ selected }}">
+  {% if tabbed %}{% include "partials/tabs.html" %}{% endif %}
+  {% include tab_template %}
 </div>
 {% endblock %}

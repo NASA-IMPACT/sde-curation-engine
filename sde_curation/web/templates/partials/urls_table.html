@@ -3,7 +3,7 @@
    turns the row into a delta URL (see the cell macros). #}
 {% set cid = c.collection_id %}
 {% set running = job and job.state == 'running' %}
-{% set base = '/collections/' ~ cid ~ '?tab=urls&set=' ~ set %}
+{% set base = '/collections/' ~ cid ~ '?tab=' ~ set %}
 {% macro qs(extra) -%}
 {{ base }}&q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is none else ('true' if excluded else 'false') }}&division={{ (division or '')|urlencode }}&document_type={{ (document_type or '')|urlencode }}&ai={{ ai or '' }}&changed={{ changed or '' }}&edited={{ edited or '' }}&renamed={{ renamed or '' }}&unreachable={{ unreachable or '' }}&per={{ per }}{{ extra }}
 {%- endmacro %}
@@ -41,7 +41,7 @@
 {%- endmacro %}
 
 <form method="get" action="/collections/{{ cid }}" class="tbl-toolbar" hx-boost="true" hx-target="#tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-push-url="true">
-  <input type="hidden" name="tab" value="urls"><input type="hidden" name="set" value="{{ set }}">
+  <input type="hidden" name="tab" value="{{ set }}">{% if selected %}<input type="hidden" name="step" value="{{ selected }}">{% endif %}
   <input type="search" name="q" value="{{ q or '' }}" placeholder="search url / title" size="28" aria-label="search">
   {% if set == 'delta' %}
   <select name="kind" aria-label="kind"><option value="">any kind</option>{% for k in kinds %}<option value="{{ k }}" {% if kind == k %}selected{% endif %}>{{ 'removed' if k == 'deleted' else k }}</option>{% endfor %}</select>
@@ -97,7 +97,7 @@
       <td class="muted small">{{ (r.content_type or '')|replace('text/','') }}</td>
       <td class="num">{{ r.depth if r.depth is not none else '' }}</td>
       <td class="num muted small">{{ '{:,}'.format(r.text_len or 0) }}</td>
-      <td class="nowrap">{% if r.in_deltas %}<a class="kind k-modified" href="{{ base|replace('set=dump','set=delta') }}&q={{ r.url|urlencode }}" title="this URL is a delta — open it under Delta URLs">delta URL ↗</a>{% elif r.in_curated %}<span class="kind k-ok" title="in the curated URLs, unchanged">in curated</span>{% else %}<span class="kind k-new" title="not in the curated URLs yet">new</span>{% endif %}</td>
+      <td class="nowrap">{% if r.in_deltas %}<a class="kind k-modified" href="{{ base|replace('tab=dump','tab=delta') }}&q={{ r.url|urlencode }}" title="this URL is a delta — open it under Delta URLs">delta URL ↗</a>{% elif r.in_curated %}<span class="kind k-ok" title="in the curated URLs, unchanged">in curated</span>{% else %}<span class="kind k-new" title="not in the curated URLs yet">new</span>{% endif %}</td>
     </tr>
     {% elif set == 'delta' %}
     {% set editable = r.kind != 'deleted' and not running %}
@@ -115,7 +115,7 @@
     <tr{% if r.excluded %} class="excluded"{% endif %}>
       <td class="num muted">{{ n }}</td>
       <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a>{% if r.url in has_delta %}
-        <br><a class="kind k-modified nowrap" href="{{ base|replace('set=curated','set=delta') }}&q={{ r.url|urlencode }}" title="a newer version of this URL is waiting under Delta URLs — open it there">delta URL ↗</a>{% endif %}{% if r.crawl_failure %}
+        <br><a class="kind k-modified nowrap" href="{{ base|replace('tab=curated','tab=delta') }}&q={{ r.url|urlencode }}" title="a newer version of this URL is waiting under Delta URLs — open it there">delta URL ↗</a>{% endif %}{% if r.crawl_failure %}
         <br><span class="kind k-kept" title="the last crawl could not fetch this URL ({{ failure_label(r.crawl_failure) }}); it is kept as approved, not removed — the index keeps its last text">kept · {{ failure_label(r.crawl_failure) }}</span>{% endif %}</td>
       <td class="nowrap">{{ toggle_cell(r, why, not running) }}</td>
       <td>{{ title_cell(r, why, not running) }}</td>

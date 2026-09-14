@@ -21,7 +21,7 @@
     {% else %}<b>No delta URLs.</b> The curated URLs ({{ c.curated_count }}) are up to date with the dump. Add a rule below, edit a curated URL, or re-scrape to review again.{% endif %}
   </div>
   <div class="inline">
-    {% if c.status == 'scraped' and c.dump_count %}<button class="primary" hx-post="/api/collections/{{ cid }}/recompute?then={{ ('/collections/' ~ cid ~ '?tab=curate')|urlencode }}" hx-swap="none" {% if running %}disabled{% endif %}>Start curating</button>
+    {% if c.status == 'scraped' and c.dump_count %}<button class="primary" hx-post="/api/collections/{{ cid }}/recompute?then={{ ('/collections/' ~ cid ~ '?tab=dump')|urlencode }}" hx-swap="none" {% if running %}disabled{% endif %}>Start curating</button>
     {% elif c.status not in ('backlog', 'scraped') %}<button class="secondary" hx-post="/api/collections/{{ cid }}/recompute" hx-swap="none" {% if running %}disabled{% endif %} title="Recompute the delta URLs against the latest dump">Review / re-curate</button>{% endif %}
   </div>
 </div></section>
@@ -39,7 +39,7 @@
 <section class="card stage-card {{ s1 }}" id="exclusions">
   <h2><span class="n">1</span> Exclusions <small class="muted">decide what must never be indexed</small> <span class="state-tag {{ s1 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s1] }}</span></h2>
   <p class="muted">{{ c.dump_count }} dump URLs → {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }}
-    ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.renamed %} · <a href="/collections/{{ cid }}?tab=urls&set=delta&renamed=true" title="same page, new URL spelling (http→https, trailing slash, #fragment): one modified delta, not a new row plus a removal">{{ dc.renamed }} renamed</a>{% endif %}{% if dc.content_changed %} · <a href="/collections/{{ cid }}?tab=urls&set=delta&changed=true">{{ dc.content_changed }} text changed</a>{% endif %} · {{ dc.deleted }} removed{% if dc.kept %} · <a href="/collections/{{ cid }}?tab=urls&set=curated&unreachable=true" title="curated URLs the last crawl could not fetch or never reached: kept as approved, not removed">{{ dc.kept }} kept</a>{% endif %} · <b>{{ dc.excluded }} excluded</b> by rules).
+    ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.renamed %} · <a href="/collections/{{ cid }}?tab=delta&renamed=true" title="same page, new URL spelling (http→https, trailing slash, #fragment): one modified delta, not a new row plus a removal">{{ dc.renamed }} renamed</a>{% endif %}{% if dc.content_changed %} · <a href="/collections/{{ cid }}?tab=delta&changed=true">{{ dc.content_changed }} text changed</a>{% endif %} · {{ dc.deleted }} removed{% if dc.kept %} · <a href="/collections/{{ cid }}?tab=curated&unreachable=true" title="curated URLs the last crawl could not fetch or never reached: kept as approved, not removed">{{ dc.kept }} kept</a>{% endif %} · <b>{{ dc.excluded }} excluded</b> by rules).
     Exclude what should never be searchable (login, feeds, tag pages…); <code>include</code> always beats <code>exclude</code>.</p>
 
   <div class="next"><div class="next-inner">
@@ -78,7 +78,7 @@
       <thead><tr><th>Type</th><th>Match</th><th title="global = from the shared exclude list; llm = drafted by the model for this collection">Source</th><th title="dump URLs this rule would match">Matches</th><th>Why</th><th></th></tr></thead>
       <tbody>{% for sg in suggestions %}
         <tr><td><span class="ptype {{ sg.type }}">{{ sg.type }}</span></td><td class="match"><code>{{ sg.match }}</code></td><td><span class="src src-{{ sg.source }}">{{ 'global list' if sg.source == 'global' else 'AI' }}</span></td>
-            <td class="num"><a href="/collections/{{ cid }}?tab=urls&set=dump&q={{ sg.match|replace('*','')|urlencode }}" title="show matching dump URLs">{{ sg.matches }}</a></td><td class="muted why">{{ sg.rationale }}</td>
+            <td class="num"><a href="/collections/{{ cid }}?tab=dump&q={{ sg.match|replace('*','')|urlencode }}" title="show matching dump URLs">{{ sg.matches }}</a></td><td class="muted why">{{ sg.rationale }}</td>
             <td class="inline nowrap actions">
               <button class="primary mini" title="Add as a rule, as suggested" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/{{ sg.id }}/accept" hx-swap="none">Accept</button>
               <button class="secondary mini" type="button" title="Change the glob first, then accept it (recorded as AI, edited)" {% if running %}disabled{% endif %} onclick='editSuggestion(this, {{ cid|tojson }}, {{ sg.id }}, {{ sg.match|tojson }})'>Edit</button>
@@ -101,9 +101,9 @@
   </details>
 
   <div class="inline stage-foot">
-    <a class="small" href="/collections/{{ cid }}?tab=urls&set=delta">Review delta URLs ↗</a>
-    {% if dc.deleted %}<a class="small" href="/collections/{{ cid }}?tab=urls&set=delta&kind=deleted" title="the crawl found them gone (404, or never met in a complete crawl): promote drops them from the curated URLs, the next index run deletes them">{{ dc.deleted }} removed ↗</a>{% endif %}
-    {% if dc.kept %}<a class="small" href="/collections/{{ cid }}?tab=urls&set=curated&unreachable=true" title="the last crawl could not fetch them (or never reached them): kept as approved, not removed">{{ dc.kept }} kept ↗</a>{% endif %}
+    <a class="small" href="/collections/{{ cid }}?tab=delta">Review delta URLs ↗</a>
+    {% if dc.deleted %}<a class="small" href="/collections/{{ cid }}?tab=delta&kind=deleted" title="the crawl found them gone (404, or never met in a complete crawl): promote drops them from the curated URLs, the next index run deletes them">{{ dc.deleted }} removed ↗</a>{% endif %}
+    {% if dc.kept %}<a class="small" href="/collections/{{ cid }}?tab=curated&unreachable=true" title="the last crawl could not fetch them (or never reached them): kept as approved, not removed">{{ dc.kept }} kept ↗</a>{% endif %}
     <span class="grow"></span>
     {% if stage == 'exclusions' %}
     <button class="primary" hx-post="/api/collections/{{ cid }}/stage" hx-ext="json-enc" hx-vals='{"stage": "metadata"}' hx-swap="none"
@@ -147,9 +147,9 @@
                 hx-confirm="Discard all {{ ai_counts[f] }} AI {{ label }}?">✕</button></span>
       {% endfor %}
       <span class="muted small">confidence:</span>
-      {% for lvl in ['high', 'medium', 'low'] %}<a class="conf conf-{{ lvl }}" href="/collections/{{ cid }}?tab=urls&set=delta&ai={{ lvl }}" title="review the {{ lvl }}-confidence suggestions">{{ lvl }} {{ ai_counts.by_conf[lvl] }}</a> {% endfor %}
+      {% for lvl in ['high', 'medium', 'low'] %}<a class="conf conf-{{ lvl }}" href="/collections/{{ cid }}?tab=delta&ai={{ lvl }}" title="review the {{ lvl }}-confidence suggestions">{{ lvl }} {{ ai_counts.by_conf[lvl] }}</a> {% endfor %}
       <span class="grow"></span>
-      <a class="small" href="/collections/{{ cid }}?tab=urls&set=delta&ai=pending">Review one by one ↗</a>
+      <a class="small" href="/collections/{{ cid }}?tab=delta&ai=pending">Review one by one ↗</a>
     </div>
   </div>
   {% endif %}
@@ -174,14 +174,14 @@
   <p class="muted">Promoting writes {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }} into the curated URLs
     ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.renamed %} (of which {{ dc.renamed }} renamed){% endif %} · {{ dc.deleted }} removed · {{ dc.excluded }} excluded) and marks the collection <b>Curated</b>, ready to index.{% if dc.kept %} {{ dc.kept }} curated URL{{ 's' if dc.kept != 1 }} the crawl could not fetch stay as they are.{% endif %}</p>
   {% if removal_warning %}<div class="banner warn">⚠ {{ removal_warning }}</div>{% endif %}
-  {% if crawl_warning %}<div class="banner info">ℹ {{ crawl_warning }} <a class="small" href="/collections/{{ cid }}?tab=urls&set=curated&unreachable=true">Show them ↗</a></div>{% endif %}
+  {% if crawl_warning %}<div class="banner info">ℹ {{ crawl_warning }} <a class="small" href="/collections/{{ cid }}?tab=curated&unreachable=true">Show them ↗</a></div>{% endif %}
   {% if ai_pending_total and curating %}<div class="banner info">⚠ {{ ai_pending_total }} AI suggestion{{ 's are' if ai_pending_total != 1 else ' is' }} still undecided — promoting discards them. Accept or reject them in step 2 first.</div>{% endif %}
   <div class="inline">
     <button class="{{ 'primary' if s3 == 'current' else 'secondary' }}" hx-post="/api/collections/{{ cid }}/promote" hx-swap="none"
             {% if not curating or running %}disabled title="requires status curating and no running job"{% endif %}
             {% if c.delta_count %}hx-confirm="Promote {{ c.delta_count }} delta URLs to the curated URLs?"{% endif %}>{% if c.delta_count %}Promote {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }} → curated{% else %}Mark curated (no delta URLs){% endif %}</button>
     <button class="secondary" title="Re-run the diff of the dump URLs against the curated URLs (safe to repeat)" {% if running or not c.dump_count %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/recompute" hx-swap="none">Recompute delta URLs</button>
-    <a class="small" href="/collections/{{ cid }}?tab=urls&set=delta">Review delta URLs ↗</a>
+    <a class="small" href="/collections/{{ cid }}?tab=delta">Review delta URLs ↗</a>
   </div>
 </section>
 

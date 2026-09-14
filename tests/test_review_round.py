@@ -86,7 +86,7 @@ async def test_ai_edit_then_accept(crawler_client):
     # an invalid edited enum value → 422 and the badge stays
     r = await c.post("/api/collections/ex.org/ai/accept", json={"url": "https://ex.org/p2", "field": "document_type", "value": "Nope"})
     assert r.status_code == 422 and (await delta(c, "https://ex.org/p2"))["document_type_ai"] == "Documentation"
-    page = (await c.get("/collections/ex.org?tab=urls&set=delta&q=p2")).text
+    page = (await c.get("/collections/ex.org?tab=delta&q=p2")).text
     assert "pickAi(" in page and "✎" in page
     actions = [a["action"] for a in (await c.get("/api/collections/ex.org/audit")).json()]
     assert "ai.accept_edited" in actions and "ai.accept" in actions
@@ -106,14 +106,14 @@ async def test_edited_by_survives_promote_and_filters(crawler_client):
     await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "exclude"})  # SME exclude on p3
     d2, d3, d4 = [await delta(c, f"https://ex.org/p{i}") for i in (2, 3, 4)]
     assert d2["edited_by"] == "mixed" and d3["edited_by"] == "mixed" and d4["edited_by"] == "ai"
-    page = (await c.get("/collections/ex.org?tab=urls&set=delta&q=p2")).text
+    page = (await c.get("/collections/ex.org?tab=delta&q=p2")).text
     assert 'class="edited e-mixed"' in page and "AI + SME" in page
     assert 'division */p2' not in page and "division https://ex.org/p2 → Earth Science (by anonymous)" in page  # SME tooltip: unchanged format
-    assert "title https://ex.org/p4 → Page 4 (by anonymous) · AI" in (await c.get("/collections/ex.org?tab=urls&set=delta&q=p4")).text
-    assert 'title="exclude https://ex.org/p3 (by anonymous)"' in (await c.get("/collections/ex.org?tab=urls&set=delta&q=p3")).text
+    assert "title https://ex.org/p4 → Page 4 (by anonymous) · AI" in (await c.get("/collections/ex.org?tab=delta&q=p4")).text
+    assert 'title="exclude https://ex.org/p3 (by anonymous)"' in (await c.get("/collections/ex.org?tab=delta&q=p3")).text
     # filter + csv on deltas
     assert (await c.get("/api/collections/ex.org/delta?limit=100")).json()["total"] == 8
-    only_ai = (await c.get("/collections/ex.org?tab=urls&set=delta&edited=ai")).text
+    only_ai = (await c.get("/collections/ex.org?tab=delta&edited=ai")).text
     assert "https://ex.org/p4" in only_ai and "https://ex.org/p2" not in only_ai
     csv = (await c.get("/collections/ex.org/urls/delta?format=csv&edited=mixed")).text.splitlines()
     assert "edited_by" in csv[0] and len(csv) == 3
@@ -124,9 +124,9 @@ async def test_edited_by_survives_promote_and_filters(crawler_client):
     await c.post("/api/collections/ex.org/promote")
     cur = {r["url"]: r for r in (await c.get("/api/collections/ex.org/curated?limit=100")).json()["items"]}
     assert cur["https://ex.org/p2"]["edited_by"] == "mixed" and cur["https://ex.org/p4"]["edited_by"] == "ai"
-    page = (await c.get("/collections/ex.org?tab=urls&set=curated&q=p2")).text
+    page = (await c.get("/collections/ex.org?tab=curated&q=p2")).text
     assert "AI + SME" in page and "division https://ex.org/p2 → Earth Science (by anonymous)" in page
-    only_mixed = (await c.get("/collections/ex.org?tab=urls&set=curated&edited=mixed")).text
+    only_mixed = (await c.get("/collections/ex.org?tab=curated&edited=mixed")).text
     assert "https://ex.org/p2" in only_mixed and "https://ex.org/p4" not in only_mixed
     csv = (await c.get("/collections/ex.org/urls/curated?format=csv&edited=ai")).text.splitlines()
     assert "edited_by" in csv[0] and len(csv) == 7
@@ -186,17 +186,17 @@ async def test_removal_warning_and_edits_on_every_table(crawler_client):
     for st in ("config_generated", "live"):
         await c.post("/api/collections/ex.org/status", json={"status": st})
     # curated table: toggle exclude on a promoted row → pending modified change, collection back to curating
-    page = (await c.get("/collections/ex.org?tab=urls&set=curated")).text
+    page = (await c.get("/collections/ex.org?tab=curated")).text
     assert "✗ exclude" in page and "Edited by</th>" in page and "read-only" not in page.lower()
     r = await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p6", "type": "exclude"})
     assert r.status_code == 200 and r.json()["modified"] == 1 and r.json()["excluded"] == 1
     d = await delta(c, "https://ex.org/p6")
     assert d["kind"] == "modified" and d["excluded"] is True and d["edited_by"] == "sme"
     assert (await coll(c))["status"] == "curating"
-    page = (await c.get("/collections/ex.org?tab=urls&set=curated&q=p6")).text
+    page = (await c.get("/collections/ex.org?tab=curated&q=p6")).text
     assert "delta URL ↗" in page and 'title="exclude https://ex.org/p6 (by anonymous)"' in page
     # crawl table: the toggle is there, reflects the pending state, and works
-    page = (await c.get("/collections/ex.org?tab=urls&set=dump&q=p6")).text
+    page = (await c.get("/collections/ex.org?tab=dump&q=p6")).text
     assert ">excluded<" in page and "✓ include" in page and "delta URL ↗" in page
     r = await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p7", "type": "exclude"})
     assert r.status_code == 200 and r.json()["modified"] == 2

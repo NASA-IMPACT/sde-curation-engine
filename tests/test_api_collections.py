@@ -52,13 +52,26 @@ async def test_pages_render(client):
     home = await client.get("/")
     assert home.status_code == 200 and "Alpha" in home.text and 'sse-connect="/events"' in home.text
     page = await client.get("/collections/a.org")
-    assert page.status_code == 200 and "pipeline" in page.text and 'role="tab"' in page.text
-    for tab in ("overview", "urls", "curate", "activity"):
+    assert page.status_code == 200 and 'data-tab="overview"' in page.text and "pipeline" in page.text  # opens on the pipeline
+    # the stepper is always there; the tab row only under steps Curating / Curated
+    assert 'class="tabs"' not in page.text and 'data-step="backlog"' in page.text
+    for step in ("curating", "curated"):
+        t = (await client.get(f"/collections/a.org?step={step}")).text
+        assert 'class="tabs"' in t and f'data-step="{step}"' in t and 'data-tab="overview"' in t, step
+    assert 'class="tabs"' not in (await client.get("/collections/a.org?step=live")).text
+    # a link straight to a URL set pulls the stepper to Curating (Curated once something was promoted)
+    t = (await client.get("/collections/a.org?tab=dump")).text
+    assert 'class="tabs"' in t and 'data-step="curating"' in t
+    for tab in ("overview", "dump", "curate", "delta", "curated", "activity"):
         r = await client.get(f"/collections/a.org?tab={tab}")
         assert r.status_code == 200 and f'data-tab="{tab}"' in r.text, tab
     assert 'data-tab="curate"' in (await client.get("/collections/a.org?tab=patterns")).text  # old alias
+    # old ?tab=urls&set=… links land on the set's own tab
+    assert 'data-tab="delta"' in (await client.get("/collections/a.org?tab=urls&set=delta")).text
+    assert 'data-tab="curated"' in (await client.get("/collections/a.org?tab=urls&set=curated")).text
+    assert 'data-tab="dump"' in (await client.get("/collections/a.org?tab=urls")).text
     assert "Status history" in (await client.get("/collections/a.org?tab=activity")).text
-    assert (await client.get("/collections/a.org?tab=bogus")).status_code == 200  # falls back to overview
+    assert 'data-tab="overview"' in (await client.get("/collections/a.org?tab=bogus")).text  # falls back to Overview
     assert (await client.get("/collections/nope")).status_code == 404
     assert (await client.get("/static/htmx.min.js")).status_code == 200
 

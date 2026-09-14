@@ -190,11 +190,11 @@ async def test_scrape_stores_failures_and_the_flow_keeps_unreachable_rows(crawle
     assert (await c.get("/api/collections/ex.org/delta?q=ex.org/p1")).json()["total"] == 1
 
     # the pages say what happened
-    page = (await c.get("/collections/ex.org?tab=urls&set=delta&renamed=true")).text
+    page = (await c.get("/collections/ex.org?tab=delta&renamed=true")).text
     assert ">renamed<" in page and "was https://ex.org/p1" in page and "https://ex.org/p7" not in page
-    page = (await c.get("/collections/ex.org?tab=urls&set=delta&kind=deleted")).text
+    page = (await c.get("/collections/ex.org?tab=delta&kind=deleted")).text
     assert "HTTP 404 not found" in page and "never seen by the crawl" in page
-    page = (await c.get("/collections/ex.org?tab=urls&set=curated&unreachable=true")).text
+    page = (await c.get("/collections/ex.org?tab=curated&unreachable=true")).text
     assert "https://ex.org/p3" in page and "kept · HTTP 403 forbidden" in page and "https://ex.org/p7" not in page
     curate = (await c.get("/collections/ex.org?tab=curate")).text
     assert "2 renamed" in curate and "1 kept" in curate and "could not be fetched by the last crawl" in curate
@@ -232,7 +232,7 @@ async def test_capped_crawl_keeps_curated_rows_it_never_reached(crawler_client):
     r = await c.post("/api/collections/ex.org/recompute")
     assert r.json()["deleted"] == 0 and r.json()["kept"] == 1
     assert (await c.get("/api/collections/ex.org")).json()["status"] == "curated"  # nothing to review
-    page = (await c.get("/collections/ex.org?tab=urls&set=curated&unreachable=true")).text
+    page = (await c.get("/collections/ex.org?tab=curated&unreachable=true")).text
     assert "https://ex.org/p3" in page and "not visited: the crawl stopped at its page cap" in page
     assert "stopped at its page cap (3 pages)" in (await c.get("/collections/ex.org?tab=curate")).text
     # a complete crawl (the summary says the cap was not reached) turns the same absence into a removal
