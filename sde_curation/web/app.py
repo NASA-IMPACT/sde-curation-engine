@@ -489,6 +489,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ctx["recent"] = await db(request).list_recent_jobs(50)
         return templates.TemplateResponse(request, "jobs.html", ctx)
 
+    async def history_context(request: Request, q: str | None, before: int | None, limit: int) -> dict:
+        limit = max(1, min(limit, 1000))
+        q = (q or "").strip() or None
+        rows = await db(request).list_audit(None, limit + 1, q=q, before=before)
+        more = len(rows) > limit
+        rows = rows[:limit]
+        alive = {c.collection_id: c.name for c in await db(request).list_collections()}
+        return {"entries": rows, "names": alive, "q": q or "", "limit": limit, "more": more,
+                "next_before": rows[-1]["id"] if rows and more else None}
+
+    @app.get("/history", response_class=HTMLResponse)
+    async def history_page(request: Request, q: str | None = None, before: int | None = None, limit: int = 200):
+        """The global ledger: every action by anyone on any collection (or on users), newest first —
+        including actions on collections that have since been deleted. Sign-ins are not actions."""
+        return templates.TemplateResponse(request, "history.html", await history_context(request, q, before, limit))
+
+    @app.get("/api/audit")
+    async def api_audit_all(request: Request, q: str | None = None, before: int | None = None, limit: int = 200):
+        """The same ledger as JSON: rows keep their collection_id after the collection is deleted."""
+        ctx = await history_context(request, q, before, limit)
+        return {"entries": ctx["entries"], "next_before": ctx["next_before"]}
+
     @app.get("/manual", response_class=HTMLResponse)
     async def manual_page(request: Request):
         """The curator's handbook: workflow walkthrough with screenshots, rule semantics, quirks."""

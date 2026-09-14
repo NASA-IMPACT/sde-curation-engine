@@ -1023,12 +1023,22 @@ class Database:
                 (utcnow(), actor, collection_id, action, detail),
             )
 
-    async def list_audit(self, collection_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_audit(
+        self, collection_id: str | None = None, limit: int = 100, *, q: str | None = None, before: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Newest first. audit_log has no foreign key on collections on purpose: rows outlive the
+        collection they name, so the global ledger still shows what was done to a deleted one.
+        `q` matches actor, action, collection id or detail (case-insensitive substring); `before`
+        pages by row id (the id of the last row shown)."""
+        where, args = [], []
+        if collection_id is not None:
+            where.append("collection_id=%s"); args.append(collection_id)
+        if q:
+            where.append("(actor ILIKE %s OR action ILIKE %s OR collection_id ILIKE %s OR detail ILIKE %s)")
+            args += [f"%{q}%"] * 4
+        if before is not None:
+            where.append("id < %s"); args.append(before)
+        sql = "SELECT * FROM audit_log" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY id DESC LIMIT %s"
         async with self._conn() as conn:
-            if collection_id is None:
-                cur = await conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT %s", (limit,))
-            else:
-                cur = await conn.execute(
-                    "SELECT * FROM audit_log WHERE collection_id=%s ORDER BY id DESC LIMIT %s", (collection_id, limit)
-                )
+            cur = await conn.execute(sql, (*args, limit))
             return list(await cur.fetchall())

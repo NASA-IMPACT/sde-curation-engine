@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}History · SDE Curation Engine{% endblock %}
+{% block content %}
+<h1>History</h1>
+<p class="muted">Every action by anyone, on any collection, newest first — collection changes, scrapes, curation, indexing and user administration. Rows outlive their collection: a deleted collection's history stays here, marked <span class="muted">deleted</span>.</p>
+<form class="toolbar" method="get" action="/history">
+  <input type="search" name="q" value="{{ q }}" placeholder="Filter by who, action, collection id or detail…" autofocus>
+  <button type="submit" class="secondary">Filter</button>
+  {% if q %}<a class="button secondary" href="/history">Clear</a>{% endif %}
+</form>
+<section class="card">
+  <h2>Actions <span class="count">{{ entries|length }}{% if more %}+{% endif %}</span>{% if q %} <small class="muted">matching “{{ q }}”</small>{% endif %}</h2>
+  <table>
+    <thead><tr><th>At</th><th>By</th><th>Collection</th><th>Action</th><th>Detail</th></tr></thead>
+    <tbody>{% for a in entries %}
+      <tr><td class="nowrap">{{ a.at.strftime('%Y-%m-%d %H:%M:%S') }}Z</td>
+          <td class="small">{{ a.actor }}</td>
+          <td>{% if a.collection_id %}{% if a.collection_id in names %}<a href="/collections/{{ a.collection_id }}?tab=activity">{{ names[a.collection_id] }}</a> <small class="muted">{{ a.collection_id }}</small>{% else %}{{ a.collection_id }} <small class="muted">(deleted)</small>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td><code>{{ a.action }}</code></td><td class="muted">{{ a.detail or '' }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">{% if q %}Nothing matches.{% else %}No recorded actions yet.{% endif %}</td></tr>{% endfor %}</tbody>
+  </table>
+  {% if more %}<p><a class="button secondary" href="/history?before={{ next_before }}&limit={{ limit }}{% if q %}&q={{ q|urlencode }}{% endif %}">Older →</a></p>{% endif %}
+</section>
+{% endblock %}

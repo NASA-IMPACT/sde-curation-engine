@@ -27,6 +27,7 @@
     <li><a href="#screens">Screens reference</a></li>
     <li><a href="#rules">How rules resolve</a></li>
     <li><a href="#jobs">Jobs</a></li>
+    <li><a href="#history">History</a></li>
     <li><a href="#parallel">Working alongside others</a></li>
     <li><a href="#quirks">Things to know</a></li>
     <li><a href="#glossary">Statuses and words</a></li>
@@ -185,6 +186,8 @@
   <li><b>An engine restart fails running jobs</b> with the message "engine restarted while job was running". Start them again.</li>
 </ul>
 
+<h2 id="history">History</h2>
+<p><b>Menu → History</b> is the global ledger: every action by anyone on any collection — collections created and deleted, scrapes, rules, URL edits, promotions, index runs, and user administration — newest first, with who did it and when. Filter by user, action name, collection id or detail text; “Older” pages back. Rows are never removed: a deleted collection's history stays, marked <i>deleted</i>, and the delete row records the collection's name and seed URL. A collection's own <b>Activity</b> tab shows the same rows for that collection only.</p>
 <h2 id="parallel">Working alongside others</h2>
 <p>Concurrency is per collection, not global. Any number of collections can have jobs running at once. Within one collection, exactly one job runs and edits wait their turn.</p>
 <ul>
