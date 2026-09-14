@@ -187,7 +187,7 @@ async def test_removal_warning_and_edits_on_every_table(crawler_client):
         await c.post("/api/collections/ex.org/status", json={"status": st})
     # curated table: toggle exclude on a promoted row → pending modified change, collection back to curating
     page = (await c.get("/collections/ex.org?tab=curated")).text
-    assert "✗ exclude" in page and "Edited by</th>" in page and "read-only" not in page.lower()
+    assert "✗ exclude" in page and ">Edited by<span" in page and "read-only" not in page.lower()
     r = await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p6", "type": "exclude"})
     assert r.status_code == 200 and r.json()["modified"] == 1 and r.json()["excluded"] == 1
     d = await delta(c, "https://ex.org/p6")

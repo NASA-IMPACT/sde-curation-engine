@@ -308,3 +308,13 @@ table.urls td { vertical-align: top; }
   .e-mixed { background: linear-gradient(90deg, #3b0764 50%, #14532d 50%); color: #f3f4f6; border-color: #a78bfa; }
   .e-src-global { background: #0c4a6e; color: #bae6fd; border-color: #0ea5e9; }
 }
+
+/* ── suggestion review tables (Curate › Exclusions / Metadata): scroll in place, sticky header ── */
+.sugg-scroll { max-height: 32rem; overflow: auto; margin: .4rem 0; border-top: 1px solid var(--line); }
+.sugg-scroll thead th { position: sticky; top: 0; background: var(--bg); z-index: 1; }
+.sugg-scroll table.urls td.url { max-width: 26rem; }
+/* ── sortable column headers (URL tables, History) ── */
+th a.sort { color: inherit; text-decoration: none; }
+th a.sort:hover { color: var(--fg); }
+th a.sort .arrow { font-size: .7rem; margin-left: .3rem; opacity: .35; }
+th.sorted a.sort { color: var(--fg); } th.sorted a.sort .arrow { opacity: 1; color: var(--accent); }

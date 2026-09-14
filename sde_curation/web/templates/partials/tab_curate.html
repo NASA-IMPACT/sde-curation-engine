@@ -6,6 +6,7 @@
 {% from "partials/job_progress.html" import job_progress %}
 {% set cid = c.collection_id %}
 {% set running = job and job.state == 'running' %}
+{% from "partials/url_cells.html" import title_cell, select_cell with context %}
 {% set curating = c.status == 'curating' %}
 {% set stage = c.curation_stage if curating else none %}
 {% set dc = stats.delta_counts %}
@@ -74,6 +75,7 @@
       <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/bulk" hx-ext="json-enc" hx-vals='{"decision": "accept"}' hx-swap="none" hx-confirm="Accept all {{ suggestion_counts.total }} suggestions?">Accept all ({{ suggestion_counts.total }})</button>
       <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/bulk" hx-ext="json-enc" hx-vals='{"decision": "reject"}' hx-swap="none" hx-confirm="Reject all {{ suggestion_counts.total }} suggestions?">Reject all</button>
     </div>
+    <div class="sugg-scroll">
     <table>
       <thead><tr><th>Type</th><th>Match</th><th title="global = from the shared exclude list; llm = drafted by the model for this collection">Source</th><th title="dump URLs this rule would match">Matches</th><th>Why</th><th></th></tr></thead>
       <tbody>{% for sg in suggestions %}
@@ -86,6 +88,7 @@
             </td></tr>
       {% endfor %}</tbody>
     </table>
+    </div>
   </div>
   {% elif patterns_ever_run %}<p class="muted small">No undecided suggestions.</p>{% endif %}
 
@@ -149,8 +152,31 @@
       <span class="muted small">confidence:</span>
       {% for lvl in ['high', 'medium', 'low'] %}<a class="conf conf-{{ lvl }}" href="/collections/{{ cid }}?tab=delta&ai={{ lvl }}" title="review the {{ lvl }}-confidence suggestions">{{ lvl }} {{ ai_counts.by_conf[lvl] }}</a> {% endfor %}
       <span class="grow"></span>
-      <a class="small" href="/collections/{{ cid }}?tab=delta&ai=pending">Review one by one ↗</a>
+      <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{"decision": "accept"}' hx-swap="none" hx-confirm="Accept all {{ ai_pending_total }} AI suggestions — every title, division and doc type — as exact-URL rules?">Accept all ({{ ai_pending_total }})</button>
+      <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{"decision": "reject"}' hx-swap="none" hx-confirm="Discard all {{ ai_pending_total }} AI suggestions?">Reject all</button>
+      <a class="small" href="/collections/{{ cid }}?tab=delta&ai=pending" title="the same rows under Delta URLs, with filters, sorting and paging">Review under Delta URLs ↗</a>
     </div>
+    {# The review table: one row per delta URL with a pending suggestion. Same cells as the Delta
+       URLs table (✓ accept · ✎ edit then accept · ✕ dismiss per field), plus accept / reject the
+       whole row. Scrolls in place; beyond the cap the rest is under Delta URLs. #}
+    <div class="sugg-scroll">
+    <table class="urls ai-review">
+      <thead><tr><th class="num">#</th><th>URL</th><th>Title <small class="muted">scraped → effective</small></th><th>Division</th><th>Doc type</th><th title="accept or dismiss every suggestion on this row">Row</th></tr></thead>
+      <tbody>{% for r in ai_rows %}
+        {% set why = effects.get(r.url, {}) %}
+        <tr class="{% if r.excluded %}excluded{% endif %} row-{{ r.kind }}">
+          <td class="num muted">{{ loop.index }}</td>
+          <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a>{% if r.excluded %}<br><span class="kind k-excluded" title="{{ why.excluded or 'excluded' }}">excluded</span>{% endif %}</td>
+          <td>{{ title_cell(r, why, not running) }}</td>
+          <td>{{ select_cell(r, why, not running, 'division', divisions) }}</td>
+          <td>{{ select_cell(r, why, not running, 'document_type', doc_types) }}</td>
+          <td class="inline nowrap actions">
+            <button class="mini ok" title="accept every suggestion on this row" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "accept", "url": r.url}|tojson }}' hx-swap="none">✓ row</button><button class="mini" title="dismiss every suggestion on this row" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "url": r.url}|tojson }}' hx-swap="none">✕</button>
+          </td></tr>
+      {% endfor %}</tbody>
+    </table>
+    </div>
+    {% if ai_rows|length >= ai_rows_cap %}<p class="muted small">Showing the first {{ ai_rows_cap }} URLs with suggestions — the rest are under <a href="/collections/{{ cid }}?tab=delta&ai=pending">Delta URLs</a>, or use the accept-all buttons.</p>{% endif %}
   </div>
   {% endif %}
 
