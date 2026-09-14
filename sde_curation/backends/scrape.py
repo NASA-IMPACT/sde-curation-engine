@@ -22,9 +22,11 @@ from ..models import Collection
 
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
 
-# crawler log lines: "  12    ok         1      https://..."  and  "  ... 25 docs / 3 failed  (cap 100)"
-_PAGE_RE = re.compile(r"^\s+(\d+)\s+(ok|pdf|plain|fail|empty|challenge)\s+\d+\s+\S")
-_HEARTBEAT_RE = re.compile(r"^\s+\.\.\.\s+(\d+) docs / (\d+) failed")
+# crawler log lines: "  12    ok         1      https://..."  and, every 25 docs,
+# "  ... 25 docs / 3 failures logged  (cap 100)" (v1 wrote "3 failed"). Document statuses are
+# ok/pdf/plain; every other status (fail, empty, challenge, timeout, skip, ...) is a failure.
+_PAGE_RE = re.compile(r"^\s+(\d+)\s+([a-z]+)\s+\d+\s+\S")
+_HEARTBEAT_RE = re.compile(r"^\s+\.\.\.\s+(\d+) docs / (\d+) (?:failed|failures logged)")
 _EXIT_RE = re.compile(r"^# exit=(\d+)")
 _ERROR_RE = re.compile(r"^# ERROR: (.*)")
 
@@ -200,9 +202,9 @@ class LocalSubprocessScraper:
         p["log"].unlink(missing_ok=True)
         p["failures"].unlink(missing_ok=True)
 
+        # never pass --bucket: since crawler v2, run.py deletes the local documents file after
+        # a successful S3 upload, and this backend reads that file
         cmd = [str(self.python), "run.py", "--job", str(p["job"])]
-        if self.s.crawler_s3_bucket:
-            cmd += ["--bucket", self.s.crawler_s3_bucket]
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=self.root, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
@@ -305,7 +307,11 @@ def _int(v: str) -> int:
 
 class SsmRemoteScraper:
     """Port of scripts/drop_job.sh: write the job JSON into the EC2 inbox through SSM,
-    then wait for the documents object to appear in S3 (uploaded by run.py on success).
+    then wait for the job log to end with `# exit=0` and download the documents object.
+
+    The documents object is *not* a completion signal: since crawler v2 run.py re-uploads it
+    as a checkpoint every N pages / M seconds, so mid-run it holds a partial array. Only the
+    log's exit line says the crawl (including its retry pass) is finished.
 
     The crawler's watch_inbox.sh runs one run.py at a time under flock, and run.py only
     picks up the inbox files that exist when it starts — so a job dropped while a batch is
@@ -464,8 +470,6 @@ class SsmRemoteScraper:
         last_activity = time.monotonic()
         while True:
             await asyncio.sleep(self.s.scrape_poll_interval_s)
-            if uploaded(await self._head(docs_key)):
-                break
             poll = await self._poll(cid)
             if poll is None:  # SSM hiccup: neither evidence of life nor of death
                 continue
@@ -493,7 +497,7 @@ class SsmRemoteScraper:
                 last_activity = time.monotonic()
                 await on_progress(progress.snapshot())
             if progress.exit_code == 0:
-                # run.py uploads before writing exit=0, so the object is there or never will be
+                # run.py's final upload precedes exit=0, so the object is complete or absent
                 if uploaded(await self._head(docs_key)):
                     break
                 raise ScrapeError(

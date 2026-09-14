@@ -13,13 +13,14 @@ for indexing; no auth in v1.
 
 ### Integration contracts discovered (the two sibling repos)
 
-**`../sde-crawl4ai-scraper-v1`** (crawler; Python 3.11, no pyproject, not importable — run as subprocess)
+**`../sde-crawl4ai-scraper`** (crawler v2.1; Python 3.11, no pyproject, not importable — run as subprocess)
 - Invoke: `<crawler-venv>/bin/python run.py --job <abs job.json> [--bucket B]`; exit 0/1.
   `--job` **moves** the job file to `jobs/done|failed/`.
 - Job JSON: `{"seed": ..., "collection_id": ..., "max_pages": N, "depth_limit", "delay",
   "concurrent_requests", "obey_robots", "include_subdomains"}` (`sde_crawler/job.py::merge_job`).
 - Outputs (under crawler root): `output/collections/<id>.json` (array of
-  `{url,title,full_text,content_type,seed,host,depth}` — written only at end),
+  `{url,title,full_text,content_type,seed,host,depth}` — written at end; with a bucket the
+  local copy is deleted after upload),
   `logs/collections/<id>_failures.jsonl` (live), `logs/collections/<id>_failures_summary.json`,
   `logs/jobs/<job-stem>.log` (progress; ends with `# exit=0 elapsed_s=…` or `# ERROR:`).
 - S3 (`SDE_S3_BUCKET`): `scraped_collections/<id>.json`, `failure_logs/<id>_failures.jsonl`,
@@ -27,7 +28,8 @@ for indexing; no auth in v1.
 - Remote: EC2 instance (CFN stack `SdeCrawlerStack`, outputs `InstanceId`, `BucketName`), SG is
   egress-only → only channel is `ssm.send_command(AWS-RunShellScript)` writing
   `/opt/sde-crawler/jobs/incoming/<id>.json` (model: `scripts/drop_job.sh`); completion =
-  `s3.head_object(scraped_collections/<id>.json)`.
+  the job log's `# exit=0` line. The S3 documents object is **not** a completion signal: v2
+  re-uploads it as a checkpoint every 100 pages / 300 s, so mid-run it is a partial array.
 
 **`../sde-api-scrapers`** branch `web-indexing` (indexer; Python 3.11)
 - Input contract (what *we* must write): `s3://sde-cosmos-indexing-{env}/curated_collections/{collection_key}/{run_id}/documents.jsonl`
@@ -181,7 +183,7 @@ Old `/curate` redirects to URLs › Deltas. Verified by tests (67) and browser w
   full `pytest` green; end-to-end dry run on one seed through all six stages (workflow.md § Verification).
 
 ## Critical existing code to reuse (read-only, called as subprocess/contract)
-- `../sde-crawl4ai-scraper-v1/run.py`, `sde_crawler/job.py` (job shape, `collection_id_from_seed`), `scripts/drop_job.sh` (SSM pattern)
+- `../sde-crawl4ai-scraper/run.py`, `sde_crawler/job.py` (job shape, `collection_id_from_seed`), `scripts/drop_job.sh` (SSM pattern)
 - `../sde-api-scrapers/web/cosmos_source.py` (S3 layout), `web/web_processor.py` (doc/id contract),
   `web/validate.py` (report shape), `api_scraper.py::_run_web_cosmos` (CLI), `infrastructure/DEPLOYMENT.md:250` (run-task)
 

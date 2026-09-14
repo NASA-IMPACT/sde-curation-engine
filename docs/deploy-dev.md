@@ -177,7 +177,7 @@ export AWS_PROFILE=sde-dev            # so the commands below need no --profile
 
 | Key in `dev.json` | Where it comes from | Command |
 |---|---|---|
-| `crawler_instance_id` | `SdeCrawlerStack` output `InstanceId` (sde-crawl4ai-scraper-v1) | `aws cloudformation describe-stacks --stack-name SdeCrawlerStack --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text` |
+| `crawler_instance_id` | `SdeCrawlerStack` output `InstanceId` (sde-crawl4ai-scraper) | `aws cloudformation describe-stacks --stack-name SdeCrawlerStack --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text` |
 | `crawler_bucket` | `SdeCrawlerStack` output `BucketName` | `aws cloudformation describe-stacks --stack-name SdeCrawlerStack --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" --output text` |
 | `indexing_cluster_name` | the api-scrapers ECS cluster, `api-scrapers-cluster-dev` | `aws ecs list-clusters --query "clusterArns[?contains(@,'api-scrapers-cluster')]" --output text` → take the part after the last `/` |
 | `indexing_task_family` | the WEB_COSMOS task definition family, `web_cosmos-scraper-dev` | `aws ecs list-task-definition-families --family-prefix web_cosmos-scraper --status ACTIVE --query families --output text` |

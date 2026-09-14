@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(default=8, ge=1, le=64)  # connections per engine process
 
     # ── sibling repos ──────────────────────────────────────────────────
-    crawler_root: Path = _PROJECTS / "sde-crawl4ai-scraper-v1"
+    crawler_root: Path = _PROJECTS / "sde-crawl4ai-scraper"
     crawler_python: Path | None = None  # defaults to crawler_root/.venv/bin/python
     indexer_root: Path = _PROJECTS / "sde-api-scrapers"
     indexer_python: Path | None = None  # defaults to indexer_root/.venv/bin/python

@@ -6,7 +6,7 @@ Lightweight FastAPI app that drives the SDE curation pipeline:
 1 Backlog → 2 Scraped → 3 Curating → 4 Curated → 5 Test index → 6 Live
 ```
 
-It wraps two existing repos — `../sde-crawl4ai-scraper-v1` (crawling) and
+It wraps two existing repos — `../sde-crawl4ai-scraper` (crawling) and
 `../sde-api-scrapers` (WEB_COSMOS indexing) — behind a small web UI with a live dashboard,
 a clickable pipeline stepper, and a curation grid. Plan and phase status: `docs/plan.md`;
 workflow background: `docs/workflow.md`.
@@ -24,9 +24,9 @@ make lint
 ```
 
 Crawler prerequisite (one-off): the local scrape backend runs `run.py` from
-`../sde-crawl4ai-scraper-v1` with its own Python 3.11 venv:
+`../sde-crawl4ai-scraper` with its own Python 3.11 venv:
 ```bash
-cd ../sde-crawl4ai-scraper-v1
+cd ../sde-crawl4ai-scraper
 python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m playwright install chromium
 ```

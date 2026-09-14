@@ -68,6 +68,22 @@ def test_log_progress_parser():
     assert p.exit_code == 1 and "boom" in p.error
 
 
+def test_log_progress_parser_reads_crawler_v2_lines():
+    """v2.1 renamed the heartbeat and added timeout/skip statuses and checkpoint notes."""
+    p = LogProgress()
+    for line in [
+        "  1     ok         0      https://x/a",
+        "  2     timeout    1      https://x/b",
+        "  3     skip       1      https://x/c.docx",
+        "  4     pdf        1      https://x/d.pdf",
+        "  checkpoint  100 docs -> s3://bkt/scraped_collections/x.json",
+        "  ... 50 docs / 7 failures logged  (cap 100000)",
+    ]:
+        p.feed(line)
+    assert p.snapshot() == {"processed": 4, "docs": 50, "failed": 7}
+    assert p.exit_code is None
+
+
 def test_feed_tail_does_not_double_count_overlapping_tails():
     p = LogProgress()
     first = ["  1     ok         0      https://x/a", "  2     ok         1      https://x/b"]
@@ -293,6 +309,29 @@ async def test_ssm_stall_clock_starts_with_the_crawl_and_resets_on_activity(ssm_
     with pytest.raises(ScrapeError, match="stalled: no log activity"):
         await make(index_stall_timeout_s=0.05).run(coll(5), lambda p: asyncio.sleep(0))
     assert host.polls > 6, "stall fired while the log was still changing"
+
+
+async def test_ssm_mid_run_checkpoint_upload_does_not_end_the_crawl(ssm_env):
+    """Crawler v2 re-uploads the documents object every N pages. The engine must ignore those
+    partial objects and only download after the log says exit=0."""
+    host, make, upload = ssm_env
+    partial = [{"url": "https://ex.org/a", "title": "A", "full_text": "t"}]
+    full = partial + [{"url": "https://ex.org/b", "title": "B", "full_text": "t"}]
+
+    def on_poll(n):
+        if n == 1:
+            host.start_crawl(PAGES[:1])
+        if n == 2:  # checkpoint: object changes while the crawl is still running
+            upload(partial)
+            host.tail = PAGES[:1] + ["  checkpoint  1 docs -> s3://crawl-bkt/scraped_collections/ex.org.json"]
+        if n == 4:
+            host.tail = PAGES + ["# s3 documents=...", "# exit=0 elapsed_s=9.0"]
+            upload(full)
+
+    host.on_poll = on_poll
+    res = await make().run(coll(5), lambda p: asyncio.sleep(0))
+    assert host.polls >= 4, "returned before the crawler wrote exit=0"
+    assert [d["url"] for d in json.loads(res.documents_path.read_text())] == ["https://ex.org/a", "https://ex.org/b"]
 
 
 async def test_ssm_exit_zero_without_upload(ssm_env):

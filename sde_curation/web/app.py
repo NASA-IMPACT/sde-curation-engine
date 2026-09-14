@@ -253,6 +253,7 @@ def failure_label(reason: str | None) -> str:
         "http_auth": "authentication required", "http_rate_limit": "rate limited (429/503)",
         "crawl_unsuccessful": "fetch failed (timeout / connection)", "empty_extract": "page had no text",
         "extract_error": "text extraction failed", "download_error": "file download failed",
+        "url_timeout": "fetch timed out", "skipped_type": "file type the crawler never fetches (office/science data)",
     }.get(reason, reason.replace("_", " "))
 
 
