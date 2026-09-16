@@ -51,6 +51,7 @@ class EnvConfig:
     # Folder inside crawler_bucket the crawler writes to ("" = bucket root).
     crawler_s3_prefix: str = "sde-curation-engine-prototype"
     indexing_container_name: str = "WEB_COSMOSContainer"
+    # dev indexes into a scratch subset; test and prod write the live sde-web index
     web_index_name: str = "sde-web-subset"
     openai_model: str = "gpt-5.6-luna"  # 1.05M-token window: the full page text always fits
     llm_workers: int = 16
@@ -87,9 +88,9 @@ class EnvConfig:
 
 CONFIGS: dict[Environment, EnvConfig] = {
     Environment.DEV: EnvConfig(env=Environment.DEV),
-    Environment.TEST: EnvConfig(env=Environment.TEST),
+    Environment.TEST: EnvConfig(env=Environment.TEST, web_index_name="sde-web"),
     Environment.PROD: EnvConfig(
-        env=Environment.PROD, cpu=2048, memory_mib=4096,
+        env=Environment.PROD, web_index_name="sde-web", cpu=2048, memory_mib=4096,
         db_multi_az=True, db_backup_days=35, db_deletion_protection=True,
     ),
 }
