@@ -262,6 +262,9 @@ class JobManager:
                 await self.db.finish_job(job, JobState.FAILED, error=f"{type(e).__name__}: {e}"[:2000])
                 self._emit(c, job)
 
+    def _retry(self) -> dict[str, Any]:
+        return {"retry_passes": self.s.llm_retry_passes, "retry_delay_s": self.s.llm_retry_delay_s}
+
     async def _run_llm_patterns(self, c: Collection, job: JobRun) -> None:
         """Exclude-only suggestions over the included delta URLs (on a first pass that is the
         whole crawl; after a promote only what changed): the global exclude list first
@@ -312,14 +315,16 @@ class JobManager:
                 job.progress["tokens_out"] = job.progress.get("tokens_out", 0) + done.tokens_out
 
             await run_pool(list(enumerate(chunks)), one, workers=self.s.llm_workers, on_result=on_result,
-                           on_progress=progress, total=len(chunks))
+                           on_progress=progress, total=len(chunks), **self._retry())
             await progress({"suggestions": await self.db.count_pending_pattern_suggestions(cid)})
         await self._guarded(c, job, body)
 
     async def _run_llm_metadata(self, c: Collection, job: JobRun, only_missing: bool) -> None:
         """One call per included delta URL with the full page text, LLM_WORKERS at a time.
         Results are written in small chunks as they arrive, so a cancel keeps what finished and
-        a re-run (only_missing) resumes with the rest. One bad URL never fails the job."""
+        a re-run (only_missing) resumes with the rest. One bad URL never fails the job: calls the
+        provider turned away are retried once at the end, and a URL that still fails gets its
+        error recorded on the row (the next Suggest metadata picks it up again)."""
         async def body():
             cid = c.collection_id
             total = await self.db.count_deltas_for_llm(cid, only_missing=only_missing)
@@ -330,16 +335,25 @@ class JobManager:
                             "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
             llm = self.llm()
             buf: list[dict[str, Any]] = []
+            errs: list[tuple[str, str]] = []
             last_flush = time.monotonic()
             written = 0
 
             async def flush() -> None:
                 nonlocal last_flush, written
                 last_flush = time.monotonic()
+                if errs:
+                    failed, errs[:] = list(errs), []
+                    await self.db.set_delta_ai_errors(cid, failed)
                 if buf:
                     rows, buf[:] = list(buf), []
                     n = await self.db.set_delta_ai(cid, rows)
                     written += n  # never `written += await …`: two flushes overlap and one is lost
+
+            async def on_error(doc, e: Exception) -> None:
+                errs.append((doc["url"], f"{type(e).__name__}: {e}"))
+                if len(errs) >= AI_FLUSH_ROWS or time.monotonic() - last_flush > AI_FLUSH_SECONDS:
+                    await flush()
 
             async def on_result(doc, row):
                 p = job.progress
@@ -354,7 +368,8 @@ class JobManager:
                 await run_pool(
                     self.db.iter_deltas_for_llm(cid, only_missing=only_missing),
                     lambda d: suggest_metadata_one(llm, d, settings=self.s, collection=c),
-                    workers=self.s.llm_workers, on_result=on_result, on_progress=progress, total=total,
+                    workers=self.s.llm_workers, on_result=on_result, on_error=on_error, on_progress=progress,
+                    total=total, **self._retry(),
                 )
             finally:
                 await flush()  # a cancel still keeps every answer that arrived

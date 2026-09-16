@@ -499,7 +499,7 @@ class Database:
         self, collection_id: str, *, kind: str | None = None, excluded: bool | None = None,
         q: str | None = None, division: str | None = None, document_type: str | None = None,
         ai_pending: bool = False, ai_conf: str | None = None, ai_field: str | None = None,
-        content_changed: bool | None = None, edited: str | None = None, renamed: bool | None = None,
+        ai_failed: bool = False, content_changed: bool | None = None, edited: str | None = None, renamed: bool | None = None,
         match: str | None = None, limit: int = 100, offset: int = 0,
         sort: str | None = None, desc: bool = False,
     ) -> tuple[list[DeltaUrl], int]:
@@ -520,6 +520,8 @@ class Database:
             where.append("excluded=%s"); args.append(excluded)
         if content_changed is not None:
             where.append("content_changed=%s"); args.append(content_changed)
+        if ai_failed:
+            where.append("ai_error IS NOT NULL")
         if ai_pending:
             where.append("(title_ai IS NOT NULL OR division_ai IS NOT NULL OR document_type_ai IS NOT NULL)")
         if ai_conf:
@@ -556,14 +558,14 @@ class Database:
                     "COPY delta_urls (collection_id,url,kind,renamed_from,crawl_failure,scraped_title,title,"
                     "division,document_type,excluded,content_changed,edited_by,title_ai,division_ai,"
                     "document_type_ai,title_ai_conf,division_ai_conf,document_type_ai_conf,ai_model,"
-                    "ai_content_hash) FROM STDIN"
+                    "ai_content_hash,ai_error,ai_failures) FROM STDIN"
                 ) as copy:
                     for d in deltas:
                         await copy.write_row((
                             d.collection_id, d.url, d.kind, d.renamed_from, d.crawl_failure, d.scraped_title,
                             d.title, d.division, d.document_type, d.excluded, d.content_changed, d.edited_by,
                             d.title_ai, d.division_ai, d.document_type_ai, d.title_ai_conf, d.division_ai_conf,
-                            d.document_type_ai_conf, d.ai_model, d.ai_content_hash,
+                            d.document_type_ai_conf, d.ai_model, d.ai_content_hash, d.ai_error, d.ai_failures,
                         ))
                 if not keep_effects:
                     await cur.execute("DELETE FROM pattern_effects WHERE collection_id=%s", (collection_id,))
@@ -606,19 +608,32 @@ class Database:
 
     async def set_delta_ai(self, collection_id: str, items: list[dict[str, Any]]) -> int:
         """Bulk-write AI suggestions for whole rows (never touches the effective fields). A
-        re-classification replaces the previous answer, confidence included."""
+        re-classification replaces the previous answer, confidence included, and clears any
+        recorded failure."""
         if not items:
             return 0
         async with self._conn() as conn, conn.cursor() as cur:
             await cur.executemany(
                 """UPDATE delta_urls SET title_ai=%s, division_ai=%s, document_type_ai=%s,
                    title_ai_conf=%s, division_ai_conf=%s, document_type_ai_conf=%s,
-                   ai_model=%s, ai_content_hash=%s
+                   ai_model=%s, ai_content_hash=%s, ai_error=NULL, ai_failures=0
                    WHERE collection_id=%s AND url=%s""",
                 [(i.get("title"), i.get("division"), i.get("document_type"),
                   i.get("title_conf"), i.get("division_conf"), i.get("document_type_conf"),
                   i.get("model"), i.get("content_hash"),
                   collection_id, i["url"]) for i in items],
+            )
+        return len(items)
+
+    async def set_delta_ai_errors(self, collection_id: str, items: list[tuple[str, str]]) -> int:
+        """Record (url, error) for URLs whose Suggest metadata call failed. A previous answer stays:
+        a failed re-classification does not throw away what the model said last time."""
+        if not items:
+            return 0
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.executemany(
+                "UPDATE delta_urls SET ai_error=%s, ai_failures=ai_failures+1 WHERE collection_id=%s AND url=%s",
+                [(err[:1000], collection_id, url) for url, err in items],
             )
         return len(items)
 
@@ -858,7 +873,12 @@ class Database:
     # Pending, included URLs the LLM should classify. `only_missing` = never classified, or the
     # page text changed since the model last saw it (content_changed and a different hash).
     _LLM_WHERE = "d.collection_id=%s AND d.kind!='deleted' AND NOT d.excluded"
+    # "missing": no suggestion left on the row, the last call failed, the model left the document
+    # type empty and no rule sets one (answers from before it was required; a type the SME dismissed
+    # has no confidence either and is not re-asked), or the text changed since the answer
     _LLM_MISSING = (" AND ((d.title_ai IS NULL AND d.division_ai IS NULL AND d.document_type_ai IS NULL)"
+                    " OR d.ai_error IS NOT NULL"
+                    " OR (d.document_type_ai IS NULL AND d.document_type_ai_conf IS NOT NULL AND d.document_type IS NULL)"
                     " OR (d.content_changed AND (d.ai_content_hash IS NULL OR d.ai_content_hash != u.content_hash)))")
 
     async def pending_urls_for_patterns(self, collection_id: str) -> list[tuple[str, str | None]]:
@@ -927,20 +947,23 @@ class Database:
             return [DeltaUrl(**r) for r in await cur.fetchall()]
 
     async def delta_ai_counts(self, collection_id: str) -> dict[str, Any]:
-        """Pending AI suggestions per field, plus `by_conf`: suggestions (field-level) per confidence."""
+        """Pending AI suggestions per field, plus `by_conf`: suggestions (field-level) per confidence,
+        and `failed`: included URLs whose last Suggest metadata call failed."""
         conf = ("COUNT(*) FILTER (WHERE title_ai IS NOT NULL AND title_ai_conf=%s)"
                 " + COUNT(*) FILTER (WHERE division_ai IS NOT NULL AND division_ai_conf=%s)"
                 " + COUNT(*) FILTER (WHERE document_type_ai IS NOT NULL AND document_type_ai_conf=%s)")
         async with self._conn() as conn:
             cur = await conn.execute(
                 f"""SELECT COUNT(title_ai) AS t, COUNT(division_ai) AS d, COUNT(document_type_ai) AS dt,
-                           {conf} AS hi, {conf} AS med, {conf} AS lo
+                           {conf} AS hi, {conf} AS med, {conf} AS lo,
+                           COUNT(*) FILTER (WHERE ai_error IS NOT NULL AND NOT excluded) AS failed
                     FROM delta_urls WHERE collection_id=%s AND kind!='deleted'""",
                 ("high",) * 3 + ("medium",) * 3 + ("low",) * 3 + (collection_id,),
             )
             r = await cur.fetchone()
         return {"title": r["t"] or 0, "division": r["d"] or 0, "document_type": r["dt"] or 0,
-                "by_conf": {"high": r["hi"] or 0, "medium": r["med"] or 0, "low": r["lo"] or 0}}
+                "by_conf": {"high": r["hi"] or 0, "medium": r["med"] or 0, "low": r["lo"] or 0},
+                "failed": r["failed"] or 0}
 
     async def clear_delta_ai_field(self, collection_id: str, field: str, url: str | None = None) -> int:
         assert field in ("title", "division", "document_type")

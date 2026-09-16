@@ -100,8 +100,9 @@ appear without a manual reload:
 - **✨ Suggest metadata** — **one call per included delta URL with the full page text**, up to
   `LLM_WORKERS` (default 16) in flight. The text is never cut: an accurate title needs the whole
   page, and the default model (`gpt-5.6-luna`, 1.05M-token window) takes any page whole; a page
-  beyond the model's window fails that one call (counted, shown, retried on the next run) rather
-  than being guessed from a slice. The model returns a descriptive search-result title, division and document type, each
+  beyond the model's window fails that one call (its error recorded on the row, retried on the next run)
+  rather than being guessed from a slice. Every page gets a document type (the closest, with low
+  confidence, when none fits well). The model returns a descriptive search-result title, division and document type, each
   with a **confidence** (`high` = explicit in the text, `medium` = strong inference, `low` = guess).
   These show as `AI:` badges with the confidence next to each cell in URLs › Delta URLs (filter by
   confidence; the review bar counts them); **✓** accepts (creates an exact-URL pattern, i.e. a
@@ -328,7 +329,7 @@ are in flight — the ceilings come from the systems behind it.
 | `NOTIFY_WEBHOOK_URL`, `PUBLIC_BASE_URL` | Slack-compatible notifications on every status change |
 | `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.6-luna`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` (per attempt), `LLM_MAX_RETRIES`, `LLM_TEMPERATURE` (unset = model default; reasoning models reject any other value) | LLM assist; any OpenAI-compatible endpoint |
 | `PROMOTE_REMOVAL_WARN_RATIO` (0.25) | share of the curated set that must vanish from a crawl before Promote warns |
-| `LLM_WORKERS` (16), `LLM_PATTERN_BATCH_URLS` (1000), `GLOBAL_EXCLUDES_PATH` | calls in flight per LLM job; URLs per Suggest-patterns call; override the packaged global exclude YAML |
+| `LLM_WORKERS` (16), `LLM_RETRY_PASSES` (1), `LLM_RETRY_DELAY_S` (30), `LLM_PATTERN_BATCH_URLS` (1000), `GLOBAL_EXCLUDES_PATH` | calls in flight per LLM job; end-of-job retries of rate-limited / 5xx / timed-out calls (a quarter of the workers, after the delay); URLs per Suggest-patterns call; override the packaged global exclude YAML |
 | `APP_PASSWORD`, `SESSION_SECRET`, `SESSION_TTL_S`, `AUTH_COOKIE_SECURE` | login with local accounts (off when `APP_PASSWORD` is empty; the value seeds the bootstrap `admin`); `/health` stays open |
 
 ## API

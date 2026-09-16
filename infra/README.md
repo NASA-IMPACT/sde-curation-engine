@@ -71,7 +71,7 @@ Changing an account value later: edit `envs/<env>.json`, `make infra-seed`, `mak
 | `INDEXING_ECS_CLUSTER`, `INDEXING_TASK_FAMILY` | SSM `indexing_cluster_name`, `indexing_task_family` |
 | `INDEXING_CONTAINER_NAME`, `INDEXING_SUBNETS` | `EnvConfig`; the default-VPC public subnets in `EnvConfig.azs` (Fargate is not offered in us-east-1e) |
 | `COSMOS_INDEX_BUCKET`, `OPENSEARCH_ENDPOINT_TEST/PROD` | SSM `cosmos_index_bucket`, `opensearch_endpoint_*` |
-| `WEB_INDEX_NAME`, `OPENAI_MODEL` | `EnvConfig` |
+| `WEB_INDEX_NAME`, `OPENAI_MODEL` | `EnvConfig` (`WEB_INDEX_NAME`: `sde-web-subset` in dev, `sde-web` in test and prod) |
 | `PUBLIC_BASE_URL`, `AUTH_COOKIE_SECURE` | the CloudFront URL, `true` |
 | secrets → `OPENAI_API_KEY`, `APP_PASSWORD`, `SESSION_SECRET`, `NOTIFY_WEBHOOK_URL` | `/sde-curation-engine/<env>/*` in Secrets Manager |
 

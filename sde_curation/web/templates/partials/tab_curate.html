@@ -123,6 +123,7 @@
 {{ prompts.metadata.user }}</pre></details>
       {% if not patterns_ever_run %}<br><small class="muted">Tip: run <b>Suggest exclusions</b> first — excluding what should not be indexed means fewer URLs to classify.</small>{% endif %}
       {% if last_metadata_job %}<br><small class="muted">Last run {{ last_metadata_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_metadata_job.state }}">{{ last_metadata_job.state }}</span> · {{ job_progress(last_metadata_job) }}</small>{% endif %}
+      {% if ai_counts.failed %}<br><small title="the call failed even after a retry; the error is shown under each URL">⚠ <a href="/collections/{{ cid }}?tab=delta&ai=failed">{{ ai_counts.failed }} URL{{ 's' if ai_counts.failed != 1 }} failed</a> to classify — Suggest metadata tries {{ 'it' if ai_counts.failed == 1 else 'them' }} again.</small>{% endif %}
       {% if classifiable == 0 and classifiable_all %}<br><small class="muted">Every included URL already has suggestions — <a href="#" hx-post="/api/collections/{{ cid }}/suggest/metadata?all=true" hx-swap="none" hx-confirm="Re-classify all {{ classifiable_all }} included URLs? Existing AI suggestions are replaced.">redo all {{ classifiable_all }}</a>.</small>{% endif %}
     </div>
     <button class="{{ 'primary' if s2 == 'current' or (stage == 'exclusions' and not suggestion_counts.total) else 'secondary' }}"

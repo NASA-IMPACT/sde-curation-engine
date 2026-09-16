@@ -621,7 +621,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "unreachable": "true" if qp.get("unreachable") == "true" else None,
             "excluded": tri_bool(qp.get("excluded")), "division": qp.get("division") or None,
             "document_type": qp.get("document_type") or None, "page": page, "per": per,
-            "ai": qp.get("ai") if qp.get("ai") in ("pending", "high", "medium", "low", *AI_FIELDS) else None,
+            "ai": qp.get("ai") if qp.get("ai") in ("pending", "failed", "high", "medium", "low", *AI_FIELDS) else None,
             # ?match=<glob or exact URL>: the rows a rule matches (the Rules table links here)
             "match": (qp.get("match") or "").strip() or None,
             "changed": "true" if qp.get("changed") == "true" else None,
@@ -647,7 +647,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             rows, total = await d.list_deltas(
                 c.collection_id, kind=lp["kind"], excluded=lp["excluded"], q=lp["q"],
-                division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending",
+                division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending", ai_failed=lp["ai"] == "failed",
                 ai_conf=lp["ai"] if lp["ai"] in ("high", "medium", "low") else None,
                 ai_field=lp["ai"] if lp["ai"] in AI_FIELDS else None,
                 content_changed=True if lp["changed"] else None, edited=lp["edited"],
@@ -814,7 +814,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             rows, _ = await d.list_deltas(
                 c.collection_id, kind=lp["kind"], excluded=lp["excluded"], q=lp["q"],
-                division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending",
+                division=lp["division"], document_type=lp["document_type"], ai_pending=lp["ai"] == "pending", ai_failed=lp["ai"] == "failed",
                 ai_conf=lp["ai"] if lp["ai"] in ("high", "medium", "low") else None,
                 ai_field=lp["ai"] if lp["ai"] in AI_FIELDS else None,
                 content_changed=True if lp["changed"] else None, edited=lp["edited"],
@@ -823,7 +823,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             cols = ["kind", "url", "excluded", "content_changed", "edited_by", "scraped_title", "title", "division",
                     "document_type", "title_ai", "title_ai_conf", "division_ai", "division_ai_conf",
-                    "document_type_ai", "document_type_ai_conf", "ai_model", "renamed_from", "crawl_failure"]
+                    "document_type_ai", "document_type_ai_conf", "ai_model", "ai_error", "renamed_from", "crawl_failure"]
             data = [[getattr(r, k) for k in cols] for r in rows]
         buf = io.StringIO()
         w = csv.writer(buf); w.writerow(cols); w.writerows(data)

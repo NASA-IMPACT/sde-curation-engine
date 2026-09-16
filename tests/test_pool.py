@@ -91,3 +91,55 @@ async def test_cancel_stops_workers_and_keeps_finished_results():
         await task
     assert 2 <= len(k.got) < 100
     assert not [t for t in asyncio.all_tasks() if t.get_name().startswith("llm-pool")]
+
+
+async def test_retryable_failures_get_a_quieter_retry_pass():
+    k = Sink()
+    attempts: dict[int, int] = {}
+    peak_retry, inflight = 0, 0
+
+    async def fn(i):
+        nonlocal peak_retry, inflight
+        attempts[i] = attempts.get(i, 0) + 1
+        if attempts[i] > 1:  # the retry pass
+            inflight += 1; peak_retry = max(peak_retry, inflight)
+            await asyncio.sleep(0.01)
+            inflight -= 1
+        if i % 4 == 0 and attempts[i] == 1:
+            raise LLMRetryable(f"429 on {i}")  # recovers on the retry
+        if i == 5:
+            raise LLMRetryable("503 forever")
+        return i
+
+    stats = await run_pool(range(12), fn, workers=8, on_result=k.on_result, on_error=k.on_error,
+                           on_progress=k.on_progress, progress_interval_s=0, retry_passes=1)
+    assert stats.done == 11 and stats.failed == 1 and stats.retrying == 0
+    assert [i for i, _ in k.errs] == [5]  # on_error only after the last attempt
+    assert attempts == {i: (2 if i % 4 == 0 or i == 5 else 1) for i in range(12)}
+    assert peak_retry <= 2  # a quarter of the workers
+    assert any(p["retrying"] == 4 for p in k.progress) and k.progress[-1]["retrying"] == 0
+
+
+async def test_everything_failing_after_retries_still_raises():
+    k = Sink()
+
+    async def flaky(i):
+        raise LLMRetryable("busy")
+
+    with pytest.raises(LLMError, match="all 3 calls failed"):
+        await run_pool(range(3), flaky, workers=2, on_result=k.on_result, on_error=k.on_error, retry_passes=2)
+    assert sorted(i for i, _ in k.errs) == [0, 1, 2]
+
+
+async def test_per_item_errors_after_a_success_do_not_abort_early():
+    k = Sink()
+
+    async def fn(i):
+        if i == 0:
+            return i
+        await asyncio.sleep(0)
+        raise LLMError("context_length_exceeded")
+
+    stats = await run_pool(range(30), fn, workers=1, on_result=k.on_result, on_error=k.on_error,
+                           abort_after_consecutive_failures=5)
+    assert stats.done == 1 and stats.failed == 29  # 29 < 5 * 10: a run of bad pages, not a broken setup
