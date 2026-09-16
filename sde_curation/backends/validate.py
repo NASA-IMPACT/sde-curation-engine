@@ -4,7 +4,8 @@ Same comparison as the indexer's web/validate.py (count + titles for `collection
 the engine *after* a refresh delay, so it is not fooled by AOSS eventual consistency.
 
 Credentials: the default boto3 chain (task/instance role when deployed, your user locally), or
-VALIDATION_ASSUME_ROLE_ARN for a role that already holds AOSS data access. A 403 means the
+VALIDATION_ASSUME_ROLE_ARN for a role that already holds AOSS data access; the prod target always
+goes through PROD_INDEX_ROLE_ARN when set (the collection is in another account). A 403 means the
 principal is not in the collection's data-access policy → the caller falls back to a second pass.
 """
 
@@ -15,6 +16,7 @@ import logging
 from typing import Any
 
 from ..config import Settings
+from .aoss import aoss_client
 
 log = logging.getLogger(__name__)
 
@@ -29,25 +31,10 @@ def web_id(collection_key: str, url: str) -> str:
     return f"/SDE/{collection_key}/|{url}"  # web/web_processor.py::make_web_id
 
 
-def _client(settings: Settings, endpoint: str):
-    import boto3
-    from opensearchpy import AWSV4SignerAuth, OpenSearch, RequestsHttpConnection
-
-    session = boto3.Session(region_name=settings.aws_region)
-    if settings.validation_assume_role_arn:
-        cr = session.client("sts").assume_role(
-            RoleArn=settings.validation_assume_role_arn, RoleSessionName="sde-curation-validate"
-        )["Credentials"]
-        session = boto3.Session(
-            aws_access_key_id=cr["AccessKeyId"], aws_secret_access_key=cr["SecretAccessKey"],
-            aws_session_token=cr["SessionToken"], region_name=settings.aws_region,
-        )
-    host = endpoint.replace("https://", "").rstrip("/")
-    return OpenSearch(
-        hosts=[{"host": host, "port": 443}],
-        http_auth=AWSV4SignerAuth(session.get_credentials(), settings.aws_region, "aoss"),
-        use_ssl=True, verify_certs=True, connection_class=RequestsHttpConnection, timeout=60,
-    )
+def _client(settings: Settings, endpoint: str, target: str = "test"):
+    # prod lives in another account: read it through the same role the publisher writes with
+    role = settings.prod_index_role_arn if target == "prod" else settings.validation_assume_role_arn
+    return aoss_client(settings, endpoint, role, session_name="sde-curation-validate")
 
 
 def _scan_titles(client, index: str, collection_key: str) -> dict[str, str]:
@@ -107,7 +94,7 @@ async def validate_direct(
     from opensearchpy.exceptions import AuthorizationException, TransportError
 
     def run() -> dict[str, str]:
-        c = client or _client(settings, endpoint)
+        c = client or _client(settings, endpoint, target)
         try:
             return _scan_titles(c, settings.web_index_name, collection_key)
         except AuthorizationException as e:

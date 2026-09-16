@@ -1,7 +1,7 @@
 """CurationEngine-<env>: one Fargate task behind ALB + CloudFront/WAF, its state in RDS
 PostgreSQL (per-collection YAML and logs on EFS), with a task role that can drive the dev crawler
-(SSM) and the WEB_COSMOS indexer (ecs:RunTask) and read the OpenSearch Serverless web index for
-validation."""
+(SSM) and the WEB_COSMOS indexer (ecs:RunTask), read the OpenSearch Serverless web index for
+validation, and publish the test run's vectors to the prod web index ("Index to prod")."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-from config import PARAMS, EnvConfig
+from config import EnvConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTAINER_PORT = 8080
@@ -81,7 +81,7 @@ class CurationEngineStack(Stack):
                                                availability_zones=list(cfg.azs)).subnet_ids
 
         # Account-specific values, resolved by CloudFormation from SSM at deploy time (see config.py).
-        p = {k: ssm.StringParameter.value_for_string_parameter(self, cfg.param_name(k)) for k in PARAMS}
+        p = {k: ssm.StringParameter.value_for_string_parameter(self, cfg.param_name(k)) for k in cfg.params}
         secrets = self._secrets()
         log_group = logs.LogGroup(
             self, "LogGroup", log_group_name=f"/ecs/{cfg.name}",
@@ -145,7 +145,7 @@ class CurationEngineStack(Stack):
         task_role = iam.Role(
             self, "TaskRole", role_name=f"{cfg.name}-task-role",
             assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
-            description="sde-curation-engine: S3 hand-off, SSM to crawler, ecs:RunTask indexer, AOSS read",
+            description="sde-curation-engine: S3 hand-off, SSM to crawler, ecs:RunTask indexer, AOSS validate/publish",
         )
         self._grant_backend_access(task_role, access_point, p)
 
@@ -198,6 +198,8 @@ class CurationEngineStack(Stack):
             "LLM_PATTERN_BATCH_URLS": str(cfg.llm_pattern_batch_urls),
             "VALIDATION_DELAY_S": "30",
         }
+        if cfg.prod_publish_via_role:
+            environment["PROD_INDEX_ROLE_ARN"] = p["prod_index_role_arn"]
         container = task_def.add_container(
             "engine",
             image=ecs.ContainerImage.from_docker_image_asset(image),
@@ -343,6 +345,15 @@ class CurationEngineStack(Stack):
             sid="CosmosHandoffObjects", actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
             resources=[f"{cosmos}/curated_collections/*", f"{cosmos}/index_runs/*"],
         ))
+        # "Index to prod" publishes the vectors the indexer kept from the test run
+        role.add_to_policy(iam.PolicyStatement(
+            sid="CosmosVectorizedRead", actions=["s3:GetObject"], resources=[f"{cosmos}/vectorized/*"],
+        ))
+        if cfg.prod_publish_via_role:
+            # the prod collection is in another account; that role holds its AOSS write access
+            role.add_to_policy(iam.PolicyStatement(
+                sid="AssumeProdIndexRole", actions=["sts:AssumeRole"], resources=[p["prod_index_role_arn"]],
+            ))
         role.add_to_policy(iam.PolicyStatement(
             sid="CrawlerBucketRead", actions=["s3:ListBucket"], resources=[crawler],
         ))
@@ -385,19 +396,24 @@ class CurationEngineStack(Stack):
             conditions={"StringEquals": {"elasticfilesystem:AccessPointArn": access_point.access_point_arn}},
         ))
         # AOSS data-access is separate from IAM: our own policy so nothing owned by other stacks
-        # (sde-services-access, …) has to change. Read-only — the engine only validates.
+        # (sde-services-access, …) has to change. Reads everywhere (validation, the publish fallback);
+        # write on the working index only where "Index to prod" publishes into this same collection.
+        rules = [
+            {"ResourceType": "collection", "Resource": ["collection/${Collection}"],
+             "Permission": ["aoss:DescribeCollectionItems"]},
+            {"ResourceType": "index", "Resource": ["index/${Collection}/sde-web*"],
+             "Permission": ["aoss:DescribeIndex", "aoss:ReadDocument"]},
+        ]
+        if not cfg.prod_publish_via_role:
+            rules.append({"ResourceType": "index", "Resource": [f"index/${{Collection}}/{cfg.web_index_name}"],
+                          "Permission": ["aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument"]})
         aoss.CfnAccessPolicy(
             self, "AossDataAccess", name=f"{cfg.name}"[:32], type="data",
-            description="sde-curation-engine validation reads on the web index",
+            description="sde-curation-engine: validation reads, prod publish writes on the web index",
             policy=cdk.Fn.sub(json.dumps([{
-                "Description": "curation engine read access",
+                "Description": "curation engine access",
                 "Principal": ["${TaskRoleArn}"],
-                "Rules": [
-                    {"ResourceType": "collection", "Resource": ["collection/${Collection}"],
-                     "Permission": ["aoss:DescribeCollectionItems"]},
-                    {"ResourceType": "index", "Resource": ["index/${Collection}/sde-web*"],
-                     "Permission": ["aoss:DescribeIndex", "aoss:ReadDocument"]},
-                ],
+                "Rules": rules,
             }]), {"TaskRoleArn": role.role_arn, "Collection": p["aoss_collection_name"]}),
         )
 

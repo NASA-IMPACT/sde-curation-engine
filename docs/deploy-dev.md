@@ -453,9 +453,11 @@ Same procedure, against that account. In order:
 3. `make bootstrap-github ENV=test PROFILE=sde-test` (add `-c create_oidc_provider=true` via the
    long form if `list-open-id-connect-providers` shows no GitHub provider) and set `AWS_ROLE_TEST`.
 4. Discover the account's values into `infra/envs/test.json` (section 2.4, replacing `dev` with
-   `test` in every name) and `make infra-seed ENV=test PROFILE=sde-test`. Decide what
-   `opensearch_endpoint_test/prod` should be for that environment: they are what the engine's
-   "Index to test / prod" targets validate against, and must equal what that account's indexer uses.
+   `test` in every name) and `make infra-seed ENV=test PROFILE=sde-test`.
+   `opensearch_endpoint_test` must equal what that account's indexer uses.
+   `opensearch_endpoint_prod` is where "Index to prod" publishes the test run's vectors. In test that
+   is the SMCE prod collection, and `test.json` also needs `prod_index_role_arn`
+   ([prod-index-access.md](prod-index-access.md) lists what the prod account has to create).
 5. Create the branch: `git checkout -b test dev && git push -u origin test` → Deploy runs for test.
 6. Section 4 (secrets) and section 5 (verification) with `test` in place of `dev`.
 

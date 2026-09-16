@@ -71,6 +71,8 @@ Changing an account value later: edit `envs/<env>.json`, `make infra-seed`, `mak
 | `INDEXING_ECS_CLUSTER`, `INDEXING_TASK_FAMILY` | SSM `indexing_cluster_name`, `indexing_task_family` |
 | `INDEXING_CONTAINER_NAME`, `INDEXING_SUBNETS` | `EnvConfig`; the default-VPC public subnets in `EnvConfig.azs` (Fargate is not offered in us-east-1e) |
 | `COSMOS_INDEX_BUCKET`, `OPENSEARCH_ENDPOINT_TEST/PROD` | SSM `cosmos_index_bucket`, `opensearch_endpoint_*` |
+| `PROD_INDEX_ROLE_ARN` (test only) | SSM `prod_index_role_arn`, the prod-account role "Index to prod" writes through ([docs/prod-index-access.md](../docs/prod-index-access.md)) |
+| `CRAWLER_S3_PREFIX` | `EnvConfig.crawler_s3_prefix` (`sde-curation-engine-prototype` in dev, bucket root in test) |
 | `WEB_INDEX_NAME`, `OPENAI_MODEL` | `EnvConfig` (`WEB_INDEX_NAME`: `sde-web-subset` in dev, `sde-web` in test and prod) |
 | `PUBLIC_BASE_URL`, `AUTH_COOKIE_SECURE` | the CloudFront URL, `true` |
 | secrets → `OPENAI_API_KEY`, `APP_PASSWORD`, `SESSION_SECRET`, `NOTIFY_WEBHOOK_URL` | `/sde-curation-engine/<env>/*` in Secrets Manager |
@@ -78,8 +80,11 @@ Changing an account value later: edit `envs/<env>.json`, `make infra-seed`, `mak
 `INDEXING_DISPATCH_ROLE_ARN` and `VALIDATION_ASSUME_ROLE_ARN` are deliberately unset: the task role
 carries the `ecs:RunTask`/`iam:PassRole` statements of `CosmosIndexingDispatchRole-<env>` directly
 (that role only trusts `indexing-helper-role`), and the stack adds its own AOSS data-access policy
-(`sde-curation-engine-<env>`, read-only on `index/<collection>/sde-web*`) so direct validation works
-without touching policies owned by other stacks.
+(`sde-curation-engine-<env>`: read on `index/<collection>/sde-web*`, plus write on the working index
+where "Index to prod" publishes into the same collection, i.e. dev) so direct validation and
+publishing work without touching policies owned by other stacks. In test, "Index to prod" writes the
+SMCE prod collection through `PROD_INDEX_ROLE_ARN` instead: see
+[docs/prod-index-access.md](../docs/prod-index-access.md) for the role the prod account has to create.
 
 ## Operating notes
 - **Single task by design** (in-process job registry and locks). A deploy replaces the task
@@ -102,10 +107,16 @@ without touching policies owned by other stacks.
   hand if you really want the data gone.
 
 ## Adding test / prod
+There is no prod curation engine: the real engine runs in SMCE test and publishes to SMCE prod from
+there ("Index to prod", through `prod_index_role_arn`). The `prod` config/branch remain only as
+scaffolding and are not deployed.
+
 Same steps against that account's profile: bootstrap with the `sde` qualifier, write
 `envs/<env>.json`, `make infra-seed ENV=test PROFILE=<profile>`, `make bootstrap-github ENV=test PROFILE=<profile>`
 (add `-c create_oidc_provider=true` if the account has no GitHub OIDC provider yet), set the
 `AWS_ROLE_TEST` secret, then push to the `test` branch (or `make deploy ENV=test PROFILE=<profile>`).
 A deploy against an unseeded account fails on the first missing SSM parameter. Per-env sizes live in
-`config.py` (`CONFIGS`); `OPENSEARCH_ENDPOINT_TEST/PROD` are what the engine's "index to test/prod"
-targets validate against, so decide per environment what those should point at.
+`config.py` (`CONFIGS`). `OPENSEARCH_ENDPOINT_TEST` is what "Index to test" validates against (and
+must equal the account's indexer); `OPENSEARCH_ENDPOINT_PROD` is where "Index to prod" publishes the
+test run's vectors: in test that is the SMCE prod collection, reached through `prod_index_role_arn`
+([docs/prod-index-access.md](../docs/prod-index-access.md)).

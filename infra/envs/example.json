@@ -9,5 +9,6 @@
   "aoss_collection_name": "sde-binary",
   "aoss_collection_id": "xxxxxxxxxxxxxxxxxxxx",
   "opensearch_endpoint_test": "https://xxxxxxxxxxxxxxxxxxxx.us-east-1.aoss.amazonaws.com",
-  "opensearch_endpoint_prod": "https://xxxxxxxxxxxxxxxxxxxx.us-east-1.aoss.amazonaws.com"
+  "opensearch_endpoint_prod": "https://xxxxxxxxxxxxxxxxxxxx.us-east-1.aoss.amazonaws.com",
+  "prod_index_role_arn": "arn:aws:iam::<prod-account>:role/sde-curation-engine-prod-publisher"
 }

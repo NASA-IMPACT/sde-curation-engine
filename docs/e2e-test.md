@@ -22,7 +22,8 @@ INDEXER_FAMILY=$(jq -r .indexing_task_family infra/envs/dev.json)
 - Test site: `https://aurorasaurus.org` with **Max pages** 15. Small, public, stable, and cheap to index.
   Any site works, but keep the cap low: everything you index lands in the shared dev
   `sde-web-subset` index.
-- On dev, **Index to test** and **Index to prod** both write to the dev OpenSearch collection.
+- On dev, **Index to test** and **Index to prod** both write to the dev OpenSearch collection. Index to
+  prod does not run the indexer: it publishes the test run's vectors from S3 `vectorized/`.
   The difference is only which target the run is recorded against and which gate applies.
 
 Pipeline the UI walks, as shown in the step bar on a collection page:
@@ -150,9 +151,13 @@ the index simply had not refreshed yet.
 
 ## 8. Index to prod → Live
 
-Click **Index to prod**, confirm. An `index_prod` job runs against the prod target (on dev: the
-same collection). When it finishes: **Prod run** line on the page, status **Live**, step 6 shows
-**Live ✓** with the hint "Re-scrape to start a new cycle". **Re-index to prod** remains available.
+Click **Index to prod**, confirm. An `index_prod` job publishes the validated test run's vectors to
+the prod target (on dev: the same collection). No indexer task runs. The job moves through
+`preflight → from_vectorized → (from_test_index) → (tombstone) → validating`. When it finishes, the
+page shows a **Prod run** line from test run `<id>` and **Published** `N written (N from S3 vectors ·
+0 from the test index) · … unchanged · … removed`. Status becomes **Live**, and step 6 shows
+**Live ✓** with the hint "Re-scrape to start a new cycle". **Re-index to prod** stays available and,
+with nothing changed, reports `0 written`.
 
 Negative: **Index to prod** is not offered until a test run has validated. Deltas pending after
 a promote block indexing with "N deltas are pending — promote them first".
