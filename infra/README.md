@@ -81,7 +81,7 @@ Changing an account value later: edit `envs/<env>.json`, `make infra-seed`, `mak
 carries the `ecs:RunTask`/`iam:PassRole` statements of `CosmosIndexingDispatchRole-<env>` directly
 (that role only trusts `indexing-helper-role`), and the stack adds its own AOSS data-access policy
 (`sde-curation-engine-<env>`: read on `index/<collection>/sde-web*`, plus write on the working index
-where "Index to prod" publishes into the same collection, i.e. dev and prod) so direct validation and
+where "Index to prod" publishes into the same collection, i.e. dev) so direct validation and
 publishing work without touching policies owned by other stacks. In test, "Index to prod" writes the
 SMCE prod collection through `PROD_INDEX_ROLE_ARN` instead: see
 [docs/prod-index-access.md](../docs/prod-index-access.md) for the role the prod account has to create.
@@ -107,6 +107,10 @@ SMCE prod collection through `PROD_INDEX_ROLE_ARN` instead: see
   hand if you really want the data gone.
 
 ## Adding test / prod
+There is no prod curation engine: the real engine runs in SMCE test and publishes to SMCE prod from
+there ("Index to prod", through `prod_index_role_arn`). The `prod` config/branch remain only as
+scaffolding and are not deployed.
+
 Same steps against that account's profile: bootstrap with the `sde` qualifier, write
 `envs/<env>.json`, `make infra-seed ENV=test PROFILE=<profile>`, `make bootstrap-github ENV=test PROFILE=<profile>`
 (add `-c create_oidc_provider=true` if the account has no GitHub OIDC provider yet), set the

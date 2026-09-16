@@ -54,10 +54,10 @@ class EnvConfig:
     crawler_inbox: str = "/opt/sde-crawler/jobs/incoming"
     # Folder inside crawler_bucket the crawler writes to ("" = bucket root).
     crawler_s3_prefix: str = "sde-curation-engine-prototype"
-    # "Index to prod" writes the prod web index directly. False: that collection is reachable with the
-    # task role (dev, where "prod" is the dev collection; prod itself) → the stack's AOSS data-access
-    # policy grants write on it. True: it is in another account → the task assumes the role in SSM
-    # `prod_index_role_arn` (test, which publishes to SMCE prod).
+    # "Index to prod" writes the prod web index directly. The real engine runs only in test (there is
+    # no prod engine), so test reaches the SMCE prod collection in the other account by assuming the
+    # role in SSM `prod_index_role_arn` (True). False = "prod" is this account's own collection (dev,
+    # where both targets are the dev collection) → the stack's AOSS data-access policy grants write.
     prod_publish_via_role: bool = False
     indexing_container_name: str = "WEB_COSMOSContainer"
     # dev indexes into a scratch subset; test and prod write the live sde-web index
