@@ -280,7 +280,9 @@ class JobManager:
             await self.db.clear_pending_pattern_suggestions(cid)
             gl = global_exclude_hits(load_global_excludes(self.s.global_excludes_path), cand_urls, count_over=all_urls)
             n_global = await self.db.add_pattern_suggestions(cid, gl)
-            examples = [g["match"] for g in sorted(gl, key=lambda g: -g["matches"])[:15]]
+            # every global glob that matched: the model must not repeat them, and a suggestion
+            # whose URLs they already cover is dropped (tasks.suggest_patterns_batch)
+            examples = [g["match"] for g in sorted(gl, key=lambda g: (-g["matches"], g["match"]))]
             if not examples:  # nothing matched: still show the style
                 examples = [g.match for g in load_global_excludes(self.s.global_excludes_path).patterns[:10]]
             unique = dedupe_variants(cand_urls)
@@ -351,7 +353,7 @@ class JobManager:
             try:
                 await run_pool(
                     self.db.iter_deltas_for_llm(cid, only_missing=only_missing),
-                    lambda d: suggest_metadata_one(llm, d, settings=self.s),
+                    lambda d: suggest_metadata_one(llm, d, settings=self.s, collection=c),
                     workers=self.s.llm_workers, on_result=on_result, on_progress=progress, total=total,
                 )
             finally:

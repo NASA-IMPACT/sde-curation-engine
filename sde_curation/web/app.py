@@ -256,13 +256,15 @@ def llm_prompts(settings: Settings) -> dict[str, dict[str, str]]:
     return {
         "patterns": {
             "system": PATTERN_SYSTEM,
-            "user": ("Batch:\n{\"collection\": …, \"seed\": …, \"global_excludes_already_applied\": [top 15 global globs"
+            "user": ("Batch:\n{\"collection\": …, \"seed\": …, \"global_excludes_already_applied\": [every global glob"
                      " that matched], \"batch\": \"i of K\", \"urls\": [{\"url\": …, \"title\": scraped title}, …]}"
                      f" — up to {settings.llm_pattern_batch_urls} URLs per call, no page text"),
         },
         "metadata": {
             "system": METADATA_SYSTEM,
-            "user": ("Document:\n{\"url\": …, \"scraped_title\": …, \"text_chars\": N}\n\nText:\n"
+            "user": ("Document:\n{\"collection\": name, \"collection_seed\": …, \"collection_division\": only when not"
+                     " General, \"collection_document_type\": only when set, \"url\": …, \"scraped_title\": …,"
+                     " \"text_chars\": N}\n\nText:\n"
                      f"<the FULL page text, never cut; every page goes to {settings.openai_model}>"),
         },
     }

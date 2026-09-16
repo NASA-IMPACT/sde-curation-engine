@@ -40,6 +40,29 @@ async def test_suggest_patterns_keeps_only_globs_matching_the_batch_it_saw():
     assert "*/feed*" in fake.calls[0]["user"] and "2 of 3" in fake.calls[0]["user"]
 
 
+async def test_suggest_patterns_drops_globs_the_applied_global_list_already_covers():
+    canned = {"suggestions": [
+        {"type": "exclude", "match": "*/login*", "rationale": "covered by */login*"},
+        {"type": "exclude", "match": "*/account/*", "rationale": "only partly covered"},
+    ]}
+    batch = [{"url": u} for u in ("https://ex.org/login", "https://ex.org/account/login", "https://ex.org/account/me")]
+    kept, _ = await suggest_patterns_batch(FakeProvider(canned), COLL, batch, examples=["*/login*"])
+    assert [k.match for k in kept] == ["*/account/*"]
+
+
+async def test_suggest_metadata_sends_the_collection_context():
+    fake = FakeProvider()
+    coll = COLL.model_copy(update={"name": "PDS", "division": Division.PLANETARY})
+    row = await suggest_metadata_one(fake, {"url": "https://ex.org/a", "title": "Proposers - PDS", "text": "t"},
+                                     settings=SETTINGS, collection=coll)
+    user = fake.calls[-1]["user"]
+    assert '"collection": "PDS"' in user and '"collection_division": "Planetary Science"' in user
+    assert "collection_document_type" not in user  # not set on the collection
+    assert row["title"] == "Proposers"  # the model's title as written: no prefix added
+    await suggest_metadata_one(fake, {"url": "https://ex.org/a", "text": "t"}, settings=SETTINGS, collection=COLL)
+    assert "collection_division" not in fake.calls[-1]["user"]  # General is the untouched default
+
+
 async def test_suggest_patterns_only_accepts_exclude_globs():
     for bad in (
         {"type": "division", "match": "*", "value": "Heliophysics", "rationale": "x"},
@@ -153,6 +176,7 @@ async def test_global_excludes_prepass_and_batching(crawler_client):
     dump = await db.load_dump("ex.org")
     extra = [DumpUrl(collection_id="ex.org", url=u, scraped_title="x") for u in (
         "https://ex.org/login", "http://ex.org/login/", "https://ex.org/tag/sun", "https://ex.org/science/a",
+        "https://ex.org/zz",
     )]
     await db.replace_dump("ex.org", dump + extra)
     c.app.state.settings.llm_pattern_batch_urls = 50  # small batches on a small dump
@@ -162,7 +186,7 @@ async def test_global_excludes_prepass_and_batching(crawler_client):
     job = await wait_job(c, "ex.org")
     p = job["progress"]
     assert job["state"] == "succeeded", job
-    assert p["urls"] == 12 and p["unique"] == 11 and p["calls"] == 1 and p["global"] == 2
+    assert p["urls"] == 13 and p["unique"] == 12 and p["calls"] == 1 and p["global"] == 2
     sugs = (await c.get("/api/collections/ex.org/suggestions")).json()
     by = {s["match"]: s for s in sugs}
     # global list hits come first, with match counts over the whole dump (http + https variants)
@@ -170,9 +194,10 @@ async def test_global_excludes_prepass_and_batching(crawler_client):
     assert by["*/login*"]["source"] == "global" and by["*/login*"]["matches"] == 2
     assert by["*/tag/*"]["source"] == "global" and by["*/tag/*"]["matches"] == 1
     assert "*/privacy*" not in by  # in the list, matches nothing here
-    # the model's own rows: it also proposed */login* and */tag* (chrome segments) — the global row wins
+    # the model's own rows: it also proposed */login* and */tag* (chrome segments) — the global row
+    # wins, and a model glob whose URLs the global list already covers is dropped
     assert all(s["type"] == "exclude" for s in sugs)
-    assert sum(1 for s in sugs if s["source"] == "llm") >= 1
+    assert [s["match"] for s in sugs if s["source"] == "llm"] == ["https://ex.org/zz"]
     page = (await c.get("/collections/ex.org?tab=curate")).text
     assert "src-global" in page and "from the global list" in page
 
