@@ -38,9 +38,19 @@
     // Per-URL edits = exact-URL rules (Dump / Delta / Curated URL tables). When the field still has an
     // AI suggestion (`ai` = true) the edit goes through /ai/accept so the suggestion is resolved too:
     // same value → accepted as AI, a different value → "AI, edited".
+    // A refusal's message: the JSON `detail` when the app sent one. A proxy error page (HTML from the
+    // ALB/CloudFront, e.g. 502 Bad Gateway) never reaches the user as raw markup.
+    function errorText(status, statusText, body) {
+      let m = body || statusText;
+      try { m = JSON.parse(m).detail || m; } catch (_) {}
+      if (typeof m !== 'string') return JSON.stringify(m);
+      if (/^\s*</.test(m) || [502, 503, 504].includes(status))
+        return `The server is temporarily unavailable (HTTP ${status}). Please try again in a moment.`;
+      return m;
+    }
     async function postJson(path, body) {
       const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-      if (!r.ok) { let m = await r.text(); try { m = JSON.parse(m).detail || m; } catch (_) {} alert(m); return false; }
+      if (!r.ok) { alert(errorText(r.status, r.statusText, await r.text())); return false; }
       return true;
     }
     async function editField(cid, url, type, value, ai) {
@@ -101,11 +111,15 @@
     // Connection indicator: green when the SSE stream is open.
     document.body.addEventListener('htmx:sseOpen', () => document.getElementById('conn').classList.add('on'));
     document.body.addEventListener('htmx:sseError', () => document.getElementById('conn').classList.remove('on'));
-    // One place for server-side refusals (4xx/5xx). Aborted/replaced requests never alert.
+    // One place for server-side refusals (4xx/5xx). Aborted/replaced requests never alert, and neither
+    // do background refreshes (an `every Ns` poll fires with no triggering event, an SSE refresh with
+    // an sse:* one): the old content stays and the next refresh recovers, while an alert would freeze
+    // the page — and every timer on it — until OK is clicked.
     document.body.addEventListener('htmx:responseError', (e) => {
-      let msg = e.detail.xhr.responseText || e.detail.xhr.statusText;
-      try { msg = JSON.parse(msg).detail || msg; } catch (_) {}
-      alert(typeof msg === 'string' ? msg : JSON.stringify(msg));
+      const ev = e.detail.requestConfig && e.detail.requestConfig.triggeringEvent;
+      const xhr = e.detail.xhr;
+      if (!ev || ev.type.startsWith('sse:')) { console.warn('background refresh failed', xhr.status, e.detail.pathInfo); return; }
+      alert(errorText(xhr.status, xhr.statusText, xhr.responseText));
     });
 
   </script>

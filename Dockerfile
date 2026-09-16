@@ -19,5 +19,7 @@ RUN groupadd -g 1000 app && useradd -u 1000 -g app -m app \
 USER app
 EXPOSE 8080
 # --proxy-headers: honour X-Forwarded-Proto/For from the ALB (CloudFront in front of it).
+# --timeout-keep-alive must outlast the ALB idle timeout (3600s, engine_stack.py): with uvicorn's 5s
+# default it closed pooled connections just as the ALB reused them for the 5s polls → sporadic 502s.
 CMD ["uvicorn", "sde_curation.web.app:app", "--host", "0.0.0.0", "--port", "8080", \
-     "--proxy-headers", "--forwarded-allow-ips=*"]
+     "--proxy-headers", "--forwarded-allow-ips=*", "--timeout-keep-alive", "3620"]
