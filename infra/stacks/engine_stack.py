@@ -406,8 +406,7 @@ class CurationEngineStack(Stack):
         ]
         if not cfg.prod_publish_via_role:
             rules.append({"ResourceType": "index", "Resource": [f"index/${{Collection}}/{cfg.web_index_name}"],
-                          "Permission": ["aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument",
-                                         "aoss:UpdateIndex"]})
+                          "Permission": ["aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument"]})
         aoss.CfnAccessPolicy(
             self, "AossDataAccess", name=f"{cfg.name}"[:32], type="data",
             description="sde-curation-engine: validation reads, prod publish writes on the web index",

@@ -1,24 +1,54 @@
-# Prod index access for "Index to prod"
+# Request: let the SDE Curation Engine write to the prod `sde-web` index
 
-**Index to prod** does not run the indexer. The engine takes the vectors that the validated test run
-already produced and writes them straight into the production web index:
+**For:** an administrator of the SMCE **prod** AWS account (the account that owns OpenSearch
+Serverless collection `o2mxw7n9akk8n7o5oiqb`)
+**From:** SDE Curation Engine team
+**Effort:** about 15 minutes: one IAM role, one OpenSearch Serverless data-access policy, one check.
+**What to send back:** the ARN of the role you create (step 1).
 
-- the vectors come from `s3://sde-cosmos-indexing-<env>/vectorized/<collection>/<run>/batch_NNNN.jsonl`
-- anything missing there is read from the test index
-- the target is the production `sde-web` index
+---
 
-Nothing is re-chunked or re-vectorized (`sde_curation/backends/publish.py`).
+## Why
 
-The real engine runs in **SMCE test** (account `119417011911`), but the production OpenSearch Serverless
-collection (`o2mxw7n9akk8n7o5oiqb`) is in the prod account. To write to it, the engine assumes a
-role in the prod account. Someone with admin access to the prod account creates that role once, as
-described below.
+The SDE Curation Engine runs **only in SMCE test** (account `119417011911`). There is no prod
+deployment of the engine. When a subject-matter expert (SME) finishes a collection and it passes
+validation against the test index, "Index to prod" publishes it to production. It copies the
+already-computed embeddings into the prod `sde-web` index, so nothing is re-vectorized.
 
-## 1. Role in the prod account
+The prod collection is in your account, so the engine needs a role in your account it can assume.
+The engine's own identity is the ECS task role
+`arn:aws:iam::119417011911:role/sde-curation-engine-test-task-role`, and that role can only assume
+the one role you name.
 
-Suggested name: `sde-curation-engine-prod-publisher`.
+What the engine does in prod, and nothing else:
 
-**Trust policy.** Only the test engine's task role may assume the role:
+| Action | OpenSearch call | Permission |
+|---|---|---|
+| check the index exists (never creates it) | `HEAD sde-web` | `aoss:DescribeIndex` |
+| read one collection's document ids/versions, safety checks, validation | `_search`, `_count` | `aoss:ReadDocument` |
+| add/update that collection's documents; hide removed ones (`public_visibility: false`) | `_bulk` (`index`, `update`) | `aoss:WriteDocument` |
+
+It never creates, deletes, or remaps indexes, and never hard-deletes documents. Every write is
+scoped to a single `collection_key`. Before writing, the engine runs the same guards as the
+production indexer. It refuses to run if:
+- ids would collide or duplicate
+- the collection filter does not isolate one collection
+- more than 90% or 5,000 of a collection's documents would be hidden
+
+---
+
+## Step 0: find the collection name
+
+```bash
+aws opensearchserverless batch-get-collection --ids o2mxw7n9akk8n7o5oiqb \
+  --query 'collectionDetails[0].[name,arn]' --output text
+```
+
+Use that name wherever `<COLLECTION_NAME>` appears below. `<PROD_ACCOUNT_ID>` is your account id.
+
+## Step 1: IAM role `sde-curation-engine-prod-publisher`
+
+**Trust policy** (`trust.json`):
 
 ```json
 {
@@ -31,9 +61,9 @@ Suggested name: `sde-curation-engine-prod-publisher`.
 }
 ```
 
-**Identity policy.** This is the API access to the collection. `aoss:APIAccessAll` is required for
-every data-plane call. What the role may do inside the collection is decided by the data-access
-policy in step 2.
+**Permissions policy** (`aoss-api.json`). OpenSearch Serverless requires `aoss:APIAccessAll` on the
+collection for any data-plane call. What the role may do *inside* the collection is limited by the
+data-access policy in step 2.
 
 ```json
 {
@@ -41,79 +71,114 @@ policy in step 2.
   "Statement": [{
     "Effect": "Allow",
     "Action": "aoss:APIAccessAll",
-    "Resource": "arn:aws:aoss:us-east-1:<prod-account>:collection/o2mxw7n9akk8n7o5oiqb"
+    "Resource": "arn:aws:aoss:us-east-1:<PROD_ACCOUNT_ID>:collection/o2mxw7n9akk8n7o5oiqb"
   }]
 }
 ```
 
-Keep the maximum session duration at 1 h or longer. The engine refreshes the credentials itself
-during long publishes.
+```bash
+aws iam create-role --role-name sde-curation-engine-prod-publisher \
+  --assume-role-policy-document file://trust.json \
+  --description "SDE Curation Engine (SMCE test) publishes curated collections to prod sde-web"
+aws iam put-role-policy --role-name sde-curation-engine-prod-publisher \
+  --policy-name aoss-api-access --policy-document file://aoss-api.json
+aws iam get-role --role-name sde-curation-engine-prod-publisher --query Role.Arn --output text
+```
 
-## 2. AOSS data-access policy in the prod account
+The default maximum session duration (1 hour) is fine. The engine refreshes its credentials during
+long runs.
 
-This grants the role access to the `sde-web` index only. `<collection-name>` is the name of collection
-`o2mxw7n9akk8n7o5oiqb` (`aws opensearchserverless batch-get-collection --ids o2mxw7n9akk8n7o5oiqb`).
+> If your account requires a permissions boundary or a path for roles, add them. Nothing above
+> depends on the role's name, only on its ARN, which you send back.
+
+## Step 2: OpenSearch Serverless data-access policy
+
+`data-access.json`:
 
 ```json
 [{
-  "Description": "sde-curation-engine publishes curated collections to sde-web",
-  "Principal": ["arn:aws:iam::<prod-account>:role/sde-curation-engine-prod-publisher"],
+  "Description": "SDE Curation Engine publishes curated collections to sde-web",
+  "Principal": ["arn:aws:iam::<PROD_ACCOUNT_ID>:role/sde-curation-engine-prod-publisher"],
   "Rules": [
-    {"ResourceType": "collection", "Resource": ["collection/<collection-name>"],
+    {"ResourceType": "collection", "Resource": ["collection/<COLLECTION_NAME>"],
      "Permission": ["aoss:DescribeCollectionItems"]},
-    {"ResourceType": "index", "Resource": ["index/<collection-name>/sde-web"],
-     "Permission": ["aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument", "aoss:UpdateIndex"]}
+    {"ResourceType": "index", "Resource": ["index/<COLLECTION_NAME>/sde-web"],
+     "Permission": ["aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument"]}
   ]
 }]
 ```
 
-The policy grants no `CreateIndex` and no `DeleteIndex`:
+```bash
+aws opensearchserverless create-access-policy --type data \
+  --name sde-curation-engine-publisher \
+  --policy file://data-access.json
+```
 
-- the engine never creates the index; it refuses to run when the index is missing
-- it never deletes documents; removed URLs are tombstoned with `public_visibility: false`
+This is a **new** policy. You do not need to edit the policies that already grant the indexer or
+the search API access.
 
-The collection's **network policy** must allow access from the engine, which runs on public Fargate
-subnets with no VPC endpoint into the prod account. That means public access to the collection
-endpoint, like the indexer in test already uses.
+## Step 3: check network access
 
-## 3. Wire it into the test engine
+The engine calls the collection endpoint over the public internet from AWS Fargate. It does not use
+a VPC endpoint into your account. Check the collection's network policy:
 
-1. In `infra/envs/test.json` (gitignored), set:
-   - `opensearch_endpoint_prod`: `https://o2mxw7n9akk8n7o5oiqb.us-east-1.aoss.amazonaws.com`
-   - `prod_index_role_arn`: the ARN of the role from step 1
-2. Run `make infra-seed ENV=test PROFILE=smce-test`.
-3. Redeploy test: re-run the Deploy workflow, or `make deploy ENV=test PROFILE=smce-test`. CloudFormation
-   re-resolves SSM on every update.
+```bash
+aws opensearchserverless list-security-policies --type network \
+  --query 'securityPolicySummaries[].name' --output text
+aws opensearchserverless get-security-policy --type network --name <POLICY_NAME>
+```
 
-The test stack already gives its task role these permissions (`infra/stacks/engine_stack.py`):
+- **If** the rule covering `collection/<COLLECTION_NAME>` has `"AllowFromPublic": true`, there is
+  nothing to do.
+- **If** access is VPC-only, tell us. We will need to agree on another path, such as a VPC endpoint
+  or a source-IP rule, before this can work.
 
-- `sts:AssumeRole` on that ARN
-- `s3:GetObject` on `vectorized/*`
+## Step 4: send back
 
-## 4. Check it
+- the role ARN: `arn:aws:iam::<PROD_ACCOUNT_ID>:role/sde-curation-engine-prod-publisher`
+- confirmation that the network policy allows public access (step 3)
 
-- **Before the role exists:** Index to prod fails at the pre-flight with `prod_index_unreachable` or
-  an AssumeRole `AccessDenied` in the job error. Nothing is written.
-- **Afterwards:** on a small collection that validated on test:
-  - **Index to prod** reports `N written (N from S3 vectors · 0 from the test index)`, then a prod
-    validation `N / N visible`
-  - **Re-index to prod** reports `0 written · N unchanged`
+---
 
-## What the publish refuses to do
+## What the Curation Engine team does next (no action for you)
 
-These are the same guards as the indexer. Any of them fails the run before anything is written:
+1. Put the ARN in SSM `/sde-curation-engine/test/prod_index_role_arn`. It currently holds a
+   placeholder. `opensearch_endpoint_prod` is already set to
+   `https://o2mxw7n9akk8n7o5oiqb.us-east-1.aoss.amazonaws.com`.
+2. Redeploy the test stack. Its task role already has `sts:AssumeRole` on that parameter's value.
+3. Publish one small collection and confirm three things:
+   - the job reports `N written`, then `N / N visible in prod`
+   - a second publish reports `0 written · N unchanged`
+   - the documents show up on the prod search front end
+
+## Revoking access
+
+Delete the data-access policy (`aws opensearchserverless delete-access-policy --type data --name
+sde-curation-engine-publisher`) or the role. Either one cuts the engine off immediately. The engine
+then fails "Index to prod" with an access error and writes nothing.
+
+---
+
+<details>
+<summary>Reference for the engine team: failure codes shown on a prod run</summary>
+
+Refusals happen before anything is written:
 
 | error | meaning |
 |---|---|
+| `prod_index_unreachable` | cannot reach or authenticate to the prod collection (role not created yet, placeholder ARN, network policy) |
 | `export_not_found` | the test run's export expired (30 days): re-index to test first |
 | `index_not_found` | prod `sde-web` does not exist |
-| `id_scheme_collision` / `duplicate_business_ids` | the collection's prod documents carry ids the engine would not mint, so updating them would duplicate them |
+| `id_scheme_collision` / `duplicate_business_ids` | prod has this collection under ids the engine would not mint, so updating them would duplicate them |
 | `scope_filter_ineffective` | the collection filter does not isolate the collection |
-| `deletion_threshold_exceeded` / `deletion_budget_exceeded` | more than `PUBLISH_DELETION_ABORT_RATIO` (90%) or `PUBLISH_DELETION_ABORT_MAX` (5000) of the collection's prod documents would be removed |
+| `deletion_threshold_exceeded` / `deletion_budget_exceeded` | more than `PUBLISH_DELETION_ABORT_RATIO` (90%) or `PUBLISH_DELETION_ABORT_MAX` (5000) of the collection's prod documents would be hidden |
 
-Two more failures can happen after writing has started. Neither one removes anything:
+Failures after writing started. Nothing is hidden in these cases:
 
 | error | meaning |
 |---|---|
-| `vectors_missing` | some documents have no vectors at their current version in S3 or the test index. Written documents stay, and the job lists the URLs. |
+| `vectors_missing` | documents with no vectors at their current version in S3 or the test index; the URLs are listed |
 | `upsert_failed` | bulk items still failed after 3 attempts |
+
+Code: `sde_curation/backends/publish.py`. Stack grants: `infra/stacks/engine_stack.py`.
+</details>
