@@ -2,8 +2,9 @@
 
     python3 seed.py dev [--profile sde-dev]
 
-Reads infra/envs/<env>.json (gitignored; see envs/example.json), checks it has exactly the keys in
-config.PARAMS, and `aws ssm put-parameter --overwrite`s each one. Re-run after changing a value,
+Reads infra/envs/<env>.json (gitignored; see envs/example.json — `prod_index_role_arn` belongs only
+to environments with prod_publish_via_role, i.e. test), checks it has exactly the keys in
+the environment's parameters (config.PARAMS, plus ROLE_PARAMS where set), and `aws ssm put-parameter --overwrite`s each one. Re-run after changing a value,
 then `make deploy` so CloudFormation re-resolves the parameters.
 """
 
@@ -13,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from config import PARAMS, get_config
+from config import get_config
 
 HERE = Path(__file__).parent
 
@@ -30,12 +31,13 @@ def main() -> int:
     if not src.exists():
         sys.exit(f"{src} not found — copy envs/example.json and fill it in")
     values = json.loads(src.read_text())
-    if set(values) != set(PARAMS) or not all(isinstance(v, str) and v for v in values.values()):
-        sys.exit(f"{src} must contain exactly these non-empty string keys: {sorted(PARAMS)}")
+    params = cfg.params
+    if set(values) != set(params) or not all(isinstance(v, str) and v for v in values.values()):
+        sys.exit(f"{src} must contain exactly these non-empty string keys: {sorted(params)}")
 
     for key, value in values.items():
         cmd = ["aws", "ssm", "put-parameter", "--name", cfg.param_name(key), "--type", "String",
-               "--value", value, "--description", PARAMS[key], "--overwrite", "--region", cfg.region]
+               "--value", value, "--description", params[key], "--overwrite", "--region", cfg.region]
         if args.profile:
             cmd += ["--profile", args.profile]
         print(cfg.param_name(key))

@@ -118,18 +118,24 @@
   {% set t = stats.last_test_run %}{% set pr = stats.last_prod_run %}
   {% if pr %}
   <dl class="meta">
-    <dt>Prod run</dt><dd><code>{{ pr.run_id }}</code> · <span class="job j-{{ pr.state }}">{{ pr.state }}</span> · {{ pr.started_at.strftime('%Y-%m-%d %H:%M') }}Z</dd>
-    {% if pr.status %}<dt>Indexer</dt><dd>{{ pr.status.indexed }} indexed · {{ pr.status.changed }} changed · {{ pr.status.deleted }} deleted · index <code>{{ pr.status.index }}</code></dd>{% endif %}
-    {% if pr.error %}<dt>Error</dt><dd class="err">{{ pr.error }}</dd>{% endif %}
+    <dt>Prod run</dt><dd><code>{{ pr.run_id }}</code> · <span class="job j-{{ pr.state }}">{{ pr.state }}</span> · {{ pr.started_at.strftime('%Y-%m-%d %H:%M') }}Z{% if pr.status and pr.status.source_test_run %} · <small class="muted">from test run {{ pr.status.source_test_run }}</small>{% endif %}</dd>
+    {% if pr.status and pr.status.mode == 'publish_vectors' %}<dt>Published</dt><dd>{{ pr.status.indexed }} written ({{ pr.status.from_vectorized }} from S3 vectors · {{ pr.status.from_test_index }} from the test index) · {{ pr.status.unchanged }} unchanged · {{ pr.status.deleted }} removed{% if pr.status.failed %} · <span class="err">{{ pr.status.failed }} failed</span>{% endif %}{% if pr.status.missing %} · <span class="err">{{ pr.status.missing }} without vectors</span>{% endif %} · index <code>{{ pr.status.index }}</code>{% if pr.status.duration_seconds %} · {{ pr.status.duration_seconds|round|int }}s{% endif %}</dd>
+      {% if pr.status.missing_urls %}<dt>No vectors</dt><dd><small class="muted">{{ pr.status.missing_urls[:5]|join(' · ') }}{% if pr.status.missing > 5 %} …{% endif %} — re-index to test, then publish again</small></dd>{% endif %}
+      {% if pr.status.deletions_skipped %}<dt>Removals</dt><dd><small class="muted">skipped: {{ pr.status.deletions_skipped|join(', ') }}</small></dd>{% endif %}
+    {% elif pr.status %}<dt>Indexer</dt><dd>{{ pr.status.indexed }} indexed · {{ pr.status.changed }} changed · {{ pr.status.deleted }} deleted · index <code>{{ pr.status.index }}</code></dd>{% endif %}
+    {% if pr.error %}<dt>Error</dt><dd class="err">{{ pr.error }}{% if pr.status and pr.status.error_detail %} — {{ pr.status.error_detail }}{% endif %}</dd>{% endif %}
+    {% if pr.validation %}<dt>Validation</dt><dd>
+      {% if pr.validation_passes(settings.validation_title_match_threshold) %}<span class="kind k-new">pass</span>{% else %}<span class="kind k-deleted">fail</span>{% endif %}
+      {{ pr.validation.indexed_count }} / {{ pr.validation.expected_count }} visible in prod — {{ 'counts match' if pr.validation.count_matches else 'COUNT MISMATCH' }} · titles {{ (pr.validation.title_match_rate * 100)|round(1) }}%</dd>{% endif %}
   </dl>
   {% else %}
-  <p class="muted">Publishes the validated curated set to the production index. Requires a test run whose validation passed
-    (≥ {{ (settings.validation_title_match_threshold * 100)|round|int }}% titles, counts equal).</p>
+  <p class="muted">Publishes the vectors of the validated test run straight to the production index — nothing is re-vectorized.
+    Requires a test run whose validation passed (≥ {{ (settings.validation_title_match_threshold * 100)|round|int }}% titles, counts equal).</p>
   {% endif %}
   {% set gate = t and t.state == 'succeeded' and t.validation_passes(settings.validation_title_match_threshold) %}
   <div class="inline">
     {{ btn('Re-index to prod' if pr else 'Index to prod', '/api/collections/' ~ cid ~ '/index?target=prod',
-           'Export the curated set and run the PRODUCTION indexer', primary=True,
+           "Publish the validated test run's vectors to the PRODUCTION index", primary=True,
            disabled=(not gate or c.status not in ('config_generated','live') or c.delta_count > 0),
            confirm='Index ' ~ stats.exportable ~ ' URLs into the PRODUCTION index?') }}
     <a class="button secondary" href="{{ settings.prod_frontend_url }}" target="_blank" rel="noopener"

@@ -191,6 +191,17 @@ Pass (`count_matches` and titles ≥ `VALIDATION_TITLE_MATCH_THRESHOLD`, default
 `config_generated` with **Index to prod** enabled. Fail → back to `curating` with ⚠ *needs
 re-curation* and the mismatches listed. **Re-validate** re-runs the check on demand. A prod run
 (`?target=prod`) is refused until the latest test run passed; success → `live` and the ⚠ flag clears.
+
+**Index to prod publishes vectors, it does not re-index.** The prod job takes the export of the
+latest validated test run and, for every document, the newest record at the same `version` from
+`s3://COSMOS_INDEX_BUCKET/vectorized/<key>/*/` (the indexer only vectorizes changed documents, so
+they are spread over runs), falling back to the test index for anything S3 lacks. It upserts them
+into `OPENSEARCH_ENDPOINT_PROD` / `WEB_INDEX_NAME` (existing copies updated in place, never
+duplicated), then tombstones (`public_visibility: false`) the collection's prod documents that are no
+longer curated. The indexer's guards are ported and checked before anything is written, and removals
+never follow a failed or incomplete write. The engine then validates prod directly; a short count
+flags the collection but leaves it live. In SMCE test the write goes through `PROD_INDEX_ROLE_ARN`, a
+role in the prod account: see [docs/prod-index-access.md](docs/prod-index-access.md).
 Every status transition posts to `NOTIFY_WEBHOOK_URL` (Slack-compatible `{"text": …}` with a link
 built from `PUBLIC_BASE_URL`); failures to notify never block a transition.
 

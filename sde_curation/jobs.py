@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .backends.index import Dispatch, IndexBackend, IndexError_, wait_for_status
+from .backends.publish import ProdPublisher
 from .backends.s3 import S3
 from .backends.scrape import ScrapeBackend, ScrapeError, parse_documents
 from .backends.validate import NoIndexAccess, validate_direct
@@ -38,6 +39,7 @@ from .models import (
     DumpFailure,
     DumpUrl,
     IndexRun,
+    IndexStatus,
     JobKind,
     JobRun,
     JobState,
@@ -63,6 +65,7 @@ class JobManager:
         self, settings: Settings, db: Database, bus: EventBus, *, scraper: ScrapeBackend,
         llm: LLMProvider | Callable[[], LLMProvider] | None = None,
         indexer: IndexBackend | Callable[[], IndexBackend] | None = None,
+        publisher: Callable[[], ProdPublisher] | None = None,
     ):
         self.s = settings
         self.db = db
@@ -70,6 +73,7 @@ class JobManager:
         self.scraper = scraper
         self._llm = llm
         self._indexer = indexer
+        self._publisher = publisher
         self._tasks: dict[int, asyncio.Task] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._starting: set[str] = set()  # collections with a job being created (TOCTOU guard)
@@ -383,14 +387,23 @@ class JobManager:
             raise IndexError_("no index backend configured")
         return self._indexer() if callable(self._indexer) and not hasattr(self._indexer, "complete") and not hasattr(self._indexer, "dispatch") else self._indexer  # type: ignore[return-value]
 
+    def publisher(self) -> ProdPublisher:
+        if self._publisher is None:
+            raise IndexError_("no prod publisher configured")
+        return self._publisher()
+
     async def start_index(
         self, c: Collection, target: str, *, actor: str | None = None
     ) -> tuple[JobRun, IndexRun]:
         if not self.s.cosmos_index_bucket:
             raise IndexError_("COSMOS_INDEX_BUCKET is not set")
+        if target == "prod" and not self.s.opensearch_endpoint_prod:
+            raise IndexError_("OPENSEARCH_ENDPOINT_PROD is not set — nowhere to publish to")
         run = IndexRun(run_id=mint_run_id(), collection_id=c.collection_id, target=target, started_by=actor)
-        kind = JobKind.INDEX_PROD if target == "prod" else JobKind.INDEX_TEST
-        job = await self._start(c, kind, lambda job: self._run_index(c, job, run), actor=actor)
+        if target == "prod":
+            job = await self._start(c, JobKind.INDEX_PROD, lambda job: self._run_publish_prod(c, job, run), actor=actor)
+        else:
+            job = await self._start(c, JobKind.INDEX_TEST, lambda job: self._run_index(c, job, run), actor=actor)
         job.run_id = run.run_id
         await self.db.update_job(job)
         return job, run
@@ -452,14 +465,6 @@ class JobManager:
             run.state, run.finished_at = "succeeded", utcnow()
             await self.db.update_index_run(run)
 
-            if run.target == "prod":
-                await self.db.set_status(
-                    c.collection_id, Status.LIVE, force=True, actor=SYSTEM_ACTOR,
-                    note=f"prod index run {run.run_id}: {status.indexed} indexed, {status.deleted} deleted",
-                )
-                await self.db.set_flag(c.collection_id, False)
-                return
-
             await self.db.set_status(
                 c.collection_id, Status.CONFIG_GENERATED, force=True, actor=SYSTEM_ACTOR,
                 note=f"test index run {run.run_id}: {status.indexed} indexed, {status.deleted} deleted",
@@ -468,6 +473,72 @@ class JobManager:
             await self._validate(c, job, run, s3, backend, progress)
 
         await self._guarded(c, job, body)
+
+    async def _run_publish_prod(self, c: Collection, job: JobRun, run: IndexRun) -> None:
+        """Index to prod: publish the vectors of the latest validated test run straight into the
+        production index (backends/publish.py) — no export, no indexer task, no re-vectorizing —
+        then check prod directly. A prod validation that falls short flags the collection; the
+        documents that were written stay live."""
+        async def body():
+            source = await self.db.last_index_run(c.collection_id, "test")
+            if not source or source.state != "succeeded" or not source.validation_passes(self.s.validation_title_match_threshold):
+                raise IndexError_("prod indexing requires a successful, validated test run first")
+            publisher = self.publisher()
+            run.exported = source.exported
+            run.external_ref = job.external_ref = f"publish:{source.run_id}"
+            await self.db.insert_index_run(run)
+
+            async def progress(p: dict[str, Any]) -> None:
+                job.progress = {**job.progress, **p}
+                await self.db.update_job(job)
+                self._emit(c, job)
+
+            await progress({"source_test_run": source.run_id, "exported": source.exported})
+            st = await publisher.run(c.collection_id, run.run_id, source.run_id, progress)
+            status = IndexStatus.model_validate(st)
+            run.status = st
+            job.progress = {**job.progress, "phase": "done", "status": st}
+            if status.state != "succeeded":
+                run.state, run.error, run.finished_at = "failed", status.error or "publish failed", utcnow()
+                await self.db.update_index_run(run)
+                detail = st.get("error_detail") or (f"{st.get('missing')} documents have no vectors in S3 or the test index, "
+                                                    f"e.g. {', '.join(st.get('missing_urls', [])[:3])}" if st.get("missing") else "")
+                raise IndexError_(f"publish to prod failed: {status.error}{(' — ' + detail) if detail else ''}")
+            run.state, run.finished_at = "succeeded", utcnow()
+            await self.db.update_index_run(run)
+            await self.db.set_status(
+                c.collection_id, Status.LIVE, force=True, actor=SYSTEM_ACTOR,
+                note=(f"prod publish {run.run_id} from test run {source.run_id}: {status.indexed} written "
+                      f"({st.get('from_vectorized', 0)} from S3, {st.get('from_test_index', 0)} from the test index), "
+                      f"{st.get('unchanged', 0)} unchanged, {status.deleted} removed"),
+            )
+            await self.db.set_flag(c.collection_id, False)
+            await self._validate_prod(c, job, run, progress)
+
+        await self._guarded(c, job, body)
+
+    async def _validate_prod(self, c: Collection, job: JobRun, run: IndexRun, progress) -> None:
+        if not self.s.opensearch_endpoint_prod:
+            return
+        await progress({"phase": "validating", "validation_delay_s": int(self.s.validation_delay_s)})
+        await asyncio.sleep(self.s.validation_delay_s)
+        expected = await self._expected_titles(c.collection_id)
+        try:
+            report = await self._validate_direct_until_visible(c, run, expected, progress)
+        except NoIndexAccess as e:
+            log.warning("prod validation unavailable for %s: %s", c.collection_id, e)
+            job.progress = {**job.progress, "phase": "done", "validation_unavailable": str(e)[:200]}
+            return
+        run.validation, run.validated_by = report, "direct"
+        await self.db.update_index_run(run)
+        ok = report_passes(report, self.s.validation_title_match_threshold)
+        job.progress = {**job.progress, "phase": "done", "validation": report, "validated_by": "direct", "validation_ok": ok}
+        if not ok:
+            await self.db.set_flag(
+                c.collection_id, True,
+                f"prod validation failed: {report['indexed_count']}/{report['expected_count']} visible, "
+                f"titles {report['title_match_rate']:.1%} — check the prod index, then Re-index to prod",
+            )
 
     async def _validate(self, c: Collection, job: JobRun, run: IndexRun, s3: S3, backend: IndexBackend, progress) -> None:
         """Wait for the index to refresh, then validate directly (fast), re-checking until the

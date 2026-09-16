@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sse_starlette.sse import EventSourceResponse
 
 from ..backends.index import IndexError_, make_index_backend
+from ..backends.publish import make_prod_publisher
 from ..backends.scrape import make_scrape_backend
 from ..config import Settings, get_settings
 from ..curation import CurationService
@@ -347,6 +348,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings, db, app.state.bus, scraper=make_scrape_backend(settings),
             llm=lambda: make_llm(settings),  # lazy: a missing API key only fails the LLM job
             indexer=lambda: make_index_backend(settings),
+            publisher=lambda: make_prod_publisher(settings),
         )
         app.state.jobs = jobs
         app.state.existing_cache = {}
@@ -1254,7 +1256,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/collections/{collection_id}/index", status_code=202, response_model=None)
     async def api_index(request: Request, collection_id: str, target: Literal["test", "prod"] = "test"):
-        """Export curated (non-excluded) URLs to S3 and dispatch the WEB_COSMOS indexer."""
+        """test: export curated (non-excluded) URLs to S3 and dispatch the WEB_COSMOS indexer.
+        prod: publish the latest validated test run's vectors to the production index."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         if c.status not in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE):
