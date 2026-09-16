@@ -116,13 +116,14 @@
     <figcaption><b>Delta URLs with AI badges.</b> The title column shows the scraped title above the effective one. Division and type are dropdowns you can set directly. Every edit here becomes an exact-URL rule. The <b>Edited by</b> column says who set the row's values: <b>AI</b> (accepted suggestions), <b>SME</b> (typed or toggled by a curator), or <b>AI + SME</b>; hover it to see the rule behind each field. The same column, and the same filter, exist on the Curated URLs and Dump URLs tables.</figcaption></figure>
     <div class="tip"><span class="eyebrow">Why the Rules count jumps</span><p>Accepting 22 titles, 22 divisions, and 22 types adds 66 rules, one exact-URL rule per accepted value. That is expected. It is what makes every accepted value visible and reversible in the rules table. Exclude suggestions are globs and stay few.</p></div>
     <figure><img src="{{ static_url('manual/07-rules.png') }}" alt="The Rules table: eight exclude globs followed by exact-URL title rules, each with its match count, when it was added, who added it, and a delete button">
-    <figcaption><b>The Rules table</b> at the bottom of the Curate tab, after a bulk accept. Glob excludes first, then one exact-URL title rule per accepted suggestion. The ✕ deletes a rule, which recomputes the affected URLs.</figcaption></figure>
+    <figcaption><b>The Rules tab</b>, after a bulk accept. Glob excludes first, then one exact-URL title rule per accepted suggestion. The ✕ deletes a rule, which recomputes the affected URLs.</figcaption></figure>
   </li>
 
   <li id="s-promote">
     <h3>Promote the delta URLs</h3>
     <p>Section 3 of the Curate tab. <b>Promote</b> writes the delta URLs into the curated URLs and marks the collection Curated. If there are no delta URLs, the button reads <b>Mark curated</b>. <b>Recompute delta URLs</b> re-applies the rules without promoting, useful after hand-editing several rules.</p>
-    <div class="know"><span class="eyebrow">Know this</span><p>Promoting <b>discards</b> any AI suggestions still undecided. The Promote section warns you with the count. Accept or reject them first.</p></div>
+    <p>To promote only some of the queue, open <b>Delta URLs</b>, tick the rows (the header box ticks the page) and click <b>Promote selected</b>. The rest stay under review and the collection stays Curating until nothing is left; the rows a rule produced are one click away from its count in the Rules table.</p>
+    <div class="know"><span class="eyebrow">Know this</span><p>Promoting <b>discards</b> any AI suggestions still undecided on the rows it promotes. The Promote section, and the selection bar under Delta URLs, warn you with the count. Accept or reject them first.</p></div>
     <figure><img src="{{ static_url('manual/08-curated-overview.png') }}" alt="Overview tab of a curated collection: step 4 highlighted, its panel showing 31 curated URLs with 9 excluded, and the Index to test button">
     <figcaption><b>After promoting.</b> Delta URLs drops to zero, Curated URLs shows the approved set with its excluded count, and the next action becomes Index to test.</figcaption></figure>
   </li>
@@ -148,12 +149,13 @@
   <dt>Curated URLs</dt><dd>The approved set: metadata plus the page text each row was approved with. Included rows, with that text, are what gets exported to the index. Every field is still editable; an edit becomes a delta URL.</dd>
   <dt>Rules</dt><dd>Every rule in force for this collection, including exact-URL rules from per-row edits and accepted AI suggestions, each with its source (AI, AI edited, SME, global list).</dd>
 </dl>
-<h3>The pipeline and the six tabs</h3>
+<h3>The pipeline and the tabs</h3>
 <p>The six-step pipeline is always at the top. A collection opens at its current step, and clicking a step shows that step's panel: what it did, its actions, details, the last job, and Advanced (Re-scrape, manual status override, Delete for admins). Under steps <b>3 Curating</b> and <b>4 Curated</b> a row of tabs appears, in the order you work: look at what the crawl found, curate, check what will change, check what was approved.</p>
 <dl class="defs">
   <dt>Overview</dt><dd>The step's panel, details and last job.</dd>
   <dt>Dump URLs</dt><dd>Every URL the last crawl found, raw: title, content type, depth, text size and state. Start curating lands here, so you see the whole crawl before deciding anything.</dd>
-  <dt>Curate</dt><dd>Exclusions, Metadata, Promote, in the order you work them, with the full rules table underneath.</dd>
+  <dt>Curate</dt><dd>Exclusions, Metadata, Promote, in the order you work them.</dd>
+  <dt>Rules</dt><dd>Every rule in force for this collection, with the match count over the URLs it currently shows in (delta while reviewing, curated once promoted), the superseded ones marked, and the add-by-hand forms.</dd>
   <dt>Delta URLs</dt><dd>What will change in the curated URLs when you promote: new, modified, removed, excluded.</dd>
   <dt>Curated URLs</dt><dd>The approved set; included rows are exported to the index.</dd>
   <dt>Activity</dt><dd>Every job, the status history, and the audit trail.</dd>
@@ -169,12 +171,12 @@
 <h2 id="rules">How rules resolve</h2>
 <p>Every URL's effective title, division, document type, and included or excluded state is computed from the rules of its own collection; a rule never reaches another collection. When several rules match the same URL:</p>
 <ul>
-  <li><b>The most specific rule wins.</b> Specific means the rule with the smallest number of matching URLs. On a tie, the longer pattern string wins. An exact-URL rule matches one URL, so it is always the most specific.</li>
-  <li><b>Include always beats exclude</b>, regardless of specificity. Use include rules to carve exceptions out of broad excludes.</li>
-  <li><b>No rule, then the curated value, then nothing.</b> Deleting a rule falls back to the next most specific rule, then to whatever was last promoted, then to blank. Deleting <em>is</em> the undo.</li>
+  <li><b>The newest rule wins.</b> For titles, divisions and document types the rule added last decides, whatever its shape: a glob you type by hand takes effect on every URL it matches, including URLs whose value came from an accepted AI suggestion or an earlier edit. Accepting a suggestion afterwards is the newest decision again, on that one URL.</li>
+  <li><b>Include always beats exclude</b>, however old it is. Use include rules to carve exceptions out of broad excludes; a later exclude never undoes them.</li>
+  <li><b>No rule, then the curated value, then nothing.</b> Deleting a rule falls back to the next newest rule, then to whatever was last promoted, then to blank. Deleting <em>is</em> the undo.</li>
 </ul>
 <p>Title rules are templates. <code>{title}</code> is the scraped title, <code>{url}</code> the URL, <code>{collection}</code> the collection name. A rule with value <code>{title} | GES DISC</code> appends a suffix to every matching page.</p>
-<p>Hover any field on the Delta, Curated or Dump URLs to see which rule set it, and who made that rule. The <b>Edited by</b> column summarises it per row: a row whose values all come from accepted AI suggestions reads <b>AI</b>; one you typed or toggled reads <b>SME</b>; both, <b>AI + SME</b>. A broad rule you typed (say a <code>*</code> title template) marks every row it wins as SME, which is correct: you decided it. Match counts in the rules table link to the matching rows.</p>
+<p>Hover any field on the Delta, Curated or Dump URLs to see which rule set it, and who made that rule. The <b>Edited by</b> column summarises it per row: a row whose values all come from accepted AI suggestions reads <b>AI</b>; one you typed or toggled reads <b>SME</b>; both, <b>AI + SME</b>. A broad rule you typed (say a <code>*</code> title template) marks every row it wins as SME, which is correct: you decided it. The match count in the rules table is over the URLs where the rule currently shows: the <b>Delta URLs</b> while there is something to review, the <b>Curated URLs</b> once promoted; clicking it opens that table filtered to the rule. A rule a newer one has beaten everywhere is marked <b>superseded</b>.</p>
 <div class="know"><span class="eyebrow">Know this</span><p>A URL excluded by a rule never reaches the export, the index, or the metadata model. Exclude early to save model calls and review time.</p></div>
 
 <h2 id="jobs">Jobs</h2>

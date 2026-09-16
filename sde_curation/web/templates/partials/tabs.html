@@ -3,7 +3,8 @@
 <nav class="tabs" role="tablist" aria-label="collection sections">
   {% for t, label, n, cls, hint in [('overview', 'Overview', none, '', 'This step: what it did, its actions, details and last job'),
                                    ('dump', 'Dump URLs', c.dump_count, '', 'Every URL the last crawl found (raw)'),
-                                   ('curate', 'Curate', stats.pattern_count if stats else 0, '', 'Exclusions, metadata, promote, and the rules in force'),
+                                   ('curate', 'Curate', none, '', 'Exclusions, metadata, promote'),
+                                   ('rules', 'Rules', stats.pattern_count if stats else 0, '', 'Every rule in force for this collection'),
                                    ('delta', 'Delta URLs', c.delta_count, 'warn', 'What will change in the curated URLs when you promote'),
                                    ('curated', 'Curated URLs', c.curated_count, 'ok', 'The approved set; included rows are exported to the index'),
                                    ('activity', 'Activity', none, '', 'Jobs, status history and audit trail')] %}

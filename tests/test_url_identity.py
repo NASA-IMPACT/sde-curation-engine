@@ -10,6 +10,7 @@ import json
 
 from sde_curation.engine.diff import match_urls, promote, recompute
 from sde_curation.engine.patterns import resolve_all
+from sde_curation.engine.urls import canonical_key, spellings
 from sde_curation.models import NOT_VISITED, CuratedUrl, DeltaKind, DumpUrl, Pattern, PatternType
 from tests.conftest import wait_job
 
@@ -133,6 +134,13 @@ def test_flag_comes_down_when_the_crawl_fetches_the_page_again():
 # ── patterns: exact rules match every spelling ───────────────────────────
 
 
+def test_spellings_are_every_form_of_one_canonical_key():
+    sp = spellings("https://www.X.org/a/?q=1")
+    assert {canonical_key(u) for u in sp} == {"x.org/a?q=1"} and len(sp) == 8
+    assert "http://x.org/a?q=1" in sp and "https://www.x.org/a/?q=1" in sp
+    assert spellings("https://x.org") == ["https://x.org/", "https://www.x.org/", "http://x.org/", "http://www.x.org/"]
+
+
 def test_exact_rule_matches_other_spellings_and_newest_wins():
     urls = ["https://x.org/a", "https://x.org/b/", "http://x.org/c"]
     pats = [
@@ -250,8 +258,11 @@ async def test_per_url_rule_follows_the_page_across_spellings(crawler_client):
     assert r.status_code == 201 and r.json()["deltas"]["excluded"] == 1
     d = (await c.get("/api/collections/ex.org/delta?q=p7")).json()["items"][0]
     assert d["excluded"] is True
-    # repeating the exclude under the row's own spelling finds that rule and removes it
+    # excluding it again under the row's own spelling is a no-op; including it finds the rule under
+    # the other spelling and removes it
     r = await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p7", "type": "exclude"})
+    assert r.json()["excluded"] == 1
+    r = await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p7", "type": "include"})
     assert r.json()["excluded"] == 0
     assert [p["match"] for p in (await c.get("/api/collections/ex.org/patterns")).json()] == []
     # a per-URL title under one spelling, then edited under another: one rule survives, the newest

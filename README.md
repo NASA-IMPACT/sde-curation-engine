@@ -41,10 +41,10 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
 ## Using it
 1. **Dashboard** (`/`): add a collection (seed URL, name, division, max pages). Each row shows
    status, counts (dump URLs / delta URLs / curated URLs), last job, and **one button — the next step**.
-2. **Collection workbench** (`/collections/{id}`) — one page, a sticky header, the pipeline stepper always on top, and under steps Curating / Curated six tabs (Overview · Dump URLs · Curate · Delta URLs · Curated URLs · Activity; Start curating lands on Dump URLs):
+2. **Collection workbench** (`/collections/{id}`) — one page, a sticky header, the pipeline stepper always on top, and under steps Curating / Curated seven tabs (Overview · Dump URLs · Curate · Rules · Delta URLs · Curated URLs · Activity; Start curating lands on Dump URLs):
    - **Header**: name, seed link, status badge (icon + label), ⚠ *needs re-curation*, running-job
      chip with **cancel**, and the one **Next** action for the current step. The counts
-     (**Dump URLs · Delta URLs · Curated URLs**, rules on **Curate**) sit on the tab row.
+     (**Dump URLs · Rules · Delta URLs · Curated URLs**) sit on the tab row.
    - **Pipeline stepper**: each step's panel shows what it did, its primary action, and a redo where
      sensible, with details, last job and *Advanced* (re-scrape, manual status, delete). Under the
      other steps this panel is all there is; under Curating / Curated it is the **Overview** tab.
@@ -53,8 +53,9 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
      · **Curated** (read-only approved set with a **Curate ↗** jump when a delta exists). Search,
      kind / excluded / division / type filters, page size, paging, ⇩ CSV of the filtered rows.
      Hover a field to see *which pattern* set it.
-   - **Patterns & AI**: add a pattern, the pattern table (match counts link to the matching delta URLs),
-     ✨ suggestions with Accept/Reject, Recompute and Promote.
+   - **Curate**: ✨ suggestions with Accept/Reject, add a rule by hand, Recompute and Promote.
+   - **Rules** (right after Curate): every rule in force, the add-by-hand forms, and match counts
+     over (and linking to) the delta URLs while reviewing and the curated URLs once promoted.
    - **Activity**: all jobs and the status history.
    Old `/collections/{id}/curate` links (and `set=deltas`) redirect into the Delta URLs tab.
    Step panel actions:
@@ -216,11 +217,13 @@ crawler found; table `dump_urls`, `dump_count`, `?set=dump`), **Delta URLs** (wh
 change; `delta_urls`, `delta_count`, `?set=delta`) and **Curated URLs** (the approved set;
 `curated_urls`, `curated_count`, `?set=curated`). "Pending" is reserved for undecided suggestions.
 
-Effective value per URL = the most specific matching pattern (smallest match set, tie → longest
-pattern string) → the curated value → NULL. `include` always beats `exclude`. Title values are
-templates (`{title}` = scraped title, `{url}`, `{collection}`). A per-URL edit is just an exact-URL
-pattern, so it is the most specific by construction. Deleting a pattern recomputes — that *is* the
-unapply (next most specific → curated → NULL). Diff + apply run as one idempotent bulk pass
+Effective value per URL = the newest matching pattern (highest id — the curator's latest decision,
+whether a per-URL edit, an accepted AI suggestion or a glob typed by hand) → the curated value →
+NULL. `include` always beats `exclude`, however old. Title values are templates (`{title}` =
+scraped title, `{url}`, `{collection}`). A per-URL edit is just an exact-URL pattern. Deleting a
+pattern recomputes — that *is* the unapply (next newest → curated → NULL). Promote takes the whole
+delta queue (Curate tab) or a ticked selection of it (Delta URLs tab, `POST …/promote/urls`); the
+collection stays `curating` until the queue is empty. Diff + apply run as one idempotent bulk pass
 (100k URLs in < 5 s). Rules are strictly per collection (`patterns.collection_id`, cascade on
 delete); the packaged global exclude list only ever produces *suggestions*, accepted per collection.
 

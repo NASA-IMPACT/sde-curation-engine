@@ -2,11 +2,12 @@
    ① Exclusions — decide what must never be indexed (suggested exclude rules, bulk accept)
    ② Metadata — titles / divisions / document types (AI per URL, bulk accept)
    ③ Promote — apply the delta URLs to the curated URLs
-   Rules — every rule in force (lazy-loaded) #}
+   Rules live on their own tab (tab_rules.html), right after this one; a link at the bottom points there #}
 {% from "partials/job_progress.html" import job_progress %}
 {% set cid = c.collection_id %}
 {% set running = job and job.state == 'running' %}
 {% from "partials/url_cells.html" import title_cell, select_cell with context %}
+{% from "partials/add_rules.html" import add_exclude_form, add_metadata_form with context %}
 {% set curating = c.status == 'curating' %}
 {% set stage = c.curation_stage if curating else none %}
 {% set dc = stats.delta_counts %}
@@ -80,7 +81,7 @@
       <thead><tr><th>Type</th><th>Match</th><th title="global = from the shared exclude list; llm = drafted by the model for this collection">Source</th><th title="dump URLs this rule would match">Matches</th><th>Why</th><th></th></tr></thead>
       <tbody>{% for sg in suggestions %}
         <tr><td><span class="ptype {{ sg.type }}">{{ sg.type }}</span></td><td class="match"><code>{{ sg.match }}</code></td><td><span class="src src-{{ sg.source }}">{{ 'global list' if sg.source == 'global' else 'AI' }}</span></td>
-            <td class="num"><a href="/collections/{{ cid }}?tab=dump&q={{ sg.match|replace('*','')|urlencode }}" title="show matching dump URLs">{{ sg.matches }}</a></td><td class="muted why">{{ sg.rationale }}</td>
+            <td class="num"><a href="/collections/{{ cid }}?tab=dump&match={{ sg.match|urlencode }}" title="show the matching dump URLs">{{ sg.matches }}</a></td><td class="muted why">{{ sg.rationale }}</td>
             <td class="inline nowrap actions">
               <button class="primary mini" title="Add as a rule, as suggested" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/{{ sg.id }}/accept" hx-swap="none">Accept</button>
               <button class="secondary mini" type="button" title="Change the glob first, then accept it (recorded as AI, edited)" {% if running %}disabled{% endif %} onclick='editSuggestion(this, {{ cid|tojson }}, {{ sg.id }}, {{ sg.match|tojson }})'>Edit</button>
@@ -92,16 +93,7 @@
   </div>
   {% elif patterns_ever_run %}<p class="muted small">No undecided suggestions.</p>{% endif %}
 
-  <details class="add-rule">
-    <summary>Add an exclude or include rule by hand</summary>
-    <form hx-post="/api/collections/{{ cid }}/patterns" hx-ext="json-enc" hx-swap="none" class="inline"
-          hx-vals='js:{type: document.getElementById("pt1").value, match: document.getElementById("pm1").value, value: null}'>
-      <select id="pt1" aria-label="rule type"><option>exclude</option><option>include</option></select>
-      <input id="pm1" placeholder="*/login* · https://site/path/* · exact URL" size="40" required aria-label="match">
-      <button {% if running %}disabled{% endif %}>Add rule</button>
-      <small class="muted">glob with <code>*</code>, or an exact URL</small>
-    </form>
-  </details>
+  {{ add_exclude_form() }}
 
   <div class="inline stage-foot">
     <a class="small" href="/collections/{{ cid }}?tab=delta">Review delta URLs ↗</a>
@@ -142,9 +134,9 @@
   {% if ai_pending_total %}
   <div class="suggestions">
     <div class="inline bulk-bar">
-      <b>{{ ai_pending_total }} AI suggestion{{ 's' if ai_pending_total != 1 }} to review</b>
+      <b><a href="/collections/{{ cid }}?tab=delta&ai=pending" title="the same rows under Delta URLs">{{ ai_pending_total }} AI suggestion{{ 's' if ai_pending_total != 1 }} to review</a></b>
       {% for f, label in [('title','titles'), ('division','divisions'), ('document_type','doc types')] if ai_counts[f] %}
-      <span class="nowrap"><span class="ptype {{ f }}">{{ label }} {{ ai_counts[f] }}</span>
+      <span class="nowrap"><a class="ptype {{ f }}" href="/collections/{{ cid }}?tab=delta&ai={{ f }}" title="the delta URLs with a pending {{ f|replace('_', ' ') }} suggestion">{{ label }} {{ ai_counts[f] }}</a>
         <button class="mini ok" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "accept", "field": f}|tojson }}' hx-swap="none"
                 hx-confirm="Apply all {{ ai_counts[f] }} AI {{ label }} as exact-URL rules?">✓ accept all</button><button class="mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "field": f}|tojson }}' hx-swap="none"
                 hx-confirm="Discard all {{ ai_counts[f] }} AI {{ label }}?">✕</button></span>
@@ -152,7 +144,7 @@
       <span class="muted small">confidence:</span>
       {% for lvl in ['high', 'medium', 'low'] %}<a class="conf conf-{{ lvl }}" href="/collections/{{ cid }}?tab=delta&ai={{ lvl }}" title="review the {{ lvl }}-confidence suggestions">{{ lvl }} {{ ai_counts.by_conf[lvl] }}</a> {% endfor %}
       <span class="grow"></span>
-      <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{"decision": "accept"}' hx-swap="none" hx-confirm="Accept all {{ ai_pending_total }} AI suggestions — every title, division and doc type — as exact-URL rules?">Accept all ({{ ai_pending_total }})</button>
+      <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{"decision": "accept"}' hx-swap="none" hx-confirm="Accept all {{ ai_pending_total }} AI suggestions — every title, division and doc type — as exact-URL rules? Each is the newest rule for its URL, so it overrides any earlier rule there, including a glob you typed.">Accept all ({{ ai_pending_total }})</button>
       <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{"decision": "reject"}' hx-swap="none" hx-confirm="Discard all {{ ai_pending_total }} AI suggestions?">Reject all</button>
       <a class="small" href="/collections/{{ cid }}?tab=delta&ai=pending" title="the same rows under Delta URLs, with filters, sorting and paging">Review under Delta URLs ↗</a>
     </div>
@@ -180,18 +172,7 @@
   </div>
   {% endif %}
 
-  <details class="add-rule">
-    <summary>Add a metadata rule by hand</summary>
-    <form hx-post="/api/collections/{{ cid }}/patterns" hx-ext="json-enc" hx-swap="none" class="inline"
-          hx-vals='js:{type: document.getElementById("pt2").value, match: document.getElementById("pm2").value, value: document.getElementById("pv2").value || null}'>
-      <select id="pt2" aria-label="rule type"><option>title</option><option>division</option><option>document_type</option></select>
-      <input id="pm2" placeholder="*/docs/* · exact URL" size="32" required aria-label="match">
-      <input id="pv2" placeholder="value: title template / division / doc type" size="34" list="values" required aria-label="value">
-      <datalist id="values">{% for d in divisions %}<option value="{{ d }}">{% endfor %}{% for d in doc_types %}<option value="{{ d }}">{% endfor %}</datalist>
-      <button {% if running %}disabled{% endif %}>Add rule</button>
-      <small class="muted">title templates: <code>{title}</code> <code>{url}</code> <code>{collection}</code></small>
-    </form>
-  </details>
+  {{ add_metadata_form() }}
 </section>
 
 {# ── ③ Promote ───────────────────────────────────────────────────── #}
@@ -207,12 +188,9 @@
             {% if not curating or running %}disabled title="requires status curating and no running job"{% endif %}
             {% if c.delta_count %}hx-confirm="Promote {{ c.delta_count }} delta URLs to the curated URLs?"{% endif %}>{% if c.delta_count %}Promote {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }} → curated{% else %}Mark curated (no delta URLs){% endif %}</button>
     <button class="secondary" title="Re-run the diff of the dump URLs against the curated URLs (safe to repeat)" {% if running or not c.dump_count %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/recompute" hx-swap="none">Recompute delta URLs</button>
-    <a class="small" href="/collections/{{ cid }}?tab=delta">Review delta URLs ↗</a>
+    <a class="small" href="/collections/{{ cid }}?tab=delta" title="tick rows under Delta URLs to promote only those">Review delta URLs · promote a selection ↗</a>
   </div>
 </section>
 
-{# ── Rules ───────────────────────────────────────────────────────── #}
-<details class="card rules" id="rules" {% if not curating %}open{% endif %}>
-  <summary><b>Rules</b> <span class="count">{{ stats.pattern_count }}</span> <small class="muted">every rule in force for <b>this collection only</b> · the most specific wins · include beats exclude · per-URL edits are exact-URL rules</small></summary>
-  <div hx-get="/collections/{{ cid }}/rules" hx-trigger="load" hx-swap="innerHTML"><p class="muted small"><span class="spinner"></span> loading…</p></div>
-</details>
+{# ── Rules: their own tab; a pointer here so the workflow page says where they went ── #}
+<p class="muted small"><a href="/collections/{{ cid }}?tab=rules"><b>Rules</b> <span class="count">{{ stats.pattern_count }}</span></a> — every rule in force for this collection, with match counts and the superseded ones marked.</p>

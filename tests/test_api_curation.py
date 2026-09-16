@@ -48,16 +48,20 @@ async def test_full_flow(crawler_client):
     assert d["total"] == 1 and d["items"][0]["title"] == "Page 2 | Ex" and d["items"][0]["division"] == "Heliophysics"
     assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 1
 
-    # per-URL edit = exact pattern, most specific → wins over "*"
+    # per-URL edit = exact pattern, the newest rule for that URL → wins over the older "*"
     r = await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p2", "type": "division", "value": "Earth Science"})
     assert r.status_code == 200
     d = (await crawler_client.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["division"] == "Earth Science"
-    # toggling exclude twice on one URL removes it again
+    # the toggle is the wanted state: exclude twice stays excluded; include puts it back (and, with no
+    # glob excluding p3, leaves no rule behind)
     await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "exclude"})
     assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 2
     await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "exclude"})
+    assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 2
+    await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "include"})
     assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 1
+    assert not [p for p in (await crawler_client.get("/api/collections/ex.org/patterns")).json() if p["match"] == "https://ex.org/p3"]
 
     # old curate URL redirects into the workbench (filters preserved); URLs tab renders the deltas
     r = await crawler_client.get("/collections/ex.org/curate?excluded=true")
