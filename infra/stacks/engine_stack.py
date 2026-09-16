@@ -398,23 +398,29 @@ class CurationEngineStack(Stack):
         # AOSS data-access is separate from IAM: our own policy so nothing owned by other stacks
         # (sde-services-access, …) has to change. Reads everywhere (validation, the publish fallback);
         # write on the working index only where "Index to prod" publishes into this same collection.
-        rules = [
-            {"ResourceType": "collection", "Resource": ["collection/${Collection}"],
-             "Permission": ["aoss:DescribeCollectionItems"]},
-            {"ResourceType": "index", "Resource": ["index/${Collection}/sde-web*"],
-             "Permission": ["aoss:DescribeIndex", "aoss:ReadDocument"]},
-        ]
+        # AOSS allows one rule per ResourceType per statement, so the write grant is its own statement.
+        statements = [{
+            "Description": "curation engine read access",
+            "Principal": ["${TaskRoleArn}"],
+            "Rules": [
+                {"ResourceType": "collection", "Resource": ["collection/${Collection}"],
+                 "Permission": ["aoss:DescribeCollectionItems"]},
+                {"ResourceType": "index", "Resource": ["index/${Collection}/sde-web*"],
+                 "Permission": ["aoss:DescribeIndex", "aoss:ReadDocument"]},
+            ],
+        }]
         if not cfg.prod_publish_via_role:
-            rules.append({"ResourceType": "index", "Resource": [f"index/${{Collection}}/{cfg.web_index_name}"],
-                          "Permission": ["aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument"]})
+            statements.append({
+                "Description": "curation engine write access",
+                "Principal": ["${TaskRoleArn}"],
+                "Rules": [{"ResourceType": "index", "Resource": [f"index/${{Collection}}/{cfg.web_index_name}"],
+                           "Permission": ["aoss:WriteDocument"]}],
+            })
         aoss.CfnAccessPolicy(
             self, "AossDataAccess", name=f"{cfg.name}"[:32], type="data",
             description="sde-curation-engine: validation reads, prod publish writes on the web index",
-            policy=cdk.Fn.sub(json.dumps([{
-                "Description": "curation engine access",
-                "Principal": ["${TaskRoleArn}"],
-                "Rules": rules,
-            }]), {"TaskRoleArn": role.role_arn, "Collection": p["aoss_collection_name"]}),
+            policy=cdk.Fn.sub(json.dumps(statements),
+                              {"TaskRoleArn": role.role_arn, "Collection": p["aoss_collection_name"]}),
         )
 
     def _web_acl(self) -> wafv2.CfnWebACL:

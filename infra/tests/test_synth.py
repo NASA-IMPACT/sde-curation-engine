@@ -1,6 +1,8 @@
 """Synth-level assertions on the dev stack (no AWS calls: the VPC lookup is stubbed via context;
 account-specific values are SSM parameters resolved only at deploy time)."""
 
+import json
+
 import aws_cdk as cdk
 import pytest
 from aws_cdk.assertions import Match, Template
@@ -192,6 +194,15 @@ def test_dev_publishes_into_its_own_collection(template):
     [policy] = template.find_resources("AWS::OpenSearchServerless::AccessPolicy").values()
     body = str(policy["Properties"]["Policy"])
     assert "index/${Collection}/sde-web-subset" in body and "aoss:WriteDocument" in body
+
+
+@pytest.mark.parametrize("env", ["dev", "test"])
+def test_aoss_data_policy_has_one_rule_per_resource_type_per_statement(env):
+    # AOSS rejects the policy otherwise ("There should only be 1 rule for index ResourceType ...")
+    [policy] = synth(env).find_resources("AWS::OpenSearchServerless::AccessPolicy").values()
+    for stmt in json.loads(policy["Properties"]["Policy"]["Fn::Sub"][0]):
+        types = [r["ResourceType"] for r in stmt["Rules"]]
+        assert len(types) == len(set(types)), stmt
 
 
 @pytest.fixture(scope="module")
