@@ -5,7 +5,7 @@ import aws_cdk as cdk
 import pytest
 from aws_cdk.assertions import Match, Template
 
-from config import PARAMS, get_config
+from config import PARAMS, ROLE_PARAMS, get_config
 from stacks.engine_stack import CurationEngineStack
 
 ACCOUNT, REGION = "123456789012", "us-east-1"
@@ -173,3 +173,43 @@ def test_task_role_can_drive_indexer_and_crawler(template):
 def test_all_environments_have_config():
     for env in ("dev", "test", "prod"):
         assert get_config(env).name == f"sde-curation-engine-{env}"
+
+
+def _policy_statements(template: Template) -> list[dict]:
+    return [s for p in template.find_resources("AWS::IAM::Policy").values()
+            for s in p["Properties"]["PolicyDocument"]["Statement"]]
+
+
+def _container_env(template: Template) -> dict:
+    [td] = template.find_resources("AWS::ECS::TaskDefinition").values()
+    return {e["Name"]: e["Value"] for e in td["Properties"]["ContainerDefinitions"][0]["Environment"]}
+
+
+def test_dev_publishes_into_its_own_collection(template):
+    sids = {s.get("Sid") for s in _policy_statements(template)}
+    assert "CosmosVectorizedRead" in sids and "AssumeProdIndexRole" not in sids
+    assert "PROD_INDEX_ROLE_ARN" not in _container_env(template)
+    [policy] = template.find_resources("AWS::OpenSearchServerless::AccessPolicy").values()
+    body = str(policy["Properties"]["Policy"])
+    assert "index/${Collection}/sde-web-subset" in body and "aoss:WriteDocument" in body
+
+
+@pytest.fixture(scope="module")
+def test_template() -> Template:
+    return synth("test")
+
+
+def test_test_env_publishes_to_prod_through_an_assumed_role(test_template):
+    params = test_template.to_json()["Parameters"]
+    ssm_defaults = {v["Default"] for v in params.values()
+                    if v["Type"] == "AWS::SSM::Parameter::Value<String>" and v["Default"].startswith("/sde-curation-engine/")}
+    assert ssm_defaults == {f"/sde-curation-engine/test/{k}" for k in {**PARAMS, **ROLE_PARAMS}}
+    stmts = {s.get("Sid"): s for s in _policy_statements(test_template)}
+    assert stmts["AssumeProdIndexRole"]["Action"] == "sts:AssumeRole"
+    assert stmts["CosmosVectorizedRead"]["Action"] == "s3:GetObject"
+    # the crawler writes at the bucket root in test
+    assert stmts["CrawlerObjectsRead"]["Resource"][0]["Fn::Join"][1][-1] == "/scraped_collections/*"
+    env = _container_env(test_template)
+    assert "PROD_INDEX_ROLE_ARN" in env and env["CRAWLER_S3_PREFIX"] == "" and env["WEB_INDEX_NAME"] == "sde-web"
+    [policy] = test_template.find_resources("AWS::OpenSearchServerless::AccessPolicy").values()
+    assert "aoss:WriteDocument" not in str(policy["Properties"]["Policy"])

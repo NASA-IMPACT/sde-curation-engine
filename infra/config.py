@@ -29,11 +29,15 @@ PARAMS: dict[str, str] = {
     "indexing_task_family": "task definition family of the WEB_COSMOS indexer",
     "indexing_task_role_arn": "task role ARN of the indexer task definition (iam:PassRole)",
     "indexing_execution_role_arn": "execution role ARN of the indexer task definition (iam:PassRole)",
-    "cosmos_index_bucket": "S3 hand-off bucket (curated_collections/, index_runs/)",
+    "cosmos_index_bucket": "S3 hand-off bucket (curated_collections/, index_runs/, vectorized/)",
     "aoss_collection_name": "OpenSearch Serverless collection holding the web index",
     "aoss_collection_id": "id of that collection (aoss:APIAccessAll resource)",
     "opensearch_endpoint_test": "AOSS endpoint the engine validates the 'test' target against",
-    "opensearch_endpoint_prod": "AOSS endpoint the engine validates the 'prod' target against",
+    "opensearch_endpoint_prod": "AOSS endpoint 'Index to prod' publishes the test run's vectors to",
+}
+# Only where EnvConfig.prod_publish_via_role is set: the prod collection lives in another account.
+ROLE_PARAMS: dict[str, str] = {
+    "prod_index_role_arn": "role in the prod account the engine assumes to write the prod web index",
 }
 
 
@@ -50,6 +54,11 @@ class EnvConfig:
     crawler_inbox: str = "/opt/sde-crawler/jobs/incoming"
     # Folder inside crawler_bucket the crawler writes to ("" = bucket root).
     crawler_s3_prefix: str = "sde-curation-engine-prototype"
+    # "Index to prod" writes the prod web index directly. False: that collection is reachable with the
+    # task role (dev, where "prod" is the dev collection; prod itself) → the stack's AOSS data-access
+    # policy grants write on it. True: it is in another account → the task assumes the role in SSM
+    # `prod_index_role_arn` (test, which publishes to SMCE prod).
+    prod_publish_via_role: bool = False
     indexing_container_name: str = "WEB_COSMOSContainer"
     # dev indexes into a scratch subset; test and prod write the live sde-web index
     web_index_name: str = "sde-web-subset"
@@ -78,8 +87,13 @@ class EnvConfig:
     def name(self) -> str:
         return f"{APP_NAME}-{self.env.value}"
 
+    @property
+    def params(self) -> dict[str, str]:
+        """Every SSM parameter this environment needs."""
+        return {**PARAMS, **(ROLE_PARAMS if self.prod_publish_via_role else {})}
+
     def param_name(self, key: str) -> str:
-        assert key in PARAMS, key
+        assert key in self.params, key
         return f"/{APP_NAME}/{self.env.value}/{key}"
 
     def secret_name(self, key: str) -> str:
@@ -88,7 +102,9 @@ class EnvConfig:
 
 CONFIGS: dict[Environment, EnvConfig] = {
     Environment.DEV: EnvConfig(env=Environment.DEV),
-    Environment.TEST: EnvConfig(env=Environment.TEST, web_index_name="sde-web"),
+    # The test crawler (SdeCrawlerStack in 119417011911) writes scraped_collections/ at the bucket root.
+    Environment.TEST: EnvConfig(env=Environment.TEST, web_index_name="sde-web", crawler_s3_prefix="",
+                                prod_publish_via_role=True),
     Environment.PROD: EnvConfig(
         env=Environment.PROD, web_index_name="sde-web", cpu=2048, memory_mib=4096,
         db_multi_az=True, db_backup_days=35, db_deletion_protection=True,

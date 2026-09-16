@@ -1,14 +1,18 @@
 """Phase 6: direct validation, 403 → second-pass fallback, gate → prod/live, notifications."""
 
 import asyncio
+import json
 
 import pytest
 
+from sde_curation.backends.publish import ProdPublisher, to_web_document
+from sde_curation.backends.s3 import S3
 from sde_curation.backends.validate import NoIndexAccess, compare, validate_direct, web_id
 from sde_curation.config import Settings
 from sde_curation.models import IndexRun
 from sde_curation.notify import Notifier
 from tests.conftest import prepare, wait_job
+from tests.fake_aoss import FakeAoss
 
 
 def test_compare_mirrors_indexer_report():
@@ -81,15 +85,38 @@ async def test_gate_falls_back_to_second_pass_then_prod(index_client, monkeypatc
     assert "Index to prod" in (await c.get("/collections/ex.org/header")).text
     page = (await c.get("/collections/ex.org?tab=overview&step=live")).text
     assert "Index to prod" in page and "via second_pass" in (await c.get("/collections/ex.org?tab=overview&step=config_generated")).text
-    # prod
+    # prod: publishes the test run's vectors (S3 vectorized/) into the prod index — no indexer task
+    settings = c.app.state.settings
+    assert (await c.post("/api/collections/ex.org/index?target=prod")).status_code == 409  # no prod endpoint
+    settings.opensearch_endpoint_prod = "https://prod.example.aoss.amazonaws.com"
+    test_run = runs[0]["run_id"]
+    prefix = f"curated_collections/ex.org/{test_run}"
+    manifest = json.loads(c.s3.get_object(Bucket="cosmos-idx", Key=f"{prefix}/manifest.json")["Body"].read())
+    lines = [json.loads(x) for x in c.s3.get_object(Bucket="cosmos-idx", Key=f"{prefix}/documents.jsonl")["Body"].read().splitlines()]
+    c.s3.put_object(Bucket="cosmos-idx", Key=f"vectorized/ex.org/{test_run}/batch_0001.jsonl", Body="\n".join(
+        json.dumps({**to_web_document(ln, manifest), "vectorized_title": [1], "vectorized_full_text": []}) for ln in lines).encode())
+    prod = FakeAoss()
+    c.app.state.jobs._publisher = lambda: ProdPublisher(settings, s3=S3("cosmos-idx", client=c.s3), prod=prod)
+    import sde_curation.jobs as jobs_mod
+
+    async def prod_direct(settings, *, collection_key, run_id, target, expected_titles, client=None):
+        assert target == "prod"
+        indexed = {h["_source"]["id"]: h["_source"]["title"] or "" for h in prod.search("sde-web", {"size": 10_000})["hits"]["hits"]}
+        return compare(collection_key, run_id, {web_id(collection_key, u): t for u, t in expected_titles.items()}, indexed)
+
+    monkeypatch.setattr(jobs_mod, "validate_direct", prod_direct)
     r = await c.post("/api/collections/ex.org/index?target=prod")
     assert r.status_code == 202, r.text
     job = await wait_job(c, "ex.org", timeout=40)
-    assert job["state"] == "succeeded" and job["kind"] == "index_prod"
+    assert job["state"] == "succeeded" and job["kind"] == "index_prod", job
+    assert job["progress"]["status"]["from_vectorized"] == len(lines) and job["progress"]["validation_ok"] is True
+    assert len(prod.store) == len(lines)
     col = (await c.get("/api/collections/ex.org")).json()
-    assert col["status"] == "live"
+    assert col["status"] == "live" and col["needs_recuration"] is False
     runs = (await c.get("/api/collections/ex.org/index_runs")).json()
-    assert runs[0]["target"] == "prod" and runs[0]["state"] == "succeeded"
+    assert runs[0]["target"] == "prod" and runs[0]["state"] == "succeeded" and runs[0]["external_ref"] == f"publish:{test_run}"
+    live = (await c.get("/collections/ex.org?tab=overview&step=live")).text
+    assert f"from test run {test_run}" in live and f"{len(lines)} from S3 vectors" in live
     # notifications fired for each transition
     assert [n["new_status"] for n in notes][-2:] == ["config_generated", "live"] or "live" in [n["new_status"] for n in notes]
     assert "Live ✓" in (await c.get("/collections/ex.org/header")).text
