@@ -280,7 +280,9 @@ class JobManager:
             await self.db.clear_pending_pattern_suggestions(cid)
             gl = global_exclude_hits(load_global_excludes(self.s.global_excludes_path), cand_urls, count_over=all_urls)
             n_global = await self.db.add_pattern_suggestions(cid, gl)
-            examples = [g["match"] for g in sorted(gl, key=lambda g: -g["matches"])[:15]]
+            # every global glob that matched: the model must not repeat them, and a suggestion
+            # whose URLs they already cover is dropped (tasks.suggest_patterns_batch)
+            examples = [g["match"] for g in sorted(gl, key=lambda g: (-g["matches"], g["match"]))]
             if not examples:  # nothing matched: still show the style
                 examples = [g.match for g in load_global_excludes(self.s.global_excludes_path).patterns[:10]]
             unique = dedupe_variants(cand_urls)
@@ -351,7 +353,7 @@ class JobManager:
             try:
                 await run_pool(
                     self.db.iter_deltas_for_llm(cid, only_missing=only_missing),
-                    lambda d: suggest_metadata_one(llm, d, settings=self.s),
+                    lambda d: suggest_metadata_one(llm, d, settings=self.s, collection=c),
                     workers=self.s.llm_workers, on_result=on_result, on_progress=progress, total=total,
                 )
             finally:
@@ -559,10 +561,10 @@ class JobManager:
         rows = [
             DumpUrl(
                 collection_id=collection_id,
-                url=d["url"],
-                scraped_title=d.get("title"),
-                full_text=d.get("full_text"),
-                content_type=d.get("content_type"),
+                url=_no_nul(d["url"]),
+                scraped_title=_no_nul(d.get("title")),
+                full_text=_no_nul(d.get("full_text")),
+                content_type=_no_nul(d.get("content_type")),
                 depth=d.get("depth"),
             )
             for i, d in enumerate(docs)
@@ -570,14 +572,19 @@ class JobManager:
         ]
         fails = [
             DumpFailure(
-                collection_id=collection_id, url=f["url"], reason=str(f["reason"]),
+                collection_id=collection_id, url=_no_nul(f["url"]), reason=_no_nul(str(f["reason"])),
                 status=f["status"] if isinstance(f.get("status"), int) else None,
-                detail=(str(f.get("detail") or "")[:500] or None),
+                detail=(_no_nul(str(f.get("detail") or ""))[:500] or None),
             )
             for f in failures or []
         ]
         n = await self.db.replace_dump(collection_id, rows, fails)
         return n
+
+
+def _no_nul(v: Any) -> Any:
+    """Postgres text cannot hold NUL; the crawler's PDF text extraction sometimes emits it."""
+    return v.replace("\x00", "") if isinstance(v, str) else v
 
 
 def _brief(summary: dict[str, Any]) -> dict[str, Any]:

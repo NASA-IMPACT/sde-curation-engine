@@ -196,10 +196,11 @@ button.link { background: none; border: 0; color: inherit; text-decoration: unde
 .stage-card.current { border-left: 4px solid var(--accent); } .stage-card.todo { opacity: .85; }
 .stage-card .next { margin: .4rem 0 .6rem; }
 .bulk-bar { margin-bottom: .5rem; gap: .6rem; } .bulk-bar .grow { flex: 1; }
+.promote-bar { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: .3rem 0; }
+table.urls th.pick, table.urls td.pick { width: 1.4rem; text-align: center; } table.urls .pick input { margin: 0; }
 .stage-foot { margin-top: .6rem; } .stage-foot .grow { flex: 1; }
 details.add-rule { margin: .4rem 0; } details.add-rule summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
 details.add-rule form { margin-top: .4rem; }
-details.rules summary { cursor: pointer; }
 /* Jobs strip */
 .jobs-card { padding: .5rem 1rem; } .jobs-strip { display: flex; flex-direction: column; gap: .3rem; }
 .jobs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .25rem; }

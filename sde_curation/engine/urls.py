@@ -24,6 +24,25 @@ def canonical_key(url: str) -> str:
     return key
 
 
+def spellings(url: str) -> list[str]:
+    """Every spelling of `url` that canonical_key folds into one page: https/http x www. x trailing
+    slash (the #fragment forms are open-ended; Database.match_clause adds a LIKE for them). SQL has
+    no canonical key, so this is how an exact-URL rule is turned into a `?match=` filter that finds
+    the same rows the engine matches."""
+    p = urlsplit(url.strip())
+    host = p.netloc.lower().removeprefix("www.")
+    path = p.path.rstrip("/")
+    tail = ("?" + p.query) if p.query else ""
+    out: list[str] = []
+    for scheme in ("https", "http"):
+        for h in (host, "www." + host):
+            for pp in ((path or "/"), path + "/"):
+                u = f"{scheme}://{h}{pp}{tail}"
+                if u not in out:
+                    out.append(u)
+    return out
+
+
 def dedupe_variants(urls: Iterable[str]) -> list[str]:
     """One representative per canonical key (prefer https, then the shorter spelling), sorted by
     host and path so consecutive URLs belong to the same section of the site."""

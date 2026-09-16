@@ -193,6 +193,10 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     t = (await c.get("/collections/ex.org?tab=delta&per=25&page=2")).text
     assert "No delta URLs match" in t
     # csv export honours filters
+    # the CSV link sits inside the hx-boost filter form: it must opt out, or htmx swaps the CSV into the page
+    for tab in ("dump", "delta", "curated"):
+        page = (await c.get(f"/collections/ex.org?tab={tab}")).text
+        assert f'hx-boost="false" download href="/collections/ex.org/urls/{tab}?format=csv&' in page
     r = await c.get("/collections/ex.org/urls/delta?format=csv&excluded=true")
     assert r.headers["content-type"].startswith("text/csv") and r.text.splitlines()[0].startswith("kind,url,excluded")
     assert len(r.text.strip().splitlines()) == 2
@@ -206,7 +210,7 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     # the tab row carries the counts (the header has none)
     h = (await c.get("/collections/ex.org?tab=curated")).text
     assert re.search(r'Dump URLs <span class="count[^"]*">8</span>', h) and re.search(r'Curated URLs <span class="count[^"]*">8</span>', h)
-    assert re.search(r'Curate <span class="count[^"]*">3</span>', h) and "wb-chips" not in h
+    assert re.search(r'Rules <span class="count[^"]*">3</span>', h) and ">Curate</a>" in h and "wb-chips" not in h
     assert (await c.get("/collections/ex.org/urls/nope")).status_code == 404
 
 

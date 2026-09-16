@@ -64,6 +64,19 @@ def test_promote_upserts_and_tombstones():
               [Pattern(id=1, collection_id="x", type=PatternType.TITLE, match="*/new", value="New!")]).deltas == []
 
 
+def test_promote_subset_leaves_other_rows_and_hashes_alone():
+    """A partial promote passes only the picked deltas and only their hashes: the unpicked
+    curated rows keep their values and their hash, so their delta survives the next recompute."""
+    c = cur({"url": "https://x/a", "scraped_title": "A", "content_hash": "old-a"},
+            {"url": "https://x/b", "scraped_title": "B", "content_hash": "old-b"})
+    ds = rc(dump(("https://x/a", "A2"), ("https://x/b", "B2")), c)
+    picked = [d for d in ds.deltas if d.url == "https://x/a"]
+    out = {r.url: r for r in promote(c, picked, content_hashes={"https://x/a": "new-a"})}
+    assert out["https://x/a"].scraped_title == "A2" and out["https://x/a"].content_hash == "new-a"
+    assert out["https://x/b"].scraped_title == "B" and out["https://x/b"].content_hash == "old-b"
+    assert [d.url for d in rc(dump(("https://x/a", "A2"), ("https://x/b", "B2")), list(out.values())).deltas] == ["https://x/b"]
+
+
 def test_100k_urls_under_5s():
     n = 100_000
     d = [DumpUrl(collection_id="x", url=f"https://x.org/s{i % 50}/p{i}", scraped_title=f"T{i}") for i in range(n)]

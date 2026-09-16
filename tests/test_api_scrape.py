@@ -1,5 +1,6 @@
 """POST /scrape end-to-end through the JobManager with the fake crawler."""
 
+from sde_curation.engine.text import content_hash
 from tests.conftest import wait_job
 
 
@@ -43,6 +44,17 @@ async def test_rescrape_of_live_collection_flags_recuration(crawler_client):
     await wait_job(crawler_client, "ex.org")
     c = (await crawler_client.get("/api/collections/ex.org")).json()
     assert c["status"] == "scraped" and c["needs_recuration"] is True and c["delta_count"] == 0
+
+
+async def test_ingest_strips_nul_bytes(crawler_client):
+    """PDF text extraction can emit NUL, which Postgres text rejects: the whole load used to fail."""
+    await crawler_client.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 5})
+    jobs = crawler_client.app.state.jobs
+    docs = [{"url": "https://ex.org/a.pdf", "title": "A\x00", "full_text": "x\x00y", "content_type": "application/pdf"}]
+    failures = [{"url": "https://ex.org/b", "reason": "fail", "detail": "bad\x00byte"}]
+    assert await jobs.ingest_dump("ex.org", docs, failures) == 1
+    dump = await jobs.db.load_dump("ex.org")
+    assert dump[0].scraped_title == "A" and dump[0].content_hash == content_hash("xy")
 
 
 async def test_ingest_keeps_one_spelling_per_page(crawler_client):

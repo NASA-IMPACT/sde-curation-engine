@@ -276,7 +276,7 @@ async def test_rules_are_scoped_to_their_collection(crawler_client):
     assert (await c.get("/api/collections/b.org")).status_code == 200
     await c.post("/api/collections/b.org/patterns", json={"type": "exclude", "match": "*/p1"})
     assert len(await patterns(c, "b.org")) == 1
-    assert "this collection only" in (await c.get("/collections/b.org?tab=curate")).text
+    assert "this collection only" in (await c.get("/collections/b.org?tab=rules")).text
     assert "nothing you accept here touches another collection" in (await c.get("/manual")).text
 
 

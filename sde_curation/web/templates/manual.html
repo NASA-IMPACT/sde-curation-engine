@@ -26,6 +26,7 @@
     <li class="sub"><a href="#s-index">Index and validate</a></li>
     <li><a href="#screens">Screens reference</a></li>
     <li><a href="#rules">How rules resolve</a></li>
+    <li><a href="#hand-rules">Writing rules by hand</a></li>
     <li><a href="#jobs">Jobs</a></li>
     <li><a href="#history">History</a></li>
     <li><a href="#parallel">Working alongside others</a></li>
@@ -81,8 +82,8 @@
   <li id="s-dashboard">
     <h3>Find or add the collection on the dashboard</h3>
     <p>The home page lists every collection with its status, the dump / delta / curated URL counts, its last job, and the one button for the next step. The filter pane narrows by status, the curating sub-stage, the needs re-curation flag, division, and curator. Press <kbd>/</kbd> to jump to search. The jobs strip above the table shows everything running anywhere.</p>
-    <figure><img src="{{ static_url('manual/01-dashboard.png') }}" alt="Dashboard with the filter pane, add-collection form, jobs strip, and four collections at different statuses, each with a next-step button">
-    <figcaption><b>Dashboard.</b> Four collections at different stages. The status badge on a curating collection also shows which sub-stage it is in. Each row ends in exactly one action.</figcaption></figure>
+    <figure><img src="{{ static_url('manual/01-dashboard.png') }}" alt="Dashboard with the filter pane, add-collection form, a jobs strip showing one running scrape, and six collections at different statuses, each with a next-step button">
+    <figcaption><b>Dashboard.</b> Six collections at different stages, one of them scraping. The status badge on a curating collection also shows which sub-stage it is in. Each row ends in exactly one action.</figcaption></figure>
     <p>To add a site, fill in the seed URL, a display name, the division, and a page cap, then press <b>Add collection</b>. The collection id is derived from the seed host.</p>
   </li>
 
@@ -100,30 +101,31 @@
   <li id="s-exclusions">
     <h3>Exclusions: decide what must never be indexed</h3>
     <p>Press <b>Start curating</b>. The engine computes the delta URLs and opens the <b>Dump URLs</b> tab so you see everything the crawl found before deciding anything; when you have seen enough, open the <b>Curate</b> tab at section 1. Press <b>✨ Suggest exclusions</b>. It first applies the team's global exclude list, then sends the <b>included delta URLs</b> and titles to the model in batches and asks for exclude globs. On a first pass that is the whole dump; after a re-crawl only what changed, so 90 delta URLs on a 100k-page site cost one call. The button tells you how many URLs and how many calls before you press it; it stays disabled until you have started curating.</p>
-    <figure><img src="{{ static_url('manual/03-exclusions.png') }}" alt="Curate tab, Exclusions section, with eight suggested exclude rules listed with their source, match count, and rationale, plus Accept and Reject buttons">
+    <figure><img src="{{ static_url('manual/03-exclusions.png') }}" alt="Curate tab, Exclusions section, with thirteen suggested exclude rules listed with their source, match count, and rationale, plus Accept, Edit and Reject buttons">
     <figcaption><b>Exclusion suggestions.</b> Each row is a glob, where it came from (<i>global list</i> or <i>AI</i>), how many dump URLs it matches, and why. Match counts link to the URLs. Accept one, edit one, accept all of a type, or accept all.</figcaption></figure>
-    <p>Every suggestion has three options. <b>Accept</b> creates a real exclude rule and recomputes the delta URLs. <b>Edit</b> turns the glob into a text box so you can narrow or widen it (say <code>*/tag/*</code> to <code>*/blog/tag/*</code>) and then <b>Save &amp; accept</b>: the rule is created with your glob and recorded as <i>AI, edited</i>. <b>Reject</b> dismisses it. You can also add an exclude or include rule by hand: a glob with <code>*</code>, or an exact URL. When every suggestion is decided, press <b>Continue to metadata</b>.</p>
+    <p>Every suggestion has three options. <b>Accept</b> creates a real exclude rule and recomputes the delta URLs. <b>Edit</b> turns the glob into a text box so you can narrow or widen it (say <code>*/tag/*</code> to <code>*/blog/tag/*</code>) and then <b>Save &amp; accept</b>: the rule is created with your glob and recorded as <i>AI, edited</i>. <b>Reject</b> dismisses it. You can also add an exclude or include rule by hand: a glob with <code>*</code>, or an exact URL (examples in <a href="#hand-rules">Writing rules by hand</a>). When every suggestion is decided, press <b>Continue to metadata</b>.</p>
     <div class="know"><span class="eyebrow">Know this</span><p>Re-running Suggest exclusions <b>replaces</b> any suggestions you have not yet decided.</p><p>The Metadata section is locked until every exclusion suggestion is decided. If you skipped Suggest exclusions entirely, metadata is allowed with a hint.</p></div>
   </li>
 
   <li id="s-metadata">
     <h3>Metadata: titles, divisions, and document types</h3>
-    <p>Press <b>✨ Suggest metadata</b>. It makes one model call per included delta URL that has not been classified yet, sending the full page text. Each answer carries a title, a division, and a document type, each with a confidence: <b>high</b> means explicit in the text, <b>medium</b> a strong inference, <b>low</b> a guess. Answers are saved as they arrive, so cancelling keeps what finished.</p>
-    <figure><img src="{{ static_url('manual/05-metadata.png') }}" alt="Curate tab at the Metadata step: Exclusions marked done, the Suggest metadata card with its last run, and a review bar showing 66 AI suggestions with accept-all buttons per field and confidence counts">
-    <figcaption><b>Metadata section after a run.</b> The review bar counts suggestions by field and by confidence, with an accept-all per field. Section 3 below already warns that promoting now would discard the undecided suggestions.</figcaption></figure>
+    <p>Press <b>✨ Suggest metadata</b>. It makes one model call per included delta URL that has not been classified yet, sending the full page text. Each answer carries a title, a division, and a document type, each with a confidence: <b>high</b> means explicit in the text or plain from the rules, <b>medium</b> an inference where another answer is defensible, <b>low</b> a guess. When an AI title leads with the site or project name, the model is told to always separate it with a colon (<i>Planetary Data System: Information for Data Proposers</i>). The model is told the collection's division and document type when you set them, and the SDE definitions of each document type. Answers are saved as they arrive, so cancelling keeps what finished.</p>
+    <figure><img src="{{ static_url('manual/05-metadata.png') }}" alt="Curate tab at the Metadata step: Exclusions marked done, the Suggest metadata card with its last run, and a review bar showing 42 AI suggestions with accept-all buttons per field and confidence counts, above the review table">
+    <figcaption><b>Metadata section after a run.</b> The review bar counts suggestions by field and by confidence, with an accept-all per field. Further down, section 3 warns that promoting now would discard the undecided suggestions.</figcaption></figure>
     <p>Under the review bar, a scrolling table lists every URL with a pending suggestion, with the same controls as the Delta URLs table, plus <b>✓ row</b> / <b>✕</b> to decide a whole row at once; <b>Accept all</b> takes every title, division and type in one go. The same rows, with filters, sorting and paging, are under the <b>Delta URLs</b> tab. Each AI badge shows the proposed value and its confidence, with ✓ to accept, ✎ to edit it first (the title opens in an editor prefilled with the suggestion; for division and type the dropdown jumps to the suggested value so you can pick another), and ✕ to dismiss. A value you change before accepting is recorded as <i>AI, edited</i>. Filter the table by confidence to review only the medium and low ones by hand and accept the rest in bulk.</p>
     <figure><img src="{{ static_url('manual/06-urls-pending.png') }}" alt="Delta URLs tab, with AI badges under the title, division, and document type cells showing the proposed value, its confidence, and accept and dismiss buttons">
     <figcaption><b>Delta URLs with AI badges.</b> The title column shows the scraped title above the effective one. Division and type are dropdowns you can set directly. Every edit here becomes an exact-URL rule. The <b>Edited by</b> column says who set the row's values: <b>AI</b> (accepted suggestions), <b>SME</b> (typed or toggled by a curator), or <b>AI + SME</b>; hover it to see the rule behind each field. The same column, and the same filter, exist on the Curated URLs and Dump URLs tables.</figcaption></figure>
     <div class="tip"><span class="eyebrow">Why the Rules count jumps</span><p>Accepting 22 titles, 22 divisions, and 22 types adds 66 rules, one exact-URL rule per accepted value. That is expected. It is what makes every accepted value visible and reversible in the rules table. Exclude suggestions are globs and stay few.</p></div>
-    <figure><img src="{{ static_url('manual/07-rules.png') }}" alt="The Rules table: eight exclude globs followed by exact-URL title rules, each with its match count, when it was added, who added it, and a delete button">
-    <figcaption><b>The Rules table</b> at the bottom of the Curate tab, after a bulk accept. Glob excludes first, then one exact-URL title rule per accepted suggestion. The ✕ deletes a rule, which recomputes the affected URLs.</figcaption></figure>
+    <figure><img src="{{ static_url('manual/07-rules.png') }}" alt="The Rules tab: five exclude rules, three from the global list and two from AI, followed by exact-URL title rules from accepted AI suggestions, each with its match count, source, when it was added, who added it, and a delete button">
+    <figcaption><b>The Rules tab</b>, after a bulk accept. Exclude rules first, then one exact-URL rule per accepted suggestion. <i>Superseded</i> on <code>*/tag*</code>: the older <code>*/tag/*</code> already excludes that page. The ✕ deletes a rule, which recomputes the affected URLs.</figcaption></figure>
   </li>
 
   <li id="s-promote">
     <h3>Promote the delta URLs</h3>
     <p>Section 3 of the Curate tab. <b>Promote</b> writes the delta URLs into the curated URLs and marks the collection Curated. If there are no delta URLs, the button reads <b>Mark curated</b>. <b>Recompute delta URLs</b> re-applies the rules without promoting, useful after hand-editing several rules.</p>
-    <div class="know"><span class="eyebrow">Know this</span><p>Promoting <b>discards</b> any AI suggestions still undecided. The Promote section warns you with the count. Accept or reject them first.</p></div>
-    <figure><img src="{{ static_url('manual/08-curated-overview.png') }}" alt="Overview tab of a curated collection: step 4 highlighted, its panel showing 31 curated URLs with 9 excluded, and the Index to test button">
+    <p>To promote only some of the queue, open <b>Delta URLs</b>, tick the rows (the header box ticks the page) and click <b>Promote selected</b>. The rest stay under review and the collection stays Curating until nothing is left; the rows a rule produced are one click away from its count in the Rules table.</p>
+    <div class="know"><span class="eyebrow">Know this</span><p>Promoting <b>discards</b> any AI suggestions still undecided on the rows it promotes. The Promote section, and the selection bar under Delta URLs, warn you with the count. Accept or reject them first.</p></div>
+    <figure><img src="{{ static_url('manual/08-curated-overview.png') }}" alt="Overview tab of a curated collection: step 4 highlighted, its panel showing 19 curated URLs with 4 excluded, and the Index to test button">
     <figcaption><b>After promoting.</b> Delta URLs drops to zero, Curated URLs shows the approved set with its excluded count, and the next action becomes Index to test.</figcaption></figure>
   </li>
 
@@ -148,12 +150,13 @@
   <dt>Curated URLs</dt><dd>The approved set: metadata plus the page text each row was approved with. Included rows, with that text, are what gets exported to the index. Every field is still editable; an edit becomes a delta URL.</dd>
   <dt>Rules</dt><dd>Every rule in force for this collection, including exact-URL rules from per-row edits and accepted AI suggestions, each with its source (AI, AI edited, SME, global list).</dd>
 </dl>
-<h3>The pipeline and the six tabs</h3>
+<h3>The pipeline and the tabs</h3>
 <p>The six-step pipeline is always at the top. A collection opens at its current step, and clicking a step shows that step's panel: what it did, its actions, details, the last job, and Advanced (Re-scrape, manual status override, Delete for admins). Under steps <b>3 Curating</b> and <b>4 Curated</b> a row of tabs appears, in the order you work: look at what the crawl found, curate, check what will change, check what was approved.</p>
 <dl class="defs">
   <dt>Overview</dt><dd>The step's panel, details and last job.</dd>
   <dt>Dump URLs</dt><dd>Every URL the last crawl found, raw: title, content type, depth, text size and state. Start curating lands here, so you see the whole crawl before deciding anything.</dd>
-  <dt>Curate</dt><dd>Exclusions, Metadata, Promote, in the order you work them, with the full rules table underneath.</dd>
+  <dt>Curate</dt><dd>Exclusions, Metadata, Promote, in the order you work them.</dd>
+  <dt>Rules</dt><dd>Every rule in force for this collection, with the match count over the URLs it currently shows in (delta while reviewing, curated once promoted), the superseded ones marked, and the add-by-hand forms.</dd>
   <dt>Delta URLs</dt><dd>What will change in the curated URLs when you promote: new, modified, removed, excluded.</dd>
   <dt>Curated URLs</dt><dd>The approved set; included rows are exported to the index.</dd>
   <dt>Activity</dt><dd>Every job, the status history, and the audit trail.</dd>
@@ -163,19 +166,81 @@
 <figcaption><b>Dump URLs.</b> The raw crawl. Use it to check what the crawler actually found before deciding anything; ✗/✓ on a row excludes or includes it.</figcaption></figure>
 <h3>The Jobs page</h3>
 <p><code>/jobs</code> lists every running or queued job across all collections, who started it, and live progress, with the recent history underneath. The dashboard carries a compact version of the same strip.</p>
-<figure><img src="{{ static_url('manual/09-jobs.png') }}" alt="Jobs page: one running scrape with a cancel button, and a table of six recent jobs with kind, state, who started them, start time, duration and result">
+<figure><img src="{{ static_url('manual/09-jobs.png') }}" alt="Jobs page: one running scrape with a cancel button, and a table of thirteen recent jobs with kind, state, who started them, start time, duration and result">
 <figcaption><b>Jobs.</b> Running jobs on top with cancel. The result column reads the same as the progress chip on the collection: docs, suggestions, classified counts, tokens.</figcaption></figure>
 
 <h2 id="rules">How rules resolve</h2>
 <p>Every URL's effective title, division, document type, and included or excluded state is computed from the rules of its own collection; a rule never reaches another collection. When several rules match the same URL:</p>
 <ul>
-  <li><b>The most specific rule wins.</b> Specific means the rule with the smallest number of matching URLs. On a tie, the longer pattern string wins. An exact-URL rule matches one URL, so it is always the most specific.</li>
-  <li><b>Include always beats exclude</b>, regardless of specificity. Use include rules to carve exceptions out of broad excludes.</li>
-  <li><b>No rule, then the curated value, then nothing.</b> Deleting a rule falls back to the next most specific rule, then to whatever was last promoted, then to blank. Deleting <em>is</em> the undo.</li>
+  <li><b>The newest rule wins.</b> For titles, divisions and document types the rule added last decides, whatever its shape: a glob you type by hand takes effect on every URL it matches, including URLs whose value came from an accepted AI suggestion or an earlier edit. Accepting a suggestion afterwards is the newest decision again, on that one URL.</li>
+  <li><b>Include always beats exclude</b>, however old it is. Use include rules to carve exceptions out of broad excludes; a later exclude never undoes them.</li>
+  <li><b>No rule, then the curated value, then nothing.</b> Deleting a rule falls back to the next newest rule, then to whatever was last promoted, then to blank. Deleting <em>is</em> the undo.</li>
 </ul>
 <p>Title rules are templates. <code>{title}</code> is the scraped title, <code>{url}</code> the URL, <code>{collection}</code> the collection name. A rule with value <code>{title} | GES DISC</code> appends a suffix to every matching page.</p>
-<p>Hover any field on the Delta, Curated or Dump URLs to see which rule set it, and who made that rule. The <b>Edited by</b> column summarises it per row: a row whose values all come from accepted AI suggestions reads <b>AI</b>; one you typed or toggled reads <b>SME</b>; both, <b>AI + SME</b>. A broad rule you typed (say a <code>*</code> title template) marks every row it wins as SME, which is correct: you decided it. Match counts in the rules table link to the matching rows.</p>
+<p>Hover any field on the Delta, Curated or Dump URLs to see which rule set it, and who made that rule. The <b>Edited by</b> column summarises it per row: a row whose values all come from accepted AI suggestions reads <b>AI</b>; one you typed or toggled reads <b>SME</b>; both, <b>AI + SME</b>. A broad rule you typed (say a <code>*</code> title template) marks every row it wins as SME, which is correct: you decided it. The match count in the rules table is over the URLs where the rule currently shows: the <b>Delta URLs</b> while there is something to review, the <b>Curated URLs</b> once promoted; clicking it opens that table filtered to the rule. A rule a newer one has beaten everywhere is marked <b>superseded</b>.</p>
 <div class="know"><span class="eyebrow">Know this</span><p>A URL excluded by a rule never reaches the export, the index, or the metadata model. Exclude early to save model calls and review time.</p></div>
+
+<h2 id="hand-rules">Writing rules by hand</h2>
+<p>When no suggestion says what you need, type the rule yourself. Both forms are at the top of the <b>Rules</b> tab, and under their section of the <b>Curate</b> tab: <b>Add an exclude or include rule by hand</b> takes a type and a match; <b>Add a metadata rule by hand</b> takes a type, a match and a value. A rule applies as soon as you add it, is recorded as <b>SME</b>, and is undone by deleting it.</p>
+<figure><img src="{{ static_url('manual/11-add-rule-forms.png') }}" alt="The two add-a-rule forms on the Rules tab, filled in: include with the exact URL https://aurorasaurus.org/storm-tracker, and document_type with the glob https://aurorasaurus.org/map/* and the value Data">
+<figcaption><b>The two forms, filled in.</b> Top: an include for one exact URL. Bottom: a document type for every URL under <code>/map/</code>. The value box suggests the division and document type names as you type.</figcaption></figure>
+
+<h3>The match: an exact URL or a glob</h3>
+<p>Without a <code>*</code> the match is an <b>exact URL</b>. It covers every spelling of that page: http or https, with or without <code>www.</code>, with or without the trailing slash, with any <code>#fragment</code>. With a <code>*</code> it is a <b>glob</b>, where <code>*</code> stands for any run of characters, including none.</p>
+<div class="tbl"><table>
+  <thead><tr><th>Match</th><th>Matches</th><th>Does not match</th></tr></thead>
+  <tbody>
+    <tr><td><code>https://aurorasaurus.org/learn</code></td><td>that page, also <code>http://www.aurorasaurus.org/learn/</code></td><td><code>…/learn/aurora-basics</code></td></tr>
+    <tr><td><code>https://aurorasaurus.org/map/*</code></td><td><code>…/map/</code>, <code>…/map/?obs=43806</code></td><td><code>http://aurorasaurus.org/map/</code> (a glob is literal about scheme and host)</td></tr>
+    <tr><td><code>*/login*</code></td><td><code>…/login</code>, <code>…/login/</code>, <code>…/login/facebook/</code>, on any host</td><td><code>…/Login</code> (matching is case-sensitive)</td></tr>
+    <tr><td><code>*/storm-tracker</code></td><td>URLs that <b>end</b> in <code>/storm-tracker</code></td><td><code>…/storm-tracker/</code>, <code>…/storm-tracker?day=1</code></td></tr>
+    <tr><td><code>*.pdf</code></td><td>URLs that end in <code>.pdf</code></td><td><code>…/report.pdf?download=1</code></td></tr>
+    <tr><td><code>*?*</code></td><td>any URL with a query string</td><td>URLs without one</td></tr>
+  </tbody>
+</table></div>
+<p>A glob must match the <b>whole</b> URL. Start it with <code>*</code> unless you mean one scheme and host, and end it with <code>*</code> unless you mean "ends here". Only <code>*</code> is special: <code>?</code>, <code>.</code> and <code>[</code> are plain characters.</p>
+
+<h3>Exclude and include</h3>
+<p>Type <b>exclude</b> keeps matching URLs out of the index; type <b>include</b> is an exception that brings URLs back. An include beats every exclude, however old, so a later exclude never undoes it.</p>
+<div class="tbl"><table>
+  <thead><tr><th>Type</th><th>Match</th><th>Use it to</th></tr></thead>
+  <tbody>
+    <tr><td>exclude</td><td><code>*/about-us*</code></td><td>drop a kind of page on every path and spelling</td></tr>
+    <tr><td>exclude</td><td><code>https://aurorasaurus.org/map/?obs=*</code></td><td>drop one section of one site</td></tr>
+    <tr><td>exclude</td><td><code>https://aurorasaurus.org/privacy</code></td><td>drop one page</td></tr>
+    <tr><td>include</td><td><code>https://aurorasaurus.org/storm-tracker</code></td><td>keep a page an AI or global exclude caught by mistake</td></tr>
+    <tr><td>include</td><td><code>https://aurorasaurus.org/map/?obs=43806</code></td><td>keep one page inside a broad exclude such as <code>*?*</code></td></tr>
+  </tbody>
+</table></div>
+
+<h3>Titles, divisions and document types</h3>
+<p>A metadata rule sets one field on every URL it matches. When several rules set the same field on a URL, the <b>newest</b> one wins, whether it is a glob or an exact URL. A glob you add today therefore overrides older accepted AI values on the URLs it matches.</p>
+<div class="tbl"><table>
+  <thead><tr><th>Type</th><th>Match</th><th>Value</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr><td>title</td><td><code>*/storm-tracker</code></td><td><code>Aurora Storm Tracker | {collection}</code></td><td>Aurora Storm Tracker | Aurorasaurus</td></tr>
+    <tr><td>title</td><td><code>https://aurorasaurus.org/map/?obs=*</code></td><td><code>{collection} sighting report</code></td><td>Aurorasaurus sighting report</td></tr>
+    <tr><td>title</td><td><code>https://aurorasaurus.org/*</code></td><td><code>{title}</code></td><td>every page back to its scraped title, over older title rules</td></tr>
+    <tr><td>division</td><td><code>https://aurorasaurus.org/*</code></td><td><code>Heliophysics</code></td><td>Heliophysics on every page of the site</td></tr>
+    <tr><td>document_type</td><td><code>https://aurorasaurus.org/map/*</code></td><td><code>Data</code></td><td>Data on the map and every sighting</td></tr>
+  </tbody>
+</table></div>
+<dl class="defs">
+  <dt>title</dt><dd>A template. <code>{title}</code> is the scraped title, <code>{url}</code> the page URL, <code>{collection}</code> the collection name; everything else is literal text. <code>xpath://</code> values are not supported.</dd>
+  <dt>division</dt><dd>Exactly one of: Astrophysics, Biological and Physical Sciences, Earth Science, Heliophysics, Planetary Science, General.</dd>
+  <dt>document_type</dt><dd>Exactly one of: Images, Data, Documentation, Software and Tools, Missions and Instruments.</dd>
+</dl>
+<figure><img src="{{ static_url('manual/12-hand-rules.png') }}" alt="Rules table showing only the seven hand-written rules: an exclude glob, two includes, two title templates, a document_type glob and a division glob, each with its match count and the SME source">
+<figcaption><b>The rules above, in the Rules tab</b> (other rules hidden). The match count is over the delta URLs; click it to see which URLs a rule hits before you trust it.</figcaption></figure>
+<figure><img src="{{ static_url('manual/13-hand-rules-effect.png') }}" alt="Delta URLs after the hand-written rules: about-us excluded, storm-tracker and one sighting included with new titles, the map and sightings typed Data, every row Heliophysics">
+<figcaption><b>Their effect on the Delta URLs.</b> <code>/about-us</code> is excluded; <code>/storm-tracker</code> and sighting 43806 are back in; the sightings carry the templated title and the Data type. Hover a value to see the rule that set it.</figcaption></figure>
+
+<div class="know"><span class="eyebrow">Mistakes that match nothing</span>
+<p><b><code>/login</code> on its own</b> has no <code>*</code>, so it is an exact URL, and no page's URL is just <code>/login</code>. Write <code>*/login*</code>.</p>
+<p><b>A glob without the right scheme or host</b>: <code>https://www.site.gov/docs/*</code> misses <code>https://site.gov/docs/…</code>. Check the URLs in Dump URLs, or start with <code>*</code>.</p>
+<p><b>A match count of 0</b> after adding a rule almost always means one of the two. Delete the rule and write it again.</p>
+<p><b>"pattern already exists"</b>: a collection holds one rule per type and match. To change the value of an existing rule, delete it and add the new one; for a single URL you can also edit its row in a URL table.</p>
+</div>
 
 <h2 id="jobs">Jobs</h2>
 <ul>

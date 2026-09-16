@@ -5,12 +5,17 @@ Semantics (from COSMOS README_PATTERN_* specs, as distilled in docs/plan.md):
     matches every spelling of that page (http/https, trailing slash, #fragment — the canonical
     key in engine/urls.py): a per-URL edit survives the page moving to https.
   * exclude/include: a URL is excluded iff some exclude pattern matches AND no include matches
-  * field patterns (title / division / document_type): the winner is the pattern with the
-    smallest match set ("most specific"); ties broken by the longest pattern string
+  * field patterns (title / division / document_type): the winner is the NEWEST matching rule
+    (highest id) — the curator's latest decision, whether it is a per-URL edit, an accepted AI
+    suggestion or a glob typed by hand. A hand-typed glob therefore takes effect on every URL it
+    matches, including the ones an earlier accepted suggestion had set; accepting a suggestion
+    later overrides the glob on that one URL again. Specificity plays no part.
+  * exclude/include are NOT ranked by age: an include is an explicit exception and keeps winning
+    however old it is, so a later exclude glob cannot silently undo a batch of force-includes.
   * title values are templates: {url} {title} {collection}; xpath:// is not supported here
   * effective value = winning pattern value, else the curated value, else NULL
 Because resolution is a pure function of (urls, patterns, curated), "unapply" is simply a
-recompute after the pattern is gone — the next most specific pattern, then curated, then NULL.
+recompute after the pattern is gone — the next newest pattern, then curated, then NULL.
 """
 
 from __future__ import annotations
@@ -30,6 +35,13 @@ def glob_to_regex(match: str) -> re.Pattern[str]:
         return re.compile(re.escape(match) + r"\Z")
     parts = [re.escape(p) for p in match.split("*")]
     return re.compile(".*".join(parts) + r"\Z", re.DOTALL)
+
+
+def glob_to_like(match: str) -> str:
+    """The same glob as a SQL LIKE pattern, for `?match=` on the URL tables: `*` -> `%`; the LIKE
+    wildcards `%` and `_` (and the default escape `\\`) escaped so they stay literal. LIKE is
+    anchored at both ends and case-sensitive, like glob_to_regex, so both select the same URLs."""
+    return match.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace("*", "%")
 
 
 def render_title(template: str, *, url: str, scraped_title: str | None, collection: str) -> str:
@@ -96,10 +108,9 @@ def resolve_all(
     excluded: dict[str, int] = {}
     included: dict[str, int] = {}
     per_field: dict[str, list[Compiled]] = {t: [] for t in FIELD_TYPES}
-    # exact patterns always win (the smallest possible match set = most specific), so they are
-    # resolved by dict lookup on (type, canonical key) instead of scanning the glob list per URL.
-    # Two exact rules for different spellings of one page: the newest (highest id) wins — the
-    # curator's latest edit of that row.
+    # exact patterns are resolved by dict lookup on (type, canonical key) instead of scanning the
+    # glob list per URL (there can be one per URL). Two exact rules for different spellings of one
+    # page: the newest (highest id) wins — the curator's latest edit of that row.
     exact: dict[tuple[str, str], Compiled] = {}
     key_of = {u: canonical_key(u) for u in urls}
     for c in compiled:
@@ -117,9 +128,9 @@ def resolve_all(
         else:
             per_field[c.pattern.type].append(c)
 
-    # most specific first: smallest match set, then longest pattern string
+    # newest first: the first glob that matches a URL is the latest decision among the globs
     for lst in per_field.values():
-        lst.sort(key=lambda c: (len(c.matches), -len(c.pattern.match)))
+        lst.sort(key=lambda c: -(c.pattern.id or 0))
 
     out: dict[str, Resolved] = {}
     for u in urls:
@@ -128,7 +139,10 @@ def resolve_all(
             r.effects["excluded"] = included.get(u, excluded[u])
         b = base.get(u, {})
         for t in FIELD_TYPES:
-            winner = exact.get((t, key_of[u])) or next((c for c in per_field[t] if u in c.matches), None)
+            e = exact.get((t, key_of[u]))
+            g = next((c for c in per_field[t] if u in c.matches), None)
+            # exact vs glob: the newer of the two wins as well
+            winner = e if e is not None and (g is None or (e.pattern.id or 0) >= (g.pattern.id or 0)) else g
             if winner is None:
                 value = b.get(t)
             else:

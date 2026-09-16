@@ -15,7 +15,9 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from .engine.patterns import glob_to_like, is_exact
 from .engine.text import content_hash
+from .engine.urls import spellings
 from .models import (
     Collection,
     CuratedUrl,
@@ -88,6 +90,21 @@ def order_by(sorts: dict[str, tuple[str, ...]], sort: str | None, desc: bool, de
         return f" ORDER BY {default}"
     d = "DESC" if desc else "ASC"
     return " ORDER BY " + ", ".join(f"{e} {d} NULLS LAST" for e in exprs) + f", {default}"
+
+
+AI_FIELDS = ("title", "division", "document_type")
+
+
+def match_clause(match: str, col: str) -> tuple[str, list[Any]]:
+    """`?match=<glob>` as SQL: the URLs a rule (or a not-yet-saved suggestion) matches, the same
+    set the engine's glob_to_regex selects. A glob is one LIKE. An exact-URL rule matches by
+    canonical key in the engine, which SQL has not: it becomes every spelling of its page
+    (https/http, www., trailing slash) plus their #fragment forms."""
+    if is_exact(match):
+        sp = spellings(match)
+        return f"({col} = ANY(%s) OR {col} LIKE ANY(%s))", [sp, [glob_to_like(u) + "#%" for u in sp]]
+    return f"{col} LIKE %s", [glob_to_like(match)]
+
 
 class Database:
     def __init__(self, dsn: str, *, pool_size: int = 8, connect_timeout_s: float = 30.0):
@@ -318,12 +335,14 @@ class Database:
 
     async def list_dump(
         self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None,
-        sort: str | None = None, desc: bool = False,
+        match: str | None = None, sort: str | None = None, desc: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
         """Dump rows (no full_text) plus `text_len` and `in_curated` / `in_deltas` flags."""
         where, args = ["d.collection_id=%s"], [collection_id]
         if q:
             where.append("(d.url ILIKE %s OR d.scraped_title ILIKE %s)"); args += [f"%{q}%"] * 2
+        if match:
+            m, a = match_clause(match, "d.url"); where.append(m); args += a
         w = " AND ".join(where)
         async with self._conn() as conn:
             total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM dump_urls d WHERE {w}", args))
@@ -350,6 +369,17 @@ class Database:
             )
             return {r["url"] for r in await cur.fetchall()}
 
+    async def deltas_for(self, collection_id: str, urls: list[str]) -> dict[str, DeltaUrl]:
+        """The pending delta row, if any, for each of these URLs (the Curated table shows the
+        values a row will have once promoted, not the ones it was promoted with)."""
+        if not urls:
+            return {}
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM delta_urls WHERE collection_id=%s AND url = ANY(%s)", (collection_id, list(urls))
+            )
+            return {r["url"]: DeltaUrl(**r) for r in await cur.fetchall()}
+
     async def effects_for(self, collection_id: str, urls: list[str]) -> dict[str, dict[str, str]]:
         """{url: {field: 'type match → value (by who · source)'}} — which pattern produced each
         effective field ("excluded" = the exclude / include rule that decided the row)."""
@@ -374,11 +404,13 @@ class Database:
     async def list_curated(
         self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None,
         excluded: bool | None = None, edited: str | None = None, unreachable: bool | None = None,
-        sort: str | None = None, desc: bool = False,
+        match: str | None = None, sort: str | None = None, desc: bool = False,
     ) -> tuple[list[CuratedUrl], int]:
         where, args = ["collection_id=%s"], [collection_id]
         if q:
             where.append("(url ILIKE %s OR title ILIKE %s OR scraped_title ILIKE %s)"); args += [f"%{q}%"] * 3
+        if match:
+            m, a = match_clause(match, "url"); where.append(m); args += a
         if excluded is not None:
             where.append("excluded=%s"); args.append(excluded)
         if edited:
@@ -406,6 +438,24 @@ class Database:
         async with self._conn() as conn:
             cur = await conn.execute("SELECT url FROM dump_urls WHERE collection_id=%s", (collection_id,))
             return [r["url"] for r in await cur.fetchall()]
+
+    async def set_urls(self, collection_id: str, set_: str) -> list[str]:
+        """Every URL of one set (dump / delta / curated): what a rule's match count is taken over."""
+        table = {"dump": "dump_urls", "delta": "delta_urls", "curated": "curated_urls"}[set_]
+        async with self._conn() as conn:
+            cur = await conn.execute(f"SELECT url FROM {table} WHERE collection_id=%s", (collection_id,))
+            return [r["url"] for r in await cur.fetchall()]
+
+    async def effect_counts(self, collection_id: str) -> dict[int, int]:
+        """pattern_id -> how many URLs the rule currently decides. pattern_effects holds only the
+        winner per (url, field) and a rule has one type, so COUNT(*) is a URL count; it is as of
+        the last recompute (a promote keeps the effects)."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT pattern_id, COUNT(*) AS n FROM pattern_effects WHERE collection_id=%s GROUP BY pattern_id",
+                (collection_id,),
+            )
+            return {r["pattern_id"]: r["n"] for r in await cur.fetchall()}
 
     async def load_dump_failures(self, collection_id: str) -> dict[str, str]:
         """url -> crawler reason for every URL the current crawl tried and could not fetch."""
@@ -448,11 +498,18 @@ class Database:
     async def list_deltas(
         self, collection_id: str, *, kind: str | None = None, excluded: bool | None = None,
         q: str | None = None, division: str | None = None, document_type: str | None = None,
-        ai_pending: bool = False, ai_conf: str | None = None, content_changed: bool | None = None,
-        edited: str | None = None, renamed: bool | None = None, limit: int = 100, offset: int = 0,
+        ai_pending: bool = False, ai_conf: str | None = None, ai_field: str | None = None,
+        content_changed: bool | None = None, edited: str | None = None, renamed: bool | None = None,
+        match: str | None = None, limit: int = 100, offset: int = 0,
         sort: str | None = None, desc: bool = False,
     ) -> tuple[list[DeltaUrl], int]:
+        """`ai_field`: rows with a pending suggestion for that one field (title / division /
+        document_type); `match`: rows a rule's glob or exact URL matches (see match_clause)."""
         where, args = ["collection_id=%s"], [collection_id]
+        if ai_field in AI_FIELDS:
+            where.append(f"{ai_field}_ai IS NOT NULL")
+        if match:
+            m, a = match_clause(match, "url"); where.append(m); args += a
         if kind:
             where.append("kind=%s"); args.append(kind)
         if renamed is not None:
@@ -521,6 +578,32 @@ class Database:
                 (len(deltas), utcnow(), collection_id),
             )
 
+    async def delete_deltas(self, collection_id: str, urls: list[str]) -> int:
+        """Drop these rows from the review queue (a partial promote) and recount in SQL. The
+        rule→URL effects stay: the rows became curated rows and the Curated table still explains
+        them (same reason a full promote keeps the effects)."""
+        if not urls:
+            return 0
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "DELETE FROM delta_urls WHERE collection_id=%s AND url = ANY(%s)", (collection_id, list(urls))
+            )
+            await conn.execute(
+                "UPDATE collections SET delta_count=(SELECT COUNT(*) FROM delta_urls WHERE collection_id=%s),"
+                " updated_at=%s WHERE collection_id=%s",
+                (collection_id, utcnow(), collection_id),
+            )
+            return cur.rowcount
+
+    async def delete_effects(self, collection_id: str, urls: list[str]) -> None:
+        """Forget the rule→URL effects of URLs that are in neither set any more (promoted tombstones)."""
+        if not urls:
+            return
+        async with self._conn() as conn:
+            await conn.execute(
+                "DELETE FROM pattern_effects WHERE collection_id=%s AND url = ANY(%s)", (collection_id, list(urls))
+            )
+
     async def set_delta_ai(self, collection_id: str, items: list[dict[str, Any]]) -> int:
         """Bulk-write AI suggestions for whole rows (never touches the effective fields). A
         re-classification replaces the previous answer, confidence included."""
@@ -575,13 +658,18 @@ class Database:
                 (collection_id,),
             ))
 
-    async def replace_curated(self, collection_id: str, rows: list[CuratedUrl], *, text_from_dump: bool = True) -> int:
+    async def replace_curated(
+        self, collection_id: str, rows: list[CuratedUrl], *, text_from_dump: bool = True,
+        text_urls: list[str] | None = None,
+    ) -> int:
         """Bulk-replace the curated set in one transaction; returns row count. With `text_from_dump`
         (a promote) every row that is in the dump takes the dump's current page text — copied inside
-        PostgreSQL, so the text never travels through the app. A row's own `full_text` is written
-        first; a row written without text keeps the text it already had in the table (a promote
-        loads the curated set without text, and a row the dump lacks — kept through a crawl
-        failure — must not lose the text the index holds for it)."""
+        PostgreSQL, so the text never travels through the app; `text_urls` limits that to the rows
+        just promoted (a partial promote: a row still under review keeps the text its curated
+        metadata was approved with). A row's own `full_text` is written first; a row written
+        without text keeps the text it already had in the table (a promote loads the curated set
+        without text, and a row the dump lacks — kept through a crawl failure — must not lose the
+        text the index holds for it)."""
         async with self._conn() as conn:
             await conn.execute(
                 "CREATE TEMP TABLE curated_in (LIKE curated_urls INCLUDING DEFAULTS) ON COMMIT DROP"
@@ -613,8 +701,9 @@ class Database:
             if text_from_dump:
                 await conn.execute(
                     "UPDATE curated_urls c SET full_text = d.full_text FROM dump_urls d"
-                    " WHERE c.collection_id=%s AND d.collection_id=c.collection_id AND d.url=c.url",
-                    (collection_id,),
+                    " WHERE c.collection_id=%s AND d.collection_id=c.collection_id AND d.url=c.url"
+                    + ("" if text_urls is None else " AND c.url = ANY(%s)"),
+                    (collection_id,) if text_urls is None else (collection_id, list(text_urls)),
                 )
             await conn.execute(
                 "UPDATE collections SET curated_count=%s, updated_at=%s WHERE collection_id=%s",

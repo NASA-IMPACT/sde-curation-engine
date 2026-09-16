@@ -1,0 +1,10 @@
+{# Rules: every rule in force for this collection, at the same level as the URL sets. context:
+   c, job, patterns (pattern_stats), source_label, source_counts, rows_set, divisions, doc_types #}
+{% set cid = c.collection_id %}
+{% set running = job and job.state == 'running' %}
+{% from "partials/add_rules.html" import add_exclude_form, add_metadata_form with context %}
+<p class="subtab-hint muted">Every rule in force for <b>this collection only</b>. The newest rule wins on the URLs it matches (include always beats exclude); every per-URL edit and accepted AI suggestion is an exact-URL rule. The match count is over the <b>{{ {'delta': 'Delta URLs', 'curated': 'Curated URLs', 'dump': 'Dump URLs'}[rows_set] }}</b> — click it to see them. Deleting a rule is the undo: its URLs fall back to the next newest rule, then to the promoted value.</p>
+{{ add_exclude_form() }}
+{{ add_metadata_form() }}
+{# .rules carries the table styles in app.css; .tbl-wrap scrolls it sideways on a narrow screen #}
+<div id="rules-table" class="rules tbl-wrap">{% include "partials/rules.html" %}</div>
