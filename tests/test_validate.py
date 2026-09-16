@@ -99,9 +99,13 @@ async def test_gate_falls_back_to_second_pass_then_prod(index_client, monkeypatc
     c.app.state.jobs._publisher = lambda: ProdPublisher(settings, s3=S3("cosmos-idx", client=c.s3), prod=prod)
     import sde_curation.jobs as jobs_mod
 
+    calls = []
+
     async def prod_direct(settings, *, collection_key, run_id, target, expected_titles, client=None):
         assert target == "prod"
-        indexed = {h["_source"]["id"]: h["_source"]["title"] or "" for h in prod.search("sde-web", {"size": 10_000})["hits"]["hits"]}
+        calls.append(1)  # AOSS lag: the first two checks see nothing yet
+        hits = prod.search("sde-web", {"size": 10_000})["hits"]["hits"] if len(calls) > 2 else []
+        indexed = {h["_source"]["id"]: h["_source"]["title"] or "" for h in hits}
         return compare(collection_key, run_id, {web_id(collection_key, u): t for u, t in expected_titles.items()}, indexed)
 
     monkeypatch.setattr(jobs_mod, "validate_direct", prod_direct)
@@ -110,6 +114,7 @@ async def test_gate_falls_back_to_second_pass_then_prod(index_client, monkeypatc
     job = await wait_job(c, "ex.org", timeout=40)
     assert job["state"] == "succeeded" and job["kind"] == "index_prod", job
     assert job["progress"]["status"]["from_vectorized"] == len(lines) and job["progress"]["validation_ok"] is True
+    assert job["progress"]["validation_attempt"] == 3 and job["progress"]["indexed_so_far"] == len(lines)
     assert len(prod.store) == len(lines)
     col = (await c.get("/api/collections/ex.org")).json()
     assert col["status"] == "live" and col["needs_recuration"] is False

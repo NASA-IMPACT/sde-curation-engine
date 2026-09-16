@@ -1,6 +1,6 @@
 {# One place for "what is this job doing / what did it do" text. Reads job.progress keys written
    by jobs.py (scrape: docs/failed/queued/queue_ahead/reused/attached; index: exported/phase/waiting_s/
-   validation_ok; LLM: llm=patterns|metadata, done/total/inflight/retrying/failed, urls/calls/global/
+   validation_ok; prod publish: phase/source_test_run/changed/unchanged/indexed/remaining/to_remove; LLM: llm=patterns|metadata, done/total/inflight/retrying/failed, urls/calls/global/
    suggestions, classified, tokens_in/tokens_out). #}
 {% macro job_progress(job) -%}
 {%- set p = job.progress or {} -%}
@@ -10,7 +10,11 @@
   {%- elif p.attached and p.docs is defined %}{{ p.docs }} docs{% if p.failed %}, {{ p.failed }} failed{% endif %} · following a crawl that was already running on the host
   {%- elif p.phase == 'dispatch' %}exported {{ p.exported }} · starting indexer
   {%- elif p.phase == 'indexing' %}indexing {{ p.exported }} docs{% if p.waiting_s %} · {{ (p.waiting_s // 60)|int }}m{% endif %}
-  {%- elif p.phase == 'validating' %}validating the test index{% if p.validation_attempt %} · {{ p.indexed_so_far }}/{{ p.expected_count }} visible so far{% if p.validation_waiting_s %} · waiting {{ p.validation_waiting_s }}s for OpenSearch to refresh{% endif %}{% endif %}
+  {%- elif p.phase == 'preflight' %}checking the prod index{% if p.source_test_run %} · publishing test run {{ p.source_test_run }}{% endif %}
+  {%- elif p.phase == 'from_vectorized' %}publishing S3 vectors · {{ p.indexed or 0 }}/{{ p.changed or 0 }} written{% if p.unchanged %} · {{ p.unchanged }} unchanged{% endif %}{% if p.failed %} · {{ p.failed }} failed{% endif %}
+  {%- elif p.phase == 'from_test_index' %}copying {{ p.remaining }} docs without S3 vectors from the test index · {{ p.indexed or 0 }} written
+  {%- elif p.phase == 'tombstone' %}hiding {{ p.to_remove }} removed docs in prod
+  {%- elif p.phase == 'validating' %}validating the {{ 'prod' if job.kind == 'index_prod' else 'test' }} index{% if p.validation_attempt %} · {{ p.indexed_so_far }}/{{ p.expected_count }} visible so far{% if p.validation_waiting_s %} · waiting {{ p.validation_waiting_s }}s for OpenSearch to refresh{% endif %}{% endif %}
   {%- elif p.phase == 'done' %}validation {{ 'passed' if p.validation_ok else 'failed' }}
   {%- elif p.llm %}LLM calls in progress · {{ p.done or 0 }}/{{ p.total or '?' }}{{ ' calls' if p.llm == 'patterns' else ' URLs' }}{% if p.inflight %} · {{ p.inflight }} in flight{% endif %}{% if p.retrying %} · {{ p.retrying }} to retry{% endif %}{% if p.failed %} · {{ p.failed }} failed{% endif %}
   {%- elif p.docs is defined %}{{ p.docs }} docs{% if p.failed %}, {{ p.failed }} failed{% endif %}
