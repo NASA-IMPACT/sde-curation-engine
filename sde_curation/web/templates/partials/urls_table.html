@@ -1,0 +1,143 @@
+{# One table component for the three URL sets: dump / delta / curated. Filters are GET params so
+   URLs are shareable. Every set is editable in place: each edit is an exact-URL rule, recompute
+   turns the row into a delta URL (see the cell macros). #}
+{% set cid = c.collection_id %}
+{% set running = job and job.state == 'running' %}
+{% set base = '/collections/' ~ cid ~ '?tab=' ~ set %}
+{% set sort = sort if sort in sortable else none %}
+{% macro filters_qs() -%}
+q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is none else ('true' if excluded else 'false') }}&division={{ (division or '')|urlencode }}&document_type={{ (document_type or '')|urlencode }}&ai={{ ai or '' }}&changed={{ changed or '' }}&edited={{ edited or '' }}&renamed={{ renamed or '' }}&unreachable={{ unreachable or '' }}&match={{ (match or '')|urlencode }}
+{%- endmacro %}
+{% macro qs(extra) -%}
+{{ base }}&{{ filters_qs() }}&sort={{ sort or '' }}&dir={{ dir or '' }}&per={{ per }}{{ extra }}
+{%- endmacro %}
+{# A sortable column header: click sorts ascending, click again flips; the sorted column shows an
+   arrow. Sorting keeps every filter and goes back to page 1. #}
+{% macro th(key, label, title='') -%}
+{% set on = sort == key %}{% set next = 'desc' if on and dir == 'asc' else 'asc' %}
+<th {% if on %}class="sorted" aria-sort="{{ 'ascending' if dir == 'asc' else 'descending' }}"{% endif %}{% if title %} title="{{ title }}"{% endif %}><a class="sort" href="{{ base }}&{{ filters_qs() }}&sort={{ key }}&dir={{ next }}&per={{ per }}&page=1" title="sort by {{ label|striptags|lower }}, {{ next }}ending">{{ label|safe }}<span class="arrow">{% if on %}{{ '▲' if dir == 'asc' else '▼' }}{% else %}⇅{% endif %}</span></a></th>
+{%- endmacro %}
+
+{% from "partials/url_cells.html" import edited_chip, toggle_cell, title_cell, select_cell with context %}
+
+{# hx-boost on this form also boosts the links inside it (filters, paging): fine for pages, but the
+   CSV link opts out — boosted, htmx fetches the CSV and swaps "#tab-body" out of it, blanking the tab #}
+<form method="get" action="/collections/{{ cid }}" class="tbl-toolbar" hx-boost="true" hx-target="#tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-push-url="true">
+  <input type="hidden" name="tab" value="{{ set }}">{% if selected %}<input type="hidden" name="step" value="{{ selected }}">{% endif %}{% if sort %}<input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}">{% endif %}{% if match %}<input type="hidden" name="match" value="{{ match }}">{% endif %}
+  {% if match %}<span class="kind k-modified nowrap" title="only the URLs this rule matches (from the Rules table)">rule <code>{{ match }}</code></span>{% endif %}
+  <input type="search" name="q" value="{{ q or '' }}" placeholder="search url / title" size="28" aria-label="search">
+  {% if set == 'delta' %}
+  <select name="kind" aria-label="kind"><option value="">any kind</option>{% for k in kinds %}<option value="{{ k }}" {% if kind == k %}selected{% endif %}>{{ 'removed' if k == 'deleted' else k }}</option>{% endfor %}</select>
+  {% endif %}
+  {% if set != 'dump' %}
+  <select name="excluded" aria-label="exclusion"><option value="">included + excluded</option><option value="false" {% if excluded == False %}selected{% endif %}>included only</option><option value="true" {% if excluded %}selected{% endif %}>excluded only</option></select>
+  <select name="edited" aria-label="edited by"><option value="">edited by anyone</option><option value="ai" {% if edited == 'ai' %}selected{% endif %}>edited by AI</option><option value="sme" {% if edited == 'sme' %}selected{% endif %}>edited by SME</option><option value="mixed" {% if edited == 'mixed' %}selected{% endif %}>AI + SME</option></select>
+  {% endif %}
+  {% if set == 'delta' %}
+  <select name="division" aria-label="division"><option value="">any division</option>{% for v in divisions %}<option {% if division == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+  <select name="document_type" aria-label="document type"><option value="">any type</option>{% for v in doc_types %}<option {% if document_type == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+  <select name="ai" aria-label="AI suggestions"><option value="">with or without AI suggestions</option><option value="pending" {% if ai == 'pending' %}selected{% endif %}>has AI suggestions</option><option value="high" {% if ai == 'high' %}selected{% endif %}>AI · high confidence</option><option value="medium" {% if ai == 'medium' %}selected{% endif %}>AI · medium confidence</option><option value="low" {% if ai == 'low' %}selected{% endif %}>AI · low confidence</option><option value="title" {% if ai == 'title' %}selected{% endif %}>AI title pending</option><option value="division" {% if ai == 'division' %}selected{% endif %}>AI division pending</option><option value="document_type" {% if ai == 'document_type' %}selected{% endif %}>AI doc type pending</option></select>
+  <select name="changed" aria-label="page text"><option value="">any page text</option><option value="true" {% if changed == 'true' %}selected{% endif %}>text changed since promotion</option></select>
+  <select name="renamed" aria-label="URL spelling"><option value="">any URL</option><option value="true" {% if renamed == 'true' %}selected{% endif %}>URL spelling changed (renamed)</option></select>
+  {% endif %}
+  {% if set == 'curated' %}
+  <select name="unreachable" aria-label="last crawl"><option value="">fetched or not</option><option value="true" {% if unreachable == 'true' %}selected{% endif %}>not fetched by the last crawl (kept)</option></select>
+  {% endif %}
+  <select name="per" aria-label="rows per page">{% for n in [25, 50, 100, 250] %}<option {% if per == n %}selected{% endif %}>{{ n }}</option>{% endfor %}</select>
+  <button class="secondary">Filter</button>
+  {% if q or kind or excluded is not none or division or document_type or ai or changed or edited or renamed or unreachable or match %}<a class="muted" href="{{ base }}">clear</a>{% endif %}
+  <span class="grow"></span>
+  <span class="muted small nowrap">{% if total %}{{ (page - 1) * per + 1 }}–{{ [page * per, total]|min }} of {{ total }}{% else %}0 rows{% endif %}</span>
+  <a class="page {% if page <= 1 %}off{% endif %}" href="{{ qs('&page=' ~ (page - 1)) }}" aria-label="previous page">‹</a>
+  <span class="small nowrap">page {{ page }} / {{ pages }}</span>
+  <a class="page {% if page >= pages %}off{% endif %}" href="{{ qs('&page=' ~ (page + 1)) }}" aria-label="next page">›</a>
+  <a class="muted small nowrap" hx-boost="false" download href="/collections/{{ cid }}/urls/{{ set }}?format=csv&{{ filters_qs() }}&sort={{ sort or '' }}&dir={{ dir or '' }}" title="download the filtered rows as CSV, in this order">⇩ CSV</a>
+</form>
+
+{% if running %}<div class="banner info"><span class="spinner"></span> {{ job.kind }} running — editing is locked until it finishes.</div>{% endif %}
+
+{# Delta URLs: promote a selection. Ticks are per page — a promote reloads the page (HX-Refresh),
+   and the promoted rows leave the queue anyway. The button collects the ticked boxes at request
+   time (hx-include), so no <form> wraps the table: its cells hold their own hx-post buttons. #}
+{% if set == 'delta' and rows %}
+{% set then_url %}{{ base }}&{{ filters_qs() }}&sort={{ sort or '' }}&dir={{ dir or '' }}&per={{ per }}&page={{ page }}{% endset %}
+<div class="inline bulk-bar promote-bar" id="promote-bar">
+  <b><span id="pick-n">0</span> selected on this page</b>
+  <span class="muted small" id="pick-warn"></span>
+  <span class="grow"></span>
+  <button class="primary mini" disabled {% if c.status != 'curating' %}title="promote requires status curating"{% endif %}
+          hx-post="/api/collections/{{ cid }}/promote/urls?then={{ then_url|trim|urlencode }}" hx-ext="json-enc"
+          hx-include="table.urls.delta input.pick:checked" hx-swap="none">Promote selected → curated</button>
+  <button class="secondary mini" {% if running or c.status != 'curating' %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/promote" hx-swap="none"
+          hx-confirm="Promote all {{ c.delta_count }} delta URLs to the curated URLs? Any AI suggestion still undecided is discarded." title="promote the whole queue, every page">or promote all {{ c.delta_count }}</button>
+</div>
+{% endif %}
+
+<div class="tbl-wrap">
+<table class="urls {{ set }}">
+  <thead>
+  {% if set == 'dump' %}
+    <tr><th class="num">#</th>{{ th('url', 'URL') }}{{ th('excluded', 'In index', 'included rows are exported to the index; excluded rows are kept out. Click to change: the edit shows up under Delta URLs') }}{{ th('scraped_title', 'Scraped title') }}{{ th('content_type', 'Type') }}{{ th('depth', 'Depth') }}{{ th('text_len', 'Text') }}{{ th('vs_curated', 'vs curated', 'how this URL relates to the curated URLs') }}</tr>
+  {% elif set == 'delta' %}
+    <tr><th class="pick"><input type="checkbox" onclick="pickAll(this)" {% if running or c.status != 'curating' %}disabled{% endif %} aria-label="select every row on this page" title="select every row on this page"></th><th class="num">#</th>{{ th('kind', 'Change', 'new: not in the curated URLs · modified: differs from the curated URLs (renamed: same page, new URL spelling) · removed: the crawl found it gone (promote drops it from the curated URLs; the next index run deletes it)') }}{{ th('url', 'URL') }}{{ th('excluded', 'In index', 'included rows are exported to the index; excluded rows are kept out') }}{{ th('title', 'Title <small class="muted">scraped → effective</small>') }}{{ th('division', 'Division') }}{{ th('document_type', 'Doc type') }}{{ th('edited_by', 'Edited by', 'who set the effective values: AI (accepted suggestions), SME (typed or toggled by a curator), or both') }}</tr>
+  {% else %}
+    <tr><th class="num">#</th>{{ th('url', 'URL') }}{{ th('excluded', 'In index', 'included rows are exported to the index; excluded rows are kept out. Click to change: the edit shows up under Delta URLs') }}{{ th('title', 'Title <small class="muted">scraped → effective</small>') }}{{ th('division', 'Division') }}{{ th('document_type', 'Doc type') }}{{ th('text_len', 'Text', 'size of the page text this row was approved with — the text the index gets; empty means the row was promoted before the engine kept text on the curated URLs') }}{{ th('edited_by', 'Edited by', 'who set the effective values: AI (accepted suggestions), SME (typed or toggled by a curator), or both') }}</tr>
+  {% endif %}
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    {% set n = (page - 1) * per + loop.index %}
+    {% set why = effects.get(r.url, {}) %}
+    {% if set == 'dump' %}
+    <tr{% if r.excluded %} class="excluded"{% endif %}>
+      <td class="num muted">{{ n }}</td>
+      <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a></td>
+      <td class="nowrap">{{ toggle_cell(r, why, not running) }}</td>
+      <td>{{ r.scraped_title or '' }}</td>
+      <td class="muted small">{{ (r.content_type or '')|replace('text/','') }}</td>
+      <td class="num">{{ r.depth if r.depth is not none else '' }}</td>
+      <td class="num muted small">{{ '{:,}'.format(r.text_len or 0) }}</td>
+      <td class="nowrap">{% if r.in_deltas %}<a class="kind k-modified" href="{{ base|replace('tab=dump','tab=delta') }}&q={{ r.url|urlencode }}" title="this URL is a delta — open it under Delta URLs">delta URL ↗</a>{% elif r.in_curated %}<span class="kind k-ok" title="in the curated URLs, unchanged">in curated</span>{% else %}<span class="kind k-new" title="not in the curated URLs yet">new</span>{% endif %}</td>
+    </tr>
+    {% elif set == 'delta' %}
+    {% set editable = r.kind != 'deleted' and not running %}
+    <tr class="{% if r.excluded %}excluded{% endif %} row-{{ r.kind }}">
+      <td class="pick"><input class="pick" type="checkbox" name="urls" value="{{ r.url }}" onchange="pickCount()" {% if running or c.status != 'curating' %}disabled{% endif %}
+          data-ai="{{ 1 if (r.title_ai or r.division_ai or r.document_type_ai) else 0 }}" data-del="{{ 1 if r.kind == 'deleted' else 0 }}" aria-label="select this URL"></td>
+      <td class="num muted">{{ n }}</td>
+      <td class="nowrap"><span class="kind k-{{ r.kind }}" title="{% if r.kind == 'deleted' %}{{ failure_label(r.crawl_failure) }} — promote drops it from the curated URLs and the next index run deletes it from the index{% elif r.kind == 'new' %}not in the curated URLs yet{% else %}differs from the curated version{% endif %}">{{ 'removed' if r.kind == 'deleted' else r.kind }}</span>{% if r.renamed_from %} <span class="kind k-renamed" title="same page, new URL spelling — promote moves the curated row from {{ r.renamed_from }}">renamed</span>{% endif %}{% if r.content_changed %} <span class="kind k-modified" title="the page text differs from the promoted version">text changed</span>{% endif %}</td>
+      <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a>{% if r.renamed_from %}<br><small class="muted" title="the curated URL this replaces">was {{ r.renamed_from }}</small>{% endif %}{% if r.kind == 'deleted' %}<br><small class="muted">{{ failure_label(r.crawl_failure) }}</small>{% endif %}{% if r.ai_error %}<br><small class="err" title="{{ r.ai_error }}">AI metadata failed{% if r.ai_failures > 1 %} ({{ r.ai_failures }} runs){% endif %}: {{ r.ai_error|truncate(120) }}</small>{% endif %}</td>
+      <td class="nowrap">{% if r.kind != 'deleted' %}{{ toggle_cell(r, why, editable) }}{% else %}<span class="muted small">—</span>{% endif %}</td>
+      <td>{{ title_cell(r, why, editable) }}</td>
+      <td>{{ select_cell(r, why, editable, 'division', divisions) }}</td>
+      <td>{{ select_cell(r, why, editable, 'document_type', doc_types) }}</td>
+      <td class="nowrap">{{ edited_chip(r, why) }}</td>
+    </tr>
+    {% else %}
+    {# a row with a delta waiting shows the values it will have once promoted (so a toggle or edit
+       reads back as done, and clicking again keeps it rather than undoing it); the rest show what
+       was promoted #}
+    {% set e = has_delta.get(r.url, r) %}
+    <tr{% if e.excluded %} class="excluded"{% endif %}>
+      <td class="num muted">{{ n }}</td>
+      <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a>{% if r.url in has_delta %}
+        <br><a class="kind k-modified nowrap" href="{{ base|replace('tab=curated','tab=delta') }}&q={{ r.url|urlencode }}" title="this row has a change waiting under Delta URLs — the values shown are the pending ones; promote to apply them">delta URL ↗</a>{% endif %}{% if r.crawl_failure %}
+        <br><span class="kind k-kept" title="the last crawl could not fetch this URL ({{ failure_label(r.crawl_failure) }}); it is kept as approved, not removed — the index keeps its last text">kept · {{ failure_label(r.crawl_failure) }}</span>{% endif %}</td>
+      <td class="nowrap">{{ toggle_cell(e, why, not running) }}</td>
+      <td>{{ title_cell(e, why, not running) }}</td>
+      <td>{{ select_cell(e, why, not running, 'division', divisions) }}</td>
+      <td>{{ select_cell(e, why, not running, 'document_type', doc_types) }}</td>
+      <td class="num muted small">{% if r.text_len is none %}<span title="no text kept for this row (promoted before the engine stored text on the curated URLs): promote again to fill it">—</span>{% else %}{{ '{:,}'.format(r.text_len) }}{% endif %}</td>
+      <td class="nowrap">{{ edited_chip(e, why) }}</td>
+    </tr>
+    {% endif %}
+  {% else %}
+    <tr><td colspan="9" class="empty">
+      {% if set == 'dump' %}{% if c.dump_count %}No dump URLs match this filter.{% else %}No dump yet — <b>Scrape</b> from the header to fill this.{% endif %}
+      {% elif set == 'delta' %}{% if c.delta_count %}No delta URLs match this filter.{% elif not c.dump_count %}Scrape first, then <b>Start curating</b>.{% elif c.curated_count %}No delta URLs — the curated URLs are up to date with the dump. Edit a row under <b>Curated URLs</b> or add a rule in <a href="/collections/{{ cid }}?tab=curate">Curate</a> to change it.{% else %}Click <b>Start curating</b> in the header to compute what changed.{% endif %}
+      {% else %}{% if c.curated_count %}No curated URLs match this filter.{% else %}Nothing promoted yet — review <a href="/collections/{{ cid }}?tab=curate">Curate</a> and promote.{% endif %}{% endif %}
+    </td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>

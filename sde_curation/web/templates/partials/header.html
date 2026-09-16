@@ -1,0 +1,24 @@
+{# Sticky workbench header: identity · status badges · next action. Re-rendered on SSE. The URL counts live on the tab row. #}
+{% from "partials/job_progress.html" import job_progress %}
+{% set cid = c.collection_id %}
+{% set a = next_action(c, job) %}
+{% set running = job and job.state == 'running' %}
+<div class="wb-head">
+  <div class="wb-ident">
+    <a class="crumb" href="/">← Collections</a>
+    <h1 class="wb-name">{{ c.name }}
+      <a class="wb-id" href="{{ c.seed_url }}" target="_blank" rel="noopener" title="open seed URL {{ c.seed_url }}">{{ cid }} ↗</a>
+    </h1>
+    <div class="badges">
+      {% include "partials/status_badge.html" %}
+      {% if running %}<span class="chip busy"><span class="spinner"></span> {{ job.kind }} · {{ job_progress(job) }}</span>
+      {% elif job and job.state == 'failed' %}<span class="chip fail" title="{{ job.error }}">✗ last {{ job.kind }} failed</span>{% endif %}
+    </div>
+  </div>
+  <div class="wb-next">
+    <span class="muted small">Next:</span> {% include "partials/action.html" %}
+    {% set ex = stats.existing_crawl %}{% if a.label == 'Scrape' and ex and ex.loadable and not running %}
+    <button class="secondary" title="Ingest the crawl already at {{ ex.where }} instead of crawling again" hx-post="/api/collections/{{ cid }}/scrape?reuse=true" hx-swap="none">or load existing ({{ ex.modified.strftime('%Y-%m-%d') }})</button>{% endif %}
+    {% if running %}<button class="mini" title="Cancel the running job" hx-post="/api/collections/{{ cid }}/jobs/cancel" hx-confirm="Cancel the running job?" hx-swap="none">✕ cancel</button>{% endif %}
+  </div>
+</div>

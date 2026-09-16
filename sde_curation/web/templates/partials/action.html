@@ -1,0 +1,24 @@
+{# one contextual button: the next step in the pipeline for this collection.
+   in_row=True (dashboard rows) swaps the row in place; elsewhere the response's HX-Refresh /
+   HX-Redirect header drives navigation, so there must be no swap target. #}
+{% set a = next_action(c, job) %}
+{% set swap = 'hx-target="closest tr" hx-swap="outerHTML"' if in_row else 'hx-swap="none"' %}
+{# the crawler host is already working on this collection (its S3 object is a mid-run checkpoint):
+   dropping another job would only crawl the site again — wait instead #}
+{% set crawling = a.label == 'Scrape' and stats is defined and stats and stats.existing_crawl and not stats.existing_crawl.complete %}
+{% if crawling %}
+  <button disabled title="A crawl for this collection is already running on the crawler host — wait for it to finish">Scrape</button>
+  <small class="muted">crawl in progress on the host</small>
+{% elif a.kind == 'post' %}
+  <button class="primary" title="{{ a.hint }}" hx-post="{{ a.url }}{% if a.then %}?then={{ a.then|urlencode }}{% endif %}" {% if a.confirm %}hx-confirm="{{ a.confirm }}"{% endif %}
+          {% if a.then %}hx-swap="none"{% else %}{{ swap|safe }}{% endif %}>{{ a.label }}</button>
+{% elif a.kind == 'link' %}
+  <a class="button primary" href="{{ a.url }}" title="{{ a.hint }}">{{ a.label }}</a>
+{% elif a.kind == 'busy' %}
+  <span class="spinner"></span> <small class="muted">{{ a.label }}</small>
+  <button class="mini" title="Cancel the running job" hx-post="/api/collections/{{ c.collection_id }}/jobs/cancel" hx-confirm="Cancel the running job?" {{ swap|safe }}>✕</button>
+{% elif a.kind == 'done' %}
+  <span class="done" title="{{ a.hint }}">{{ a.label }}</span>
+{% else %}
+  <button disabled title="{{ a.hint }}">{{ a.label }}</button>
+{% endif %}

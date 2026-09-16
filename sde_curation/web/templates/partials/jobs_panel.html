@@ -1,0 +1,23 @@
+{# Global jobs strip: what is running / queued across every collection, and the latest failure.
+   context: jobs_active (JobRun list), jobs_failed (recent failed JobRuns), names {cid: name}, compact #}
+{% from "partials/job_progress.html" import job_progress %}
+<div class="jobs-strip">
+  {% if jobs_active %}
+  <ul class="jobs-list">
+    {% for j in jobs_active %}
+    <li>
+      <span class="spinner"></span>
+      <span class="job j-{{ 'queued' if j.progress.queued else 'running' }}">{{ j.kind }}{% if j.progress.queued %} · queued{% endif %}</span>
+      <a href="/collections/{{ j.collection_id }}">{{ names.get(j.collection_id, j.collection_id) }}</a>
+      <span class="muted small">{{ job_progress(j) }} · started {{ j.started_at|since }} ago{% if j.started_by %} by {{ j.started_by }}{% endif %}</span>
+      <button class="mini" title="Cancel this job" hx-post="/api/collections/{{ j.collection_id }}/jobs/cancel" hx-swap="none" hx-confirm="Cancel the {{ j.kind }} job on {{ names.get(j.collection_id, j.collection_id) }}?">✕</button>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}<span class="muted small">No jobs running.</span>{% endif %}
+  {% if jobs_failed %}{% set f = jobs_failed[0] %}
+  <div class="small"><span class="job j-failed">last failure</span> {{ f.kind }} on <a href="/collections/{{ f.collection_id }}?tab=activity">{{ names.get(f.collection_id, f.collection_id) }}</a>
+    <span class="muted">{{ (f.finished_at or f.started_at)|since }} ago</span> — <span class="err">{{ (f.error or '')[:100] }}</span></div>
+  {% endif %}
+  {% if compact %}<a class="small" href="/jobs">All jobs →</a>{% endif %}
+</div>

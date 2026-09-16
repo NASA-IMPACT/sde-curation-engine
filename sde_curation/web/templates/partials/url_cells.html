@@ -1,0 +1,34 @@
+{# Cell macros shared by the three URL tables (partials/urls_table.html) and the metadata review
+   table under Curate › Metadata (partials/tab_curate.html). Import them `with context`: they read
+   `cid` from the importing template. Every edit here is an exact-URL rule; a field that still
+   carries an AI suggestion shows it with ✓ accept · ✎ edit-then-accept · ✕ dismiss. #}
+{% macro edited_chip(r, why) -%}
+  {%- if r.edited_by -%}
+  <span class="edited e-{{ r.edited_by }}" title="{% for f, w in why.items() %}{{ f }}: {{ w }}&#10;{% endfor %}{% if not why %}set by rules that no longer apply to the current crawl{% endif %}">{{ {'ai': 'AI', 'sme': 'SME', 'mixed': 'AI + SME'}[r.edited_by] }}</span>
+  {%- else -%}<span class="muted small" title="no rule touches this URL: scraped title, no division / type">—</span>{%- endif -%}
+{%- endmacro %}
+
+{% macro toggle_cell(r, why, editable) -%}
+  {% if r.excluded %}<span class="kind k-excluded" title="{{ why.excluded or 'excluded' }}">excluded</span>{% else %}<span class="kind k-included" title="{{ why.excluded or 'included: no exclude rule matches' }}">included</span>{% endif %}
+  <button class="mini {% if r.excluded %}ok{% endif %}" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/urls" hx-ext="json-enc"
+          hx-vals='{{ {"url": r.url, "type": ("include" if r.excluded else "exclude")}|tojson }}' hx-swap="none"
+          aria-label="{{ 'force include' if r.excluded else 'exclude' }}" title="{{ 'excluded — click to force include (exact-URL include rule)' if r.excluded else 'included — click to exclude (exact-URL exclude rule)' }}">{{ '✓ include' if r.excluded else '✗ exclude' }}</button>
+{%- endmacro %}
+
+{% macro title_cell(r, why, editable) -%}
+  <small class="muted">{{ r.scraped_title or '' }}</small><br>
+  <button type="button" class="linkish" {% if not editable %}disabled{% endif %} title="{{ why.title or 'click to set a title (creates an exact-URL title rule)' }}"
+          onclick='editTitle({{ cid|tojson }}, {{ r.url|tojson }}, {{ (r.title or r.scraped_title or "")|tojson }}, {{ 'true' if (r.title_ai is defined and r.title_ai) else 'false' }})'>{{ r.title or '—' }}</button>
+  {% if r.title_ai is defined and r.title_ai %}<br><span class="ai conf-{{ r.title_ai_conf }}" title="AI suggestion · {{ r.title_ai_conf or '?' }} confidence · {{ r.ai_model or '' }}">AI: {{ r.title_ai }} <small>{{ r.title_ai_conf }}</small></span>
+    <span class="nowrap"><button class="mini ok" title="accept this title" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "title"}|tojson }}' hx-swap="none">✓</button><button class="mini" type="button" title="edit this title, then accept" {% if not editable %}disabled{% endif %} onclick='editTitle({{ cid|tojson }}, {{ r.url|tojson }}, {{ r.title_ai|tojson }}, true)'>✎</button><button class="mini" title="dismiss" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "title"}|tojson }}' hx-swap="none">✕</button></span>{% endif %}
+{%- endmacro %}
+
+{% macro select_cell(r, why, editable, field, values) -%}
+  {% set ai_val = r[field ~ '_ai'] if r[field ~ '_ai'] is defined else none %}
+  {% set ai_conf = r[field ~ '_ai_conf'] if r[field ~ '_ai_conf'] is defined else none %}
+  <select class="cell" {% if not editable %}disabled{% endif %} title="{{ why[field] or ('set ' ~ field|replace('_', ' ') ~ ' for this URL (exact-URL rule)') }}"
+          onchange='editField({{ cid|tojson }}, {{ r.url|tojson }}, {{ field|tojson }}, this.value, {{ (ai_val is not none)|tojson }})'>
+    <option value="">—</option>{% for v in values %}<option {% if r[field] == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+  {% if ai_val %}<br><span class="ai conf-{{ ai_conf }}" title="AI suggestion · {{ ai_conf or '?' }} confidence · {{ r.ai_model or '' }}">AI: {{ ai_val }} <small>{{ ai_conf }}</small></span>
+    <span class="nowrap"><button class="mini ok" title="accept" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✓</button><button class="mini" type="button" title="pick a different value, then it is accepted as edited" {% if not editable %}disabled{% endif %} onclick='pickAi(this, {{ ai_val|tojson }})'>✎</button><button class="mini" title="dismiss" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✕</button></span>{% endif %}
+{%- endmacro %}

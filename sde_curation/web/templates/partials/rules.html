@@ -1,0 +1,19 @@
+{# The rules (patterns) table. context: c, job, patterns (pattern_stats: dicts + matches + in_effect),
+   rows_set = the URL set the match counts are over and link to (delta while reviewing, curated
+   once promoted, dump before curating). #}
+{% set cid = c.collection_id %}
+{% set running = job and job.state == 'running' %}
+{% if patterns %}
+<p class="muted small">Rules belong to this collection only. {% for src, n in source_counts.items() %}<span class="edited e-src-{{ src }}">{{ source_label.get(src, src) }} {{ n }}</span> {% endfor %}</p>
+<table>
+  <thead><tr><th>Type</th><th>Match</th><th>Value</th><th title="{{ rows_set }} URLs this rule matches — click to open them. A rule marked superseded matches URLs but a newer rule wins on every one of them">Matches</th><th title="AI = accepted suggestion · AI, edited = suggestion changed before accepting · SME = typed or toggled by a curator · global list = shared exclude list">Source</th><th>Added</th><th>By</th><th></th></tr></thead>
+  <tbody>{% for p in patterns %}
+    <tr><td><span class="ptype {{ p.type }}">{{ p.type }}</span></td><td class="match"><code>{{ p.match }}</code></td><td>{{ p.value or '' }}</td>
+        <td class="num nowrap"><a href="/collections/{{ cid }}?tab={{ rows_set }}&match={{ p.match|urlencode }}" title="show the matching {{ rows_set }} URLs">{{ p.matches }}</a>{% if p.matches and not p.in_effect %} <span class="kind k-ok" title="a newer rule wins on every URL this one matches">superseded</span>{% endif %}</td>
+        <td class="nowrap"><span class="edited e-src-{{ p.source }}">{{ source_label.get(p.source, p.source) }}</span></td>
+        <td class="muted small nowrap">{{ p.created_at[:16]|replace('T',' ') }}</td>
+        <td class="small">{{ p.created_by or '' }}</td>
+        <td><button class="danger" aria-label="delete rule" {% if running %}disabled{% endif %} hx-delete="/api/collections/{{ cid }}/patterns/{{ p.id }}" hx-swap="none" hx-confirm="Delete this rule? Its effects are unapplied (next newest rule → curated value → empty).">×</button></td></tr>
+  {% endfor %}</tbody>
+</table>
+{% else %}<p class="empty">No rules yet. Accept suggestions or add one above.</p>{% endif %}

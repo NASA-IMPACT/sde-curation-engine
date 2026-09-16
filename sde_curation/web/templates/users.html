@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Users — SDE Curation Engine{% endblock %}
+{% block body_attrs %}{% endblock %}
+{% block content %}
+{% set me = current_user(request) %}
+<section class="card">
+  <h2>Users <span class="count">{{ users|length }}</span></h2>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  <table>
+    <thead><tr><th>Username</th><th>Role</th><th>Active</th><th>Created</th><th>Actions</th></tr></thead>
+    <tbody>{% for u in users %}
+      <tr class="{% if not u.active %}excluded{% endif %}">
+        <td><b>{{ u.username }}</b>{% if me and me.id == u.id %} <span class="muted small">(you)</span>{% endif %}</td>
+        <td>
+          <form method="post" action="/users/{{ u.id }}/role" class="inline">
+            <select name="role" onchange="this.form.submit()" {% if me and me.id == u.id %}disabled{% endif %}>
+              {% for r in roles %}<option value="{{ r }}" {% if u.role == r %}selected{% endif %}>{{ r }}</option>{% endfor %}
+            </select>
+          </form>
+        </td>
+        <td>{% if u.active %}yes{% else %}<span class="muted">disabled</span>{% endif %}</td>
+        <td class="muted small">{{ u.created_at.strftime('%Y-%m-%d') }}</td>
+        <td class="inline nowrap">
+          <form method="post" action="/users/{{ u.id }}/active" class="inline">
+            <input type="hidden" name="active" value="{{ 0 if u.active else 1 }}">
+            <button class="secondary mini" {% if me and me.id == u.id %}disabled{% endif %}>{{ 'Disable' if u.active else 'Enable' }}</button>
+          </form>
+          <form method="post" action="/users/{{ u.id }}/password" class="inline" onsubmit="return this.password.value.length >= 8">
+            <input type="password" name="password" placeholder="new password" minlength="8" size="14" required autocomplete="new-password">
+            <button class="secondary mini">Reset</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}</tbody>
+  </table>
+</section>
+<section class="card">
+  <h2>Add user</h2>
+  <form method="post" action="/users" class="inline">
+    <input name="username" placeholder="username" pattern="[a-z0-9._-]{2,32}" required autocomplete="off">
+    <input type="password" name="password" placeholder="password (8+)" minlength="8" required autocomplete="new-password">
+    <select name="role">{% for r in roles %}<option value="{{ r }}" {% if r == 'curator' %}selected{% endif %}>{{ r }}</option>{% endfor %}</select>
+    <button class="primary">Create</button>
+  </form>
+  <p class="muted small">Usernames are what provenance records show, so use something recognisable (e.g. a first name or an initials handle). They cannot be renamed.</p>
+</section>
+{% endblock %}
