@@ -559,10 +559,10 @@ class JobManager:
         rows = [
             DumpUrl(
                 collection_id=collection_id,
-                url=d["url"],
-                scraped_title=d.get("title"),
-                full_text=d.get("full_text"),
-                content_type=d.get("content_type"),
+                url=_no_nul(d["url"]),
+                scraped_title=_no_nul(d.get("title")),
+                full_text=_no_nul(d.get("full_text")),
+                content_type=_no_nul(d.get("content_type")),
                 depth=d.get("depth"),
             )
             for i, d in enumerate(docs)
@@ -570,14 +570,19 @@ class JobManager:
         ]
         fails = [
             DumpFailure(
-                collection_id=collection_id, url=f["url"], reason=str(f["reason"]),
+                collection_id=collection_id, url=_no_nul(f["url"]), reason=_no_nul(str(f["reason"])),
                 status=f["status"] if isinstance(f.get("status"), int) else None,
-                detail=(str(f.get("detail") or "")[:500] or None),
+                detail=(_no_nul(str(f.get("detail") or ""))[:500] or None),
             )
             for f in failures or []
         ]
         n = await self.db.replace_dump(collection_id, rows, fails)
         return n
+
+
+def _no_nul(v: Any) -> Any:
+    """Postgres text cannot hold NUL; the crawler's PDF text extraction sometimes emits it."""
+    return v.replace("\x00", "") if isinstance(v, str) else v
 
 
 def _brief(summary: dict[str, Any]) -> dict[str, Any]:
