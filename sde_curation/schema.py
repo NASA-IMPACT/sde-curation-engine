@@ -211,7 +211,14 @@ ALTER TABLE curated_urls ADD COLUMN crawl_failure text;
 ALTER TABLE collections ADD COLUMN last_crawl_capped boolean NOT NULL DEFAULT false;
 """
 
-MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3)]
+# V4: a Suggest metadata call that failed for a URL (after the in-job retry) is recorded on the row,
+# so the failure is visible per URL and "Suggest missing" retries it; both clear on the next answer.
+V4 = """
+ALTER TABLE delta_urls ADD COLUMN ai_error text;
+ALTER TABLE delta_urls ADD COLUMN ai_failures integer NOT NULL DEFAULT 0;
+"""
+
+MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).

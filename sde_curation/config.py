@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 60.0  # per attempt
     llm_max_retries: int = Field(default=5, ge=0, le=10)  # SDK retries on 429 / 5xx / timeouts
     llm_workers: int = Field(default=16, ge=1, le=64)  # concurrent calls inside one LLM job
+    # Calls that still fail with a rate limit / 5xx / timeout after the SDK's own retries are run
+    # again at the end of the job, this long after the main pass, with a quarter of the workers.
+    llm_retry_passes: int = Field(default=1, ge=0, le=5)
+    llm_retry_delay_s: float = Field(default=30.0, ge=0)
     # Suggest metadata always sends the FULL page text (no budget, no truncation, one model).
     # Suggest patterns sends every crawled URL (+ title) in batches of this size, one call each.
     llm_pattern_batch_urls: int = Field(default=1000, ge=50, le=10_000)

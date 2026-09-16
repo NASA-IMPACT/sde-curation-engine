@@ -110,6 +110,11 @@ async def test_schemas_reject_bad_enums():
     with pytest.raises(ValidationError):
         MetadataSuggestion.model_validate({"title": "T"})  # confidence is required per field
     with pytest.raises(ValidationError):
+        MetadataSuggestion.model_validate({"title": "T", **ok})  # every page gets a document type
+    with pytest.raises(ValidationError):
+        MetadataSuggestion.model_validate({"title": "T", **ok, "document_type": None})
+    assert "null" not in str(MetadataSuggestion.model_json_schema()["properties"]["document_type"])
+    with pytest.raises(ValidationError):
         MetadataSuggestion.model_validate({"title": "T", **ok, "title_confidence": "certain"})
     with pytest.raises(ValidationError):
         PatternSuggestions.model_validate({"suggestions": [{"type": "title", "match": "*", "rationale": "no value"}]})
@@ -293,14 +298,65 @@ async def test_metadata_partial_failure_succeeds_and_resumes(crawler_client):
     job = await wait_job(c, "ex.org")
     p = job["progress"]
     assert job["state"] == "succeeded" and p["classified"] == 7 and p["failed"] == 1 and "429" in p["last_error"]
-    assert "7 classified · 1 failed" in (await c.get("/collections/ex.org?tab=curate")).text
+    assert p["retrying"] == 0
+    curate = (await c.get("/collections/ex.org?tab=curate")).text
+    assert "7 classified · 1 failed" in curate and "1 URL failed</a> to classify" in curate
     d = (await c.get("/api/collections/ex.org/delta?q=p3")).json()["items"][0]
-    assert d["title_ai"] is None
-    # the next run only picks up the one that failed
+    assert d["title_ai"] is None and d["ai_failures"] == 1 and d["ai_error"] == "LLMRetryable: 429 too many requests"
+    failed = (await c.get("/collections/ex.org?tab=delta&ai=failed")).text
+    assert "ex.org/p3" in failed and "ex.org/p2" not in failed and "AI metadata failed" in failed
+    # the next run only picks up the one that failed, and a success clears the error
     c.app.state.jobs._llm = FakeProvider()
     assert (await c.post("/api/collections/ex.org/suggest/metadata")).status_code == 202
     job = await wait_job(c, "ex.org")
     assert job["progress"]["classified"] == 1 and job["progress"]["total"] == 1
+    d = (await c.get("/api/collections/ex.org/delta?q=p3")).json()["items"][0]
+    assert d["title_ai"] and d["ai_error"] is None and d["ai_failures"] == 0
+
+
+async def test_metadata_retry_pass_recovers_rate_limited_calls(crawler_client):
+    c = crawler_client
+    await setup(c)
+    seen: dict[str, int] = {}
+
+    class OnceBusy(FakeProvider):
+        async def complete(self, **kw):
+            url = kw["user"].split('"url": "', 1)[1].split('"', 1)[0]
+            seen[url] = seen.get(url, 0) + 1
+            if url.endswith(("/p3", "/p5")) and seen[url] == 1:
+                raise LLMRetryable("429 too many requests")
+            return await super().complete(**kw)
+
+    c.app.state.jobs._llm = OnceBusy()
+    await c.post("/api/collections/ex.org/suggest/metadata")
+    job = await wait_job(c, "ex.org")
+    p = job["progress"]
+    assert job["state"] == "succeeded" and p["classified"] == 8 and p["failed"] == 0 and p["retrying"] == 0
+    assert seen["https://ex.org/p3"] == 2 and seen["https://ex.org/p2"] == 1
+    items = (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]
+    assert all(d["document_type_ai"] and d["ai_error"] is None for d in items if not d["excluded"])
+
+
+async def test_rows_without_a_document_type_are_asked_again(crawler_client):
+    c = crawler_client
+    db = c.app.state.db
+    await setup(c)
+    await c.post("/api/collections/ex.org/suggest/metadata"); await wait_job(c, "ex.org")
+    assert await db.count_deltas_for_llm("ex.org") == 0
+    # an answer from before document_type was required: a title, no type, but a confidence for it
+    await db.set_delta_ai("ex.org", [{"url": "https://ex.org/p2", "title": "Page 2", "title_conf": "high",
+                                      "division": None, "division_conf": "low", "document_type": None,
+                                      "document_type_conf": "low", "model": "old"}])
+    assert await db.count_deltas_for_llm("ex.org") == 1
+    # a type the SME dismissed is not re-asked
+    await c.post("/api/collections/ex.org/ai/reject", json={"url": "https://ex.org/p4", "field": "document_type"})
+    assert await db.count_deltas_for_llm("ex.org") == 1
+    await c.post("/api/collections/ex.org/suggest/metadata")
+    job = await wait_job(c, "ex.org")
+    assert job["progress"]["classified"] == 1
+    d = (await c.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
+    assert d["document_type_ai"] == "Documentation" and d["ai_model"] == "fake"
+    assert await db.count_deltas_for_llm("ex.org") == 0
 
 
 async def test_metadata_cancel_keeps_finished_rows(crawler_client):
@@ -398,7 +454,7 @@ async def test_openai_provider_sends_temperature_only_when_configured():
 
         async def parse(self, **kw):
             self.calls.append(kw)
-            answer = MetadataSuggestion(title="T", title_confidence="high", division_confidence="low",
+            answer = MetadataSuggestion(title="T", title_confidence="high", division_confidence="low", document_type="Data",
                                         document_type_confidence="low")
             msg = SimpleNamespace(parsed=answer, refusal=None, content=None)
             return SimpleNamespace(choices=[SimpleNamespace(message=msg)], model=kw["model"], usage=None)

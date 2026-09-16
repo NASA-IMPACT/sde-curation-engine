@@ -311,6 +311,8 @@ class DeltaUrl(BaseModel):
     document_type_ai_conf: Confidence | None = None
     ai_model: str | None = None  # which model answered
     ai_content_hash: str | None = None  # hash of the text the model saw (resume / re-classify logic)
+    ai_error: str | None = None  # why the last Suggest metadata call for this URL failed (cleared on success)
+    ai_failures: int = 0  # Suggest metadata runs in a row that failed for this URL
 
 
 class CuratedUrl(BaseModel):
@@ -509,11 +511,12 @@ class GlobalExcludeList(BaseModel):
 
 class MetadataSuggestion(BaseModel):
     """The model's answer for ONE document (one call per URL). Confidence is per field and
-    required, so the schema forces the model to commit."""
+    required, so the schema forces the model to commit. Every page gets a document type: SDE
+    documents cannot be indexed without one, so the model picks the closest (low confidence)."""
 
     title: str | None = None
     title_confidence: Confidence
     division: Division | None = None
     division_confidence: Confidence
-    document_type: DocumentType | None = None
+    document_type: DocumentType
     document_type_confidence: Confidence

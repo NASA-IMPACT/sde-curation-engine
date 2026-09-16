@@ -157,7 +157,7 @@ def _crawler_app(tmp_path, **extra):
     (root / "run.py").write_text(FAKE_RUN_PY)
     return create_app(Settings(
         data_dir=tmp_path / "data", crawler_root=root, crawler_python=Path(sys.executable),
-        scrape_poll_interval_s=0.05, llm_provider="fake", **extra,
+        scrape_poll_interval_s=0.05, llm_provider="fake", **{"llm_retry_delay_s": 0, **extra},
     ))
 
 

@@ -119,16 +119,14 @@ site's navigation menu, alerts and login links: skip that chrome and read the pa
 Every page of a collection is classified in a separate call, and the answers must agree with
 each other: apply the rules below the same way every time.
 
-title — the title this page should have in a search result, judged by someone who has not seen
-the site.
-- Descriptive and self-contained, typically 4–12 words, in Title Case: the page's real subject,
-  plus the site, project or mission name when the subject alone would be ambiguous ("Storm
-  Tracker" is not enough).
-- When the title carries that name, put it first and separate it from the subject with a colon,
-  on every page: "Planetary Data System: Information for Data Proposers", never "Planetary Data
-  System Information for Data Proposers" or a dash or pipe. Spell the name the same way on every
-  page of the collection.
-- Keep mission, instrument and dataset names and acronyms as the page writes them.
+title — a free-form title for this page as it should read in a search result, judged by someone
+who has not seen the site.
+- Descriptive and self-contained, typically 4–12 words: the page's real subject ("Information for
+  Data Proposers", "Real-Time Geomagnetic Storm Tracker").
+- Do not add the collection or site name to the title, as a prefix or a suffix ("PDS: …",
+  "… | Aurorasaurus"). A mission, instrument, project or dataset name belongs in the title only
+  when the page is about it ("Cassini ISS Calibrated Images"); keep such names and acronyms as the
+  page writes them.
 - Do not copy the site-wide scraped title; no slogans, "Welcome to" or "Home Page".
 - Null only if the page has no content of its own.
 
@@ -140,7 +138,8 @@ data archive is Planetary Science, not General. When `collection_division` is gi
 matter expert set it for the whole collection: use it unless the page is clearly about another
 division.
 
-document_type — one of the five SDE document types:
+document_type — exactly one of the five SDE document types, for every page; never null, because
+the SDE cannot index a page without one:
 {DOCUMENT_TYPE_DEFINITIONS}
 Classify by the page's primary purpose — what a searcher would come to it for — not by incidental
 elements: a page with a photo is not Images, a page with a download link is not Data. Between
@@ -155,7 +154,11 @@ close types:
 - An overview of a mission, spacecraft, aircraft, instrument or payload → Missions and
   Instruments, even when it shows pictures.
 - A gallery, or an image, video or map page whose purpose is the visual itself → Images.
-- A page that fits none of these (news, events, people, organization pages) → null.
+- A page that fits none of these well (news, feature articles, events, people, about or
+  organization pages) → the type of what it is mainly about: a mission news story → Missions and
+  Instruments, a feature on a dataset → Data, a tool announcement → Software and Tools; when it is
+  about none of those → `collection_document_type` when given, otherwise Documentation. Its
+  confidence is low.
 When `collection_document_type` is given, an expert set it as the collection's usual type: use it
 when the page fits it, but a page that clearly fits another type gets that type.
 
@@ -163,7 +166,8 @@ Confidence, one per field:
 - high: stated in the page text or title, or follows directly from the rules above (a dataset
   landing page is Data; a page of a site devoted to one division has that division).
 - medium: a reasonable inference where another answer is also defensible.
-- low: a guess. Prefer a null value with low confidence over a wrong value.
+- low: a guess. For title and division, prefer a null value with low confidence over a wrong
+  value; document_type is never null, so give the closest type with low confidence.
 Never invent facts that are not in the input."""
 
 async def suggest_patterns_batch(
