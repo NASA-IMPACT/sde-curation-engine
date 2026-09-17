@@ -99,11 +99,13 @@ async def test_sse_receives_status_event(app, client):
     }
 
 
-async def test_collections_cannot_be_deleted(client):
+async def test_delete(client):
+    """Auth disabled → every caller is an admin (is_admin), so the button and the route are there."""
     await client.post("/api/collections", json={"seed_url": "https://a.org", "name": "A"})
-    assert (await client.delete("/api/collections/a.org")).status_code == 405
-    assert (await client.get("/api/collections/a.org")).status_code == 200
-    assert "Delete collection" not in (await client.get("/collections/a.org")).text
+    assert "Delete collection" in (await client.get("/collections/a.org")).text
+    assert (await client.delete("/api/collections/a.org")).status_code == 204
+    assert (await client.get("/api/collections/a.org")).status_code == 404
+    assert (await client.delete("/api/collections/a.org")).status_code == 404
 
 
 async def test_dashboard_filters(client):

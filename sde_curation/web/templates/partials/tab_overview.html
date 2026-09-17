@@ -9,6 +9,7 @@
     <h2>Details</h2>
     <dl class="meta">
       <dt>Seed</dt><dd><a href="{{ c.seed_url }}" target="_blank" rel="noopener">{{ c.seed_url }}</a></dd>
+      <dt>Index key</dt><dd><code>{{ c.collection_key }}</code> <span class="muted">{{ c.collection_name }}</span>{% if not c.index_key %} <span class="muted small" title="The collection name, slugified — the same key COSMOS uses. Pinned by the first index run.">from the name</span>{% endif %}</dd>
       <dt>Division</dt><dd>{{ c.division }}</dd>
       <dt>Connector</dt><dd>{{ c.connector }}</dd>
       <dt>Max pages</dt><dd>{{ c.max_pages }}</dd>
@@ -45,5 +46,18 @@
       <input id="note" placeholder="note" size="24">
       <button class="secondary">Apply</button>
     </form>
+    <form hx-post="/api/collections/{{ c.collection_id }}/index-key" hx-ext="json-enc" hx-swap="none" class="inline"
+          hx-confirm="Index this collection under a different OpenSearch collection key? The next Index to test writes to it." hx-vals='js:{index_key: document.getElementById("ik").value, index_name: document.getElementById("iname").value || null}'>
+      <label class="muted" title="The collection_key of the existing OpenSearch collection (the COSMOS config folder), when it does not follow from the name">Set index key</label>
+      <input id="ik" placeholder="collection_key" size="20" value="{{ c.collection_key }}" required>
+      <input id="iname" placeholder="collection name" size="24" value="{{ c.collection_name }}">
+      <button class="secondary">Set</button>
+    </form>
+    {% if is_admin(request) %}
+    <form hx-delete="/api/collections/{{ c.collection_id }}" hx-swap="none" class="inline"
+          hx-confirm="Delete '{{ c.name }}' and everything the engine holds for it — crawl, rules, curated URLs, index runs and history? This cannot be undone. Nothing is removed from S3 or the index.">
+      <button class="danger" {% if job and job.state == 'running' %}disabled{% endif %}>Delete collection</button>
+    </form>
+    {% endif %}
   </div>
 </details>

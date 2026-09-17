@@ -93,7 +93,7 @@
   {% if r %}
   <dl class="meta">
     <dt>Run</dt><dd><code>{{ r.run_id }}</code> · <span class="job j-{{ r.state }}">{{ r.state }}</span> · {{ r.started_at.strftime('%Y-%m-%d %H:%M') }}Z{% if r.external_ref %} · <small class="muted">{{ r.external_ref[-40:] }}</small>{% endif %}</dd>
-    <dt>Exported</dt><dd>{{ r.exported }} URLs → <code>s3://{{ settings.cosmos_index_bucket }}/curated_collections/{{ cid }}/{{ r.run_id }}/</code></dd>
+    <dt>Exported</dt><dd>{{ r.exported }} URLs → <code>s3://{{ settings.cosmos_index_bucket }}/curated_collections/{{ (r.status or {}).collection_key or c.collection_key }}/{{ r.run_id }}/</code> as <code>{{ (r.status or {}).collection_key or c.collection_key }}</code></dd>
     {% if r.status %}<dt>Indexer</dt><dd>{{ r.status.indexed }} indexed · {{ r.status.changed }} changed · {{ r.status.deleted }} deleted{% if r.status.failed %} · <span class="err">{{ r.status.failed }} failed</span>{% endif %} · index <code>{{ r.status.index }}</code>{% if r.status.duration_seconds %} · {{ r.status.duration_seconds|round|int }}s{% endif %}</dd>{% endif %}
     {% if r.error %}<dt>Error</dt><dd class="err">{{ r.error }}</dd>{% endif %}
     {% if stats.validating_test %}<dt>Validation</dt><dd>

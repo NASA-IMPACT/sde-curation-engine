@@ -8,8 +8,9 @@ async def test_scrape_success_ingests_dump_and_sets_status(crawler_client):
     await crawler_client.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 10})
     r = await crawler_client.post("/api/collections/ex.org/scrape")
     assert r.status_code == 202 and r.json()["state"] == "running"
-    # second start while running → 409
+    # second start while running → 409, and the collection cannot be deleted under a running job
     assert (await crawler_client.post("/api/collections/ex.org/scrape")).status_code == 409
+    assert (await crawler_client.delete("/api/collections/ex.org")).status_code == 409
 
     job = await wait_job(crawler_client, "ex.org")
     assert job["state"] == "succeeded" and job["progress"]["docs"] == 8, job

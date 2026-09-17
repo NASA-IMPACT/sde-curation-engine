@@ -43,7 +43,7 @@ class IndexBackend(Protocol):
 
 def indexer_command(c: Collection, run_id: str, target: str, *, python: str = "python3") -> list[str]:
     """Exactly what the ECS task definition / CLI expects (api_scraper.py::_run_web_cosmos)."""
-    return [python, "api_scraper.py", "--source", "WEB_COSMOS", "--collection", c.collection_id,
+    return [python, "api_scraper.py", "--source", "WEB_COSMOS", "--collection", c.collection_key,
             "--run-id", run_id, "--target", target]
 
 
@@ -79,7 +79,7 @@ class LocalSubprocessIndexer:
             raise IndexError_(f"indexer python not found: {self.python} (INDEXER_PYTHON)")
         log_dir = self.s.data_dir / "index_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        log = await asyncio.to_thread(open, log_dir / f"{c.collection_id}-{run_id}.log", "wb")
+        log = await asyncio.to_thread(open, log_dir / f"{c.collection_key}-{run_id}.log", "wb")
         proc = await asyncio.create_subprocess_exec(
             *indexer_command(c, run_id, target, python=str(self.python)),
             cwd=self.root, env=self.env(), stdout=log, stderr=asyncio.subprocess.STDOUT,
@@ -201,7 +201,7 @@ async def wait_for_status(
     on_progress: ProgressCb, *, target: str,
 ) -> tuple[IndexStatus, ValidationReport | None]:
     """Poll status.json; treat a backend that has stopped without writing it as failed."""
-    prefix = status_prefix(c.collection_id, run_id)
+    prefix = status_prefix(c.collection_key, run_id)
     t0 = time.monotonic()
     stopped_at: float | None = None
     while True:

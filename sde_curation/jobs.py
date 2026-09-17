@@ -511,8 +511,10 @@ class JobManager:
                 await self.db.update_job(job)
                 self._emit(c, job)
 
-            # 1. export: stream curated (non-excluded) rows — with the text they were approved
-            #    with — to a temp jsonl, upload, THEN the manifest
+            # 1. pin the OpenSearch collection this indexes as, then export: stream curated
+            #    (non-excluded) rows — with the text they were approved with — to a temp jsonl,
+            #    upload, THEN the manifest
+            await self._pin_index_key(c, progress)
             curated = await self.db.load_curated(c.collection_id, with_text=True)
             with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as fh:
                 n = write_jsonl(export_lines(curated), fh)
@@ -520,7 +522,7 @@ class JobManager:
             try:
                 if n == 0:
                     raise IndexError_("nothing to export: every curated URL is excluded")
-                prefix = export_prefix(c.collection_id, run.run_id)
+                prefix = export_prefix(c.collection_key, run.run_id)
                 await s3.upload_file(tmp, f"{prefix}/documents.jsonl", "application/x-ndjson")
                 manifest = build_manifest(c, run.run_id, n, run.target)
                 await s3.put_json(f"{prefix}/manifest.json", manifest.model_dump(mode="json"))
@@ -566,6 +568,20 @@ class JobManager:
 
         await self._guarded(c, job, body)
 
+    async def _pin_index_key(self, c: Collection, progress) -> None:
+        """Record the key this collection is indexed as, so a later rename cannot silently move it to
+        a second collection: `collection_key` follows the name (the COSMOS rule) until a run pins it,
+        and after that only "Set index key" changes it."""
+        key, name = c.collection_key, c.collection_name
+        await progress({"index_key": key, "index_name": name})
+        if c.index_key:
+            return
+        await self.db.set_index_key(c.collection_id, key, name)
+        await self.db.audit(SYSTEM_ACTOR, "index.key", c.collection_id,
+                            f"indexed as '{key}' ({name}), from the collection name")
+        c.index_key, c.index_name = key, name
+        log.info("%s: indexed as '%s' (%s)", c.collection_id, key, name)
+
     async def _run_publish_prod(self, c: Collection, job: JobRun, run: IndexRun) -> None:
         """Index to prod: publish the vectors of the latest validated test run straight into the
         production index (backends/publish.py) — no export, no indexer task, no re-vectorizing —
@@ -576,6 +592,10 @@ class JobManager:
             source = await self.db.last_index_run(c.collection_id, "test")
             if not source or source.state != "succeeded" or not source.validation_passes(self.s.validation_title_match_threshold):
                 raise IndexError_("prod indexing requires a successful, validated test run first")
+            tested_as = (source.status or {}).get("collection_key")
+            if tested_as and tested_as != c.collection_key:
+                raise IndexError_(f"the latest test run was indexed as '{tested_as}' but this collection is now "
+                                  f"'{c.collection_key}' — index to test again first")
             publisher = self.publisher()
             run.exported = source.exported
             run.external_ref = job.external_ref = f"publish:{source.run_id}"
@@ -587,7 +607,7 @@ class JobManager:
                 self._emit(c, job)
 
             await progress({"source_test_run": source.run_id, "exported": source.exported})
-            st = await publisher.run(c.collection_id, run.run_id, source.run_id, progress)
+            st = await publisher.run(c.collection_key, run.run_id, source.run_id, progress)
             status = IndexStatus.model_validate(st)
             run.status = st
             job.progress = {**job.progress, "phase": "done", "status": st}
@@ -655,7 +675,7 @@ class JobManager:
             await progress({"phase": "validating", "fallback": "second_pass", "reason": str(e)[:200]})
             # the first pass left status.json/validation.json behind — remove them or the poller
             # would return the stale (pre-refresh) validation immediately
-            prefix = status_prefix(c.collection_id, run.run_id)
+            prefix = status_prefix(c.collection_key, run.run_id)
             await s3.delete(f"{prefix}/status.json", f"{prefix}/validation.json")
             d = await backend.dispatch(c, run.run_id, run.target)
             status, validation = await wait_for_status(s3, self.s, c, run.run_id, backend, d, progress, target=run.target)
@@ -688,10 +708,11 @@ class JobManager:
         returns the last report either way. A short count is only a failure once the index has had
         the whole window to catch up."""
         started, attempt = time.monotonic(), 0
+        key = (run.status or {}).get("collection_key") or c.collection_key  # what that run indexed as
         while True:
             attempt += 1
             report = await validate_direct(
-                self.s, collection_key=c.collection_id, run_id=run.run_id, target=run.target, expected_titles=expected
+                self.s, collection_key=key, run_id=run.run_id, target=run.target, expected_titles=expected
             )
             ok = report_passes(report, self.s.validation_title_match_threshold)
             waited = time.monotonic() - started

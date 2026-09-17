@@ -231,7 +231,7 @@ class Database:
             return [Collection(**r) for r in await cur.fetchall()]
 
     async def delete_collection(self, collection_id: str) -> bool:
-        """Test setup only: the app offers no way to delete a collection."""
+        """Everything of the collection goes with it (ON DELETE CASCADE); audit rows keep its id."""
         async with self._conn() as conn:
             cur = await conn.execute("DELETE FROM collections WHERE collection_id=%s", (collection_id,))
             return cur.rowcount > 0
@@ -290,6 +290,14 @@ class Database:
             await conn.execute(
                 "UPDATE collections SET last_scraped_at=%s, last_crawl_capped=%s WHERE collection_id=%s",
                 (at, capped, collection_id),
+            )
+
+    async def set_index_key(self, collection_id: str, index_key: str, index_name: str | None) -> None:
+        """The OpenSearch collection_key / collection_name this collection is indexed under."""
+        async with self._conn() as conn:
+            await conn.execute(
+                "UPDATE collections SET index_key=%s, index_name=%s, updated_at=%s WHERE collection_id=%s",
+                (index_key, index_name, utcnow(), collection_id),
             )
 
     async def set_flag(self, collection_id: str, needs_recuration: bool, reason: str | None = None) -> None:

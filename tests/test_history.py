@@ -8,12 +8,11 @@ async def test_history_keeps_actions_on_deleted_collections(authed_client):
     assert 'href="/history"' in (await c.get("/")).text  # in the hamburger menu
     await c.post("/api/collections", json=COLL)
     await c.post("/api/collections/ex.org/status", json={"status": "backlog", "note": "noop", "force": True})
-    assert (await c.delete("/api/collections/ex.org")).status_code == 405  # the app never deletes a collection
-    await c.app.state.db.delete_collection("ex.org")  # one gone from before that (or by hand in the database)
+    assert (await c.delete("/api/collections/ex.org")).status_code == 204
     assert (await c.get("/api/collections/ex.org")).status_code == 404
 
     rows = (await c.get("/api/audit")).json()["entries"]
-    assert [r["action"] for r in rows] == ["status.set", "collection.create"]
+    assert [r["action"] for r in rows] == ["collection.delete", "status.set", "collection.create"]
     assert all(r["collection_id"] == "ex.org" for r in rows) and all(r["actor"] == "admin" for r in rows)
 
     page = (await c.get("/history")).text
