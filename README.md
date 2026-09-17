@@ -42,7 +42,7 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
 1. **Dashboard** (`/`): add a collection (seed URL, name, division, max pages). Each row shows
    status, counts (dump URLs / delta URLs / curated URLs), last job, and **one button — the next step**.
 2. **Collection workbench** (`/collections/{id}`) — one page, a sticky header, the pipeline stepper always on top, and under steps Curating / Curated seven tabs (Overview · Dump URLs · Curate · Rules · Delta URLs · Curated URLs · Activity; Start curating lands on Dump URLs):
-   - **Header**: name, seed link, status badge (icon + label), ⚠ *needs re-curation*, running-job
+   - **Header**: name, seed link, status badge (icon + label), ⚠ *needs re-curation* / *needs re-indexing* / *prod not validated*, running-job
      chip with **cancel**, and the one **Next** action for the current step. The counts
      (**Dump URLs · Rules · Delta URLs · Curated URLs**) sit on the tab row.
    - **Pipeline stepper**: each step's panel shows what it did, its primary action, and a redo where
@@ -194,9 +194,10 @@ row shows `n/N visible so far · waiting …s for OpenSearch to refresh` while i
    (`changed: 0`, nothing re-vectorised) purely to get a fresh `validation.json` from the indexer.
 
 Pass (`count_matches` and titles ≥ `VALIDATION_TITLE_MATCH_THRESHOLD`, default 0.99) → status
-`config_generated` with **Index to prod** enabled. Fail → back to `curating` with ⚠ *needs
-re-curation* and the mismatches listed. **Re-validate** re-runs the check on demand. A prod run
-(`?target=prod`) is refused until the latest test run passed; success → `live` and the ⚠ flag clears.
+`config_generated` with **Index to prod** enabled. Fail → back to `curated` with ⚠ *needs
+re-indexing* and the mismatches listed (a failed index is not a curation problem, so the re-curation
+flag stays down; the chip is read off the latest test run and only a passing run clears it). **Re-validate** re-runs the check on demand. A prod run
+(`?target=prod`) is refused until the latest test run passed.
 
 **Index to prod publishes vectors, it does not re-index.** The prod job takes the export of the
 latest validated test run and, for every document, the newest record at the same `version` from
@@ -205,8 +206,13 @@ they are spread over runs), falling back to the test index for anything S3 lacks
 into `OPENSEARCH_ENDPOINT_PROD` / `WEB_INDEX_NAME` (existing copies updated in place, never
 duplicated), then tombstones (`public_visibility: false`) the collection's prod documents that are no
 longer curated. The indexer's guards are ported and checked before anything is written, and removals
-never follow a failed or incomplete write. The engine then validates prod directly; a short count
-flags the collection but leaves it live. In SMCE test the write goes through `PROD_INDEX_ROLE_ARN`, a
+never follow a failed or incomplete write. The engine then runs **the same gate against prod**
+(delay, direct poll until visible or `VALIDATION_TIMEOUT_S`, counts equal and titles ≥ threshold):
+pass → `live`; fail → back to `config_generated` (the written documents stay in prod). Prod has no
+indexer to fall back to, so a check that cannot run (403 / no endpoint) fails the job rather than
+counting the publish as live. Prod never raises *needs re-curation* (nothing curated is wrong): the UI
+shows **⚠ prod not validated**, read off the latest prod run, until a prod check passes.
+**Re-validate prod** re-runs the check on demand. In SMCE test the write goes through `PROD_INDEX_ROLE_ARN`, a
 role in the prod account: see [docs/prod-index-access.md](docs/prod-index-access.md).
 Every status transition posts to `NOTIFY_WEBHOOK_URL` (Slack-compatible `{"text": …}` with a link
 built from `PUBLIC_BASE_URL`); failures to notify never block a transition.
@@ -369,7 +375,7 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `GET /collections/{id}/urls/{dump\|delta\|curated}?format=csv&…` | CSV export of the filtered set |
 | `POST …/promote` | delta URLs → curated URLs; status `curated` |
 | `POST …/index?target=test\|prod` | export to S3 + dispatch WEB_COSMOS → job (202; 409 unless curated, no delta URLs, something to export; prod needs a validated test run) |
-| `POST …/index/revalidate` | re-check the latest test run against the index (direct, or second pass) |
+| `POST …/index/revalidate?target=test\|prod` | re-check the latest run of that target against its index (test: direct, or second pass; prod: direct only) |
 | `GET …/index_runs` | run history: indexer status, validation report, `validated_by` (indexer\|direct\|second_pass) |
 | `POST …/suggest/patterns`, `POST …/suggest/metadata?all=` | LLM jobs (202; 409 if busy / nothing to do) |
 | `GET …/suggestions?state=`, `POST …/suggestions/{sid}/accept\|reject` | pattern suggestions |

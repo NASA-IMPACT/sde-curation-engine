@@ -184,6 +184,7 @@ async def test_index_failure_is_surfaced(index_client):
     job = await wait_job(c, "fail.org", timeout=30)
     assert job["state"] == "failed" and "export_incomplete" in job["error"]
     assert (await c.get("/api/collections/fail.org")).json()["status"] == "curated"  # not advanced
+    assert ">⚠ needs re-indexing<" in (await c.get("/collections/fail.org/header")).text
 
 
 async def test_index_requires_curated_and_nothing_to_export(index_client):

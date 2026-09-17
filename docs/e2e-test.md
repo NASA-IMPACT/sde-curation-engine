@@ -146,8 +146,8 @@ An `index_test` job runs. On dev this writes to the dev `sde-web-subset` index.
 | validation (~30 s later) | **Validation** line: `N / N — counts match · titles 100%`, "via direct" | engine log: `validated_by: direct`, no 403 |
 | result | status **Test index** (`config_generated`), step 5; **Index to prod** and **Re-validate** buttons appear; **Re-index to test** also available | collection page |
 
-If validation reports a count mismatch or title mismatches, the collection stays at **Curated**
-with the mismatches listed; fix the deltas, promote, **Re-index to test**, or **Re-validate** if
+If validation reports a count mismatch or title mismatches, the collection goes back to **Curated**
+with a **⚠ needs re-indexing** chip (not the re-curation flag) and the mismatches listed; fix the deltas, promote, **Re-index to test**, or **Re-validate** if
 the index simply had not refreshed yet.
 
 ## 8. Index to prod → Live
@@ -156,8 +156,10 @@ Click **Index to prod**, confirm. An `index_prod` job publishes the validated te
 the prod target (on dev: the same collection). No indexer task runs. The job moves through
 `preflight → from_vectorized → (from_test_index) → (tombstone) → validating`. When it finishes, the
 page shows a **Prod run** line from test run `<id>` and **Published** `N written (N from S3 vectors ·
-0 from the test index) · … unchanged · … removed`. Status becomes **Live**, and step 6 shows
-**Live ✓** with the hint "Re-scrape to start a new cycle". **Re-index to prod** stays available and,
+0 from the test index) · … unchanged · … removed`, and a **Validation** row (`pass` via direct, N / N
+visible in prod). Only once that passes does status become **Live**, and step 6 shows
+**Live ✓** with the hint "Re-scrape to start a new cycle". A failed prod check (or one that cannot
+read prod) leaves status at **Test index** with a **⚠ prod not validated** chip (not the re-curation flag); **Re-validate prod** re-runs it. **Re-index to prod** stays available and,
 with nothing changed, reports `0 written`.
 
 Negative: **Index to prod** is not offered until a test run has validated. Deltas pending after

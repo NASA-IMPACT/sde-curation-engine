@@ -127,7 +127,7 @@ async def test_gate_falls_back_to_second_pass_then_prod(index_client, monkeypatc
     assert "Live ✓" in (await c.get("/collections/ex.org/header")).text
 
 
-async def test_gate_failure_sends_back_to_curating(index_client, monkeypatch):
+async def test_gate_failure_needs_reindexing_not_recuration(index_client, monkeypatch):
     c = index_client
     c.app.state.settings.validation_delay_s = 0.1
     await prepare(c, "half.org")  # fake indexer's second pass reports half the docs for half.org
@@ -135,10 +135,31 @@ async def test_gate_failure_sends_back_to_curating(index_client, monkeypatch):
     job = await wait_job(c, "half.org", timeout=40)
     assert job["state"] == "succeeded" and job["progress"]["validation_ok"] is False
     col = (await c.get("/api/collections/half.org")).json()
-    assert col["status"] == "curating" and col["needs_recuration"] is True
+    assert col["status"] == "curated" and col["needs_recuration"] is False  # Index to test is the next action
     hist = (await c.get("/api/collections/half.org/history")).json()
-    assert "validation FAILED" in hist[-1]["note"]
+    assert "validation FAILED" in hist[-1]["note"] and "needs re-indexing" in hist[-1]["note"]
     assert (await c.post("/api/collections/half.org/index?target=prod")).status_code == 409
+    header = (await c.get("/collections/half.org/header")).text
+    assert ">⚠ needs re-indexing<" in header and "needs re-curation" not in header and "Index to test" in header
+    row_chip = 'href="/collections/half.org?step=config_generated" title="The latest test index run'  # filter pane has the label too
+    assert row_chip in (await c.get("/?flag=needs_reindexing")).text
+    assert row_chip not in (await c.get("/?flag=needs_recuration")).text
+
+    # a flag raised under the old rule is cleared by the next pass, together with the chip
+    await c.app.state.db.set_flag("half.org", True, "test-index validation failed (second_pass): 3/7 indexed")
+    import sde_curation.jobs as jobs_mod
+
+    async def all_visible(settings, *, collection_key, run_id, target, expected_titles, client=None):
+        exp = {web_id(collection_key, u): t for u, t in expected_titles.items()}
+        return compare(collection_key, run_id, exp, exp)
+
+    monkeypatch.setattr(jobs_mod, "validate_direct", all_visible)
+    await c.post("/api/collections/half.org/index/revalidate")
+    job = await wait_job(c, "half.org", timeout=20)
+    assert job["kind"] == "validate" and job["progress"]["validation_ok"] is True, job
+    col = (await c.get("/api/collections/half.org")).json()
+    assert col["status"] == "config_generated" and col["needs_recuration"] is False
+    assert "needs re-indexing" not in (await c.get("/collections/half.org/header")).text
 
 
 async def test_revalidate_direct_when_access_exists(index_client, monkeypatch):
@@ -214,6 +235,91 @@ async def test_direct_validation_fails_only_after_timeout(index_client, monkeypa
     assert job["state"] == "succeeded" and job["progress"]["validation_ok"] is False
     assert len(calls) >= 3  # kept re-checking through the window before giving up
     col = (await c.get("/api/collections/ex.org")).json()
-    assert col["status"] == "curating" and col["needs_recuration"] is True
+    assert col["status"] == "curated" and col["needs_recuration"] is False
     hist = (await c.get("/api/collections/ex.org/history")).json()
     assert "validation FAILED (direct)" in hist[-1]["note"]
+
+
+# ── prod gets the same gate as test ──
+
+
+async def _publishable(c):
+    """Index ex.org to test (validated via second pass), then wire a prod endpoint, vectors, and a fake prod index."""
+    await prepare(c)
+    await c.post("/api/collections/ex.org/index?target=test")
+    job = await wait_job(c, "ex.org", timeout=40)
+    assert job["progress"]["validation_ok"] is True, job
+    settings = c.app.state.settings
+    settings.opensearch_endpoint_prod = "https://prod.example.aoss.amazonaws.com"
+    test_run = (await c.get("/api/collections/ex.org/index_runs")).json()[0]["run_id"]
+    prefix = f"curated_collections/ex.org/{test_run}"
+    manifest = json.loads(c.s3.get_object(Bucket="cosmos-idx", Key=f"{prefix}/manifest.json")["Body"].read())
+    lines = [json.loads(x) for x in c.s3.get_object(Bucket="cosmos-idx", Key=f"{prefix}/documents.jsonl")["Body"].read().splitlines()]
+    c.s3.put_object(Bucket="cosmos-idx", Key=f"vectorized/ex.org/{test_run}/batch_0001.jsonl", Body="\n".join(
+        json.dumps({**to_web_document(ln, manifest), "vectorized_title": [1], "vectorized_full_text": []}) for ln in lines).encode())
+    prod = FakeAoss()
+    c.app.state.jobs._publisher = lambda: ProdPublisher(settings, s3=S3("cosmos-idx", client=c.s3), prod=prod)
+    return prod
+
+
+async def test_prod_validation_failure_is_not_live_until_revalidated(index_client, monkeypatch):
+    c = index_client
+    await _publishable(c)
+    assert (await c.post("/api/collections/ex.org/index/revalidate?target=prod")).status_code == 409  # no prod run yet
+    import sde_curation.jobs as jobs_mod
+
+    visible = {"share": 0.5}
+
+    async def prod_direct(settings, *, collection_key, run_id, target, expected_titles, client=None):
+        assert target == "prod"
+        exp = {web_id(collection_key, u): t for u, t in expected_titles.items()}
+        return compare(collection_key, run_id, exp, dict(list(exp.items())[: int(len(exp) * visible["share"])]))
+
+    monkeypatch.setattr(jobs_mod, "validate_direct", prod_direct)
+    await c.post("/api/collections/ex.org/index?target=prod")
+    job = await wait_job(c, "ex.org", timeout=40)
+    assert job["state"] == "succeeded" and job["kind"] == "index_prod" and job["progress"]["validation_ok"] is False, job
+    col = (await c.get("/api/collections/ex.org")).json()
+    assert col["status"] == "config_generated" and col["needs_recuration"] is False  # nothing curated is wrong
+    assert "prod validation FAILED (direct)" in (await c.get("/api/collections/ex.org/history")).json()[-1]["note"]
+    live = (await c.get("/collections/ex.org?tab=overview&step=live")).text
+    assert ">fail<" in live and "via direct" in live and "Re-validate prod" in live
+    assert ">⚠ prod not validated<" in (await c.get("/collections/ex.org/header")).text
+    row_chip = 'href="/collections/ex.org?step=live" title="The latest prod publish'  # the filter pane has the label too
+    assert row_chip in (await c.get("/?flag=prod_not_validated")).text  # dashboard row, filtered
+    assert row_chip not in (await c.get("/?flag=needs_recuration")).text
+
+    visible["share"] = 1.0  # the index caught up
+    r = await c.post("/api/collections/ex.org/index/revalidate?target=prod")
+    assert r.status_code == 202, r.text
+    job = await wait_job(c, "ex.org", timeout=20)
+    assert job["state"] == "succeeded" and job["kind"] == "validate_prod" and job["progress"]["validation_ok"] is True, job
+    col = (await c.get("/api/collections/ex.org")).json()
+    assert col["status"] == "live" and col["needs_recuration"] is False
+    runs = (await c.get("/api/collections/ex.org/index_runs")).json()
+    assert runs[0]["target"] == "prod" and runs[0]["validated_by"] == "direct" and runs[0]["validation"]["count_matches"] is True
+    assert ">⚠ prod not validated<" not in (await c.get("/collections/ex.org/header")).text
+    assert row_chip not in (await c.get("/")).text
+
+
+async def test_prod_validation_without_read_access_fails_instead_of_skipping(index_client, monkeypatch):
+    c = index_client
+    prod = await _publishable(c)
+    import sde_curation.jobs as jobs_mod
+
+    async def denied(settings, *, collection_key, run_id, target, expected_titles, client=None):
+        raise NoIndexAccess("no AOSS data access for this principal on sde-web")
+
+    monkeypatch.setattr(jobs_mod, "validate_direct", denied)
+    await c.post("/api/collections/ex.org/index?target=prod")
+    job = await wait_job(c, "ex.org", timeout=40)
+    assert job["state"] == "failed" and "prod validation could not run" in job["error"], job
+    assert prod.store  # the publish itself went through
+    col = (await c.get("/api/collections/ex.org")).json()
+    assert col["status"] == "config_generated" and col["needs_recuration"] is False
+    runs = (await c.get("/api/collections/ex.org/index_runs")).json()
+    assert runs[0]["target"] == "prod" and runs[0]["state"] == "succeeded" and runs[0]["validation"] is None
+    live = (await c.get("/collections/ex.org?tab=overview&step=live")).text
+    assert "not validated" in live and "Re-validate prod" in live
+    header = (await c.get("/collections/ex.org/header")).text
+    assert "Live ✓" not in header and ">⚠ prod not validated<" in header

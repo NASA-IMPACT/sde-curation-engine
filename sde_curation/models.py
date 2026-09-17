@@ -38,8 +38,8 @@ ALLOWED_TRANSITIONS: dict[Status, set[Status]] = {
     Status.SCRAPED: {Status.CURATING, Status.BACKLOG},
     Status.CURATING: {Status.CURATED, Status.SCRAPED},
     Status.CURATED: {Status.CONFIG_GENERATED, Status.CURATING},
-    Status.CONFIG_GENERATED: {Status.LIVE, Status.CURATING},  # validation fail → curating
-    Status.LIVE: {Status.CURATING, Status.SCRAPED},  # re-curation / re-scrape
+    Status.CONFIG_GENERATED: {Status.LIVE, Status.CURATED, Status.CURATING},  # test validation fail → curated
+    Status.LIVE: {Status.CURATING, Status.SCRAPED, Status.CONFIG_GENERATED},  # re-curation / re-scrape / prod validation fail
 }
 
 
@@ -96,6 +96,7 @@ class JobKind(StrEnum):
     INDEX_TEST = "index_test"
     INDEX_PROD = "index_prod"
     VALIDATE = "validate"
+    VALIDATE_PROD = "validate_prod"
     LLM_PATTERNS = "llm_patterns"
     LLM_METADATA = "llm_metadata"
 
@@ -217,6 +218,8 @@ class Collection(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     _validated: bool = PrivateAttr(default=False)  # computed for the UI: latest test run validated
+    _prod_unvalidated: bool = PrivateAttr(default=False)  # computed for the UI: see prod_not_validated
+    _test_unvalidated: bool = PrivateAttr(default=False)  # computed for the UI: see needs_reindexing
 
     collection_id: str
     name: str
@@ -228,7 +231,7 @@ class Collection(BaseModel):
     status: Status = Status.BACKLOG
     curation_stage: CurationStage | None = None  # only while status == curating
     needs_recuration: bool = False
-    recuration_reason: str | None = None  # why the flag is up (re-crawl / validation failure)
+    recuration_reason: str | None = None  # why the flag is up (a re-crawl after a promote)
     last_scraped_at: datetime | None = None  # when the current dump was crawled (or loaded)
     last_crawl_capped: bool = False  # the current dump stopped at max_pages: absence is not evidence
     created_at: datetime = Field(default_factory=utcnow)
@@ -239,6 +242,18 @@ class Collection(BaseModel):
     dump_count: int = 0
     delta_count: int = 0
     curated_count: int = 0
+
+    @property
+    def prod_not_validated(self) -> bool:
+        """The latest prod publish wrote documents but its check failed or never ran (and no prod job
+        is checking it now). Set by the web layer; cleared only by a prod check that passes."""
+        return self._prod_unvalidated
+
+    @property
+    def needs_reindexing(self) -> bool:
+        """The latest test index run failed, never finished, or did not pass validation (and no test
+        index / validate job is on it now). Set by the web layer; cleared only by a test run that passes."""
+        return self._test_unvalidated
 
 
 class StatusHistory(BaseModel):

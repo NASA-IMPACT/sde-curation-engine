@@ -4,5 +4,7 @@
 {% for st in statuses %}<span id="f-status-{{ st }}" class="cnt" hx-swap-oob="true">{{ counts.status[st] }}</span>{% endfor %}
 {% for sg in stages %}<span id="f-stage-{{ sg }}" class="cnt" hx-swap-oob="true">{{ counts.stage[sg] }}</span>{% endfor %}
 <span id="f-flag-needs_recuration" class="cnt" hx-swap-oob="true">{{ counts.flag.needs_recuration }}</span>
+<span id="f-flag-needs_reindexing" class="cnt" hx-swap-oob="true">{{ counts.flag.needs_reindexing }}</span>
+<span id="f-flag-prod_not_validated" class="cnt" hx-swap-oob="true">{{ counts.flag.prod_not_validated }}</span>
 {% for d in divisions %}<span id="f-division-{{ d|dom_id }}" class="cnt" hx-swap-oob="true">{{ counts.division[d] }}</span>{% endfor %}
 {% for u in curators %}<span id="f-curator-{{ u|dom_id }}" class="cnt" hx-swap-oob="true">{{ counts.curator[u] }}</span>{% endfor %}

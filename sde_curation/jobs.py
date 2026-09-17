@@ -477,8 +477,9 @@ class JobManager:
     async def _run_publish_prod(self, c: Collection, job: JobRun, run: IndexRun) -> None:
         """Index to prod: publish the vectors of the latest validated test run straight into the
         production index (backends/publish.py) — no export, no indexer task, no re-vectorizing —
-        then check prod directly. A prod validation that falls short flags the collection; the
-        documents that were written stay live."""
+        then run the same validation gate as test against prod. The collection only becomes `live`
+        once that passes; a failed or impossible check sends it back to `config_generated`, flagged
+        (the documents that were written stay in prod)."""
         async def body():
             source = await self.db.last_index_run(c.collection_id, "test")
             if not source or source.state != "succeeded" or not source.validation_passes(self.s.validation_title_match_threshold):
@@ -506,39 +507,45 @@ class JobManager:
                 raise IndexError_(f"publish to prod failed: {status.error}{(' — ' + detail) if detail else ''}")
             run.state, run.finished_at = "succeeded", utcnow()
             await self.db.update_index_run(run)
-            await self.db.set_status(
-                c.collection_id, Status.LIVE, force=True, actor=SYSTEM_ACTOR,
+            await self._validate_prod(
+                c, job, run, progress,
                 note=(f"prod publish {run.run_id} from test run {source.run_id}: {status.indexed} written "
                       f"({st.get('from_vectorized', 0)} from S3, {st.get('from_test_index', 0)} from the test index), "
                       f"{st.get('unchanged', 0)} unchanged, {status.deleted} removed"),
             )
-            await self.db.set_flag(c.collection_id, False)
-            await self._validate_prod(c, job, run, progress)
 
         await self._guarded(c, job, body)
 
-    async def _validate_prod(self, c: Collection, job: JobRun, run: IndexRun, progress) -> None:
-        if not self.s.opensearch_endpoint_prod:
-            return
+    async def _validate_prod(self, c: Collection, job: JobRun, run: IndexRun, progress, note: str | None = None) -> None:
+        """The test gate, against prod: wait, poll directly until visible or timed out, same pass rule.
+        Pass → `live`. Fail → back to `config_generated`. There is no indexer to fall back to, so a
+        check that cannot run (no endpoint / no read access) fails the job instead of letting an
+        unchecked publish count as live. Prod never touches the needs-re-curation flag: nothing
+        curated is wrong when prod lags. The UI's "prod not validated" chip is read off the run."""
+        cid = c.collection_id
         await progress({"phase": "validating", "validation_delay_s": int(self.s.validation_delay_s)})
         await asyncio.sleep(self.s.validation_delay_s)
-        expected = await self._expected_titles(c.collection_id)
+        expected = await self._expected_titles(cid)
+        prefix = f"{note}; " if note else ""
         try:
             report = await self._validate_direct_until_visible(c, run, expected, progress)
         except NoIndexAccess as e:
-            log.warning("prod validation unavailable for %s: %s", c.collection_id, e)
-            job.progress = {**job.progress, "phase": "done", "validation_unavailable": str(e)[:200]}
-            return
+            reason = f"prod validation could not run: {e}"[:500] + " — fix prod read access (aoss:ReadDocument), then Re-validate prod"
+            log.warning("%s: %s", cid, reason)
+            await self.db.set_status(cid, Status.CONFIG_GENERATED, force=True, actor=SYSTEM_ACTOR,
+                                     note=f"{prefix}prod run {run.run_id} NOT validated — {reason}")
+            raise IndexError_(reason) from e
         run.validation, run.validated_by = report, "direct"
         await self.db.update_index_run(run)
-        ok = report_passes(report, self.s.validation_title_match_threshold)
+        ok = run.validation_passes(self.s.validation_title_match_threshold)
         job.progress = {**job.progress, "phase": "done", "validation": report, "validated_by": "direct", "validation_ok": ok}
-        if not ok:
-            await self.db.set_flag(
-                c.collection_id, True,
-                f"prod validation failed: {report['indexed_count']}/{report['expected_count']} visible, "
-                f"titles {report['title_match_rate']:.1%} — check the prod index, then Re-index to prod",
-            )
+        summary = f"{report['indexed_count']}/{report['expected_count']} visible, titles {report['title_match_rate']:.1%}"
+        if ok:
+            await self.db.set_status(cid, Status.LIVE, force=True, actor=SYSTEM_ACTOR,
+                                     note=f"{prefix}prod validated (direct): {summary}")
+        else:
+            await self.db.set_status(cid, Status.CONFIG_GENERATED, force=True, actor=SYSTEM_ACTOR,
+                                     note=f"{prefix}prod validation FAILED (direct): {summary} — not live")
 
     async def _validate(self, c: Collection, job: JobRun, run: IndexRun, s3: S3, backend: IndexBackend, progress) -> None:
         """Wait for the index to refresh, then validate directly (fast), re-checking until the
@@ -568,19 +575,20 @@ class JobManager:
         await self.db.update_index_run(run)
         ok = run.validation_passes(self.s.validation_title_match_threshold)
         job.progress = {**job.progress, "phase": "done", "validation": report, "validated_by": run.validated_by, "validation_ok": ok}
+        # A failed index is not a curation problem: it never raises needs-re-curation. The UI's
+        # "needs re-indexing" chip is read off the run, so a later pass is the only thing that clears it.
         if ok:
-            await self.db.set_flag(c.collection_id, False)
+            now = await self.db.get_collection(c.collection_id)
+            if now and now.needs_recuration and (now.recuration_reason or "").startswith("test-index validation failed"):
+                await self.db.set_flag(c.collection_id, False)  # a flag raised by the old rule
             await self.db.set_status(
                 c.collection_id, Status.CONFIG_GENERATED, force=True, actor=SYSTEM_ACTOR,
                 note=f"validated ({run.validated_by}): {report['indexed_count']}/{report['expected_count']}, titles {report['title_match_rate']:.1%}",
             )
         else:
-            reason = (f"test-index validation failed ({run.validated_by}): {report['indexed_count']}/{report['expected_count']}"
-                      f" indexed, titles {report['title_match_rate']:.1%} — fix and re-index, or Re-validate")
-            await self.db.set_flag(c.collection_id, True, reason)
             await self.db.set_status(
-                c.collection_id, Status.CURATING, force=True, actor=SYSTEM_ACTOR,
-                note=f"validation FAILED ({run.validated_by}): {report['indexed_count']}/{report['expected_count']} indexed, titles {report['title_match_rate']:.1%} — needs re-curation",
+                c.collection_id, Status.CURATED, force=True, actor=SYSTEM_ACTOR,
+                note=f"validation FAILED ({run.validated_by}): {report['indexed_count']}/{report['expected_count']} indexed, titles {report['title_match_rate']:.1%} — needs re-indexing",
             )
 
     async def _validate_direct_until_visible(self, c: Collection, run: IndexRun, expected: dict[str, str], progress) -> dict[str, Any]:
@@ -612,7 +620,11 @@ class JobManager:
         return {r.url: (r.title or r.scraped_title or "").strip() for r in curated if not r.excluded}
 
     async def start_revalidate(self, c: Collection, run: IndexRun, *, actor: str | None = None) -> JobRun:
-        """Manual re-check of an existing test run (no new export)."""
+        """Manual re-check of an existing test or prod run (no new export / publish)."""
+        if run.target == "prod":
+            if not self.s.opensearch_endpoint_prod:
+                raise IndexError_("OPENSEARCH_ENDPOINT_PROD is not set — nothing to validate against")
+            return await self._start(c, JobKind.VALIDATE_PROD, lambda job: self._run_revalidate(c, job, run), actor=actor)
         return await self._start(
             c, JobKind.VALIDATE, lambda job: self._run_revalidate(c, job, run), actor=actor
         )
@@ -628,7 +640,10 @@ class JobManager:
 
             job.run_id = run.run_id
             await self.db.update_job(job)
-            await self._validate(c, job, run, s3, self.indexer(), progress)
+            if run.target == "prod":
+                await self._validate_prod(c, job, run, progress)
+            else:
+                await self._validate(c, job, run, s3, self.indexer(), progress)
 
         await self._guarded(c, job, body)
 

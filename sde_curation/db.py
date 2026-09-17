@@ -813,6 +813,15 @@ class Database:
             row = await cur.fetchone()
         return self._index_run(row) if row else None
 
+    async def latest_runs(self, target: str) -> dict[str, IndexRun]:
+        """The newest `target` run of every collection that has one, in one query (dashboard chips/filter)."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT DISTINCT ON (collection_id) * FROM index_runs WHERE target=%s"
+                " ORDER BY collection_id, started_at DESC", (target,),
+            )
+            return {r["collection_id"]: self._index_run(r) for r in await cur.fetchall()}
+
     async def curated_export_count(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(

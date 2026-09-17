@@ -7,5 +7,7 @@
        hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
       <span class="n">{{ loop.index }}</span> {{ s.label }}{% if s.status == 'curating' and c.status == 'curating' and c.curation_stage %} <small class="stage">· {{ c.curation_stage }}</small>{% endif %}</a></li>
   {% endfor %}
-  {% if c.needs_recuration %}<li class="warn" title="{{ c.recuration_reason or 'Something promoted is stale: a re-crawl happened or validation failed — review and promote again' }}">⚠ needs re-curation</li>{% endif %}
+  {% if c.needs_recuration %}<li class="warn" title="{{ c.recuration_reason or 'Something promoted is stale: a re-crawl happened after a promote — review and promote again' }}">⚠ needs re-curation</li>{% endif %}
+  {% if c.needs_reindexing %}<li class="warn" title="The latest test index run failed or did not pass validation — Re-index to test, or Re-validate if the index only needed more time">⚠ needs re-indexing</li>{% endif %}
+  {% if c.prod_not_validated %}<li class="warn" title="The latest prod publish failed its validation or was never checked — see step 6: Re-validate prod, or Re-index to prod">⚠ prod not validated</li>{% endif %}
 </ol>

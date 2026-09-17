@@ -96,11 +96,15 @@
     <dt>Exported</dt><dd>{{ r.exported }} URLs → <code>s3://{{ settings.cosmos_index_bucket }}/curated_collections/{{ cid }}/{{ r.run_id }}/</code></dd>
     {% if r.status %}<dt>Indexer</dt><dd>{{ r.status.indexed }} indexed · {{ r.status.changed }} changed · {{ r.status.deleted }} deleted{% if r.status.failed %} · <span class="err">{{ r.status.failed }} failed</span>{% endif %} · index <code>{{ r.status.index }}</code>{% if r.status.duration_seconds %} · {{ r.status.duration_seconds|round|int }}s{% endif %}</dd>{% endif %}
     {% if r.error %}<dt>Error</dt><dd class="err">{{ r.error }}</dd>{% endif %}
-    {% if r.validation %}<dt>Validation</dt><dd>
+    {% if stats.validating_test %}<dt>Validation</dt><dd>
+      <span class="kind k-ok" title="OpenSearch makes new documents searchable some time after the indexer finishes; the result is only final once the check passes or times out">validating…</span>
+      <small class="muted">{{ job_progress(stats.validating_test) }}</small></dd>
+    {% elif r.validation %}<dt>Validation</dt><dd>
       {% if r.validation_passes(settings.validation_title_match_threshold) %}<span class="kind k-new">pass</span>{% else %}<span class="kind k-deleted">fail</span>{% endif %}
       <small class="muted">via {{ r.validated_by or 'indexer' }}{% if r.validated_by == 'indexer' %} (pre-refresh — re-validate){% endif %}</small>
       {{ r.validation.indexed_count }} / {{ r.validation.expected_count }} — {{ 'counts match' if r.validation.count_matches else 'COUNT MISMATCH' }} · titles {{ (r.validation.title_match_rate * 100)|round(1) }}%
-      {% if r.validation.titles_mismatched %}<br><small class="muted">{{ r.validation.titles_mismatched|length }} title mismatches, {{ r.validation.titles_missing_in_index|length }} missing in index</small>{% endif %}</dd>{% endif %}
+      {% if r.validation.titles_mismatched %}<br><small class="muted">{{ r.validation.titles_mismatched|length }} title mismatches, {{ r.validation.titles_missing_in_index|length }} missing in index</small>{% endif %}</dd>
+    {% elif r.state == 'succeeded' %}<dt>Validation</dt><dd><span class="kind k-deleted">not validated</span> <small class="muted">Re-validate</small></dd>{% endif %}
   </dl>
   {% else %}<p class="muted">Export the curated set to S3 and run the WEB_COSMOS indexer against the test index (<code>{{ settings.web_index_name }}</code>). The indexer reports back through <code>status.json</code> / <code>validation.json</code>.</p>{% endif %}
   <div class="inline">
@@ -124,9 +128,15 @@
       {% if pr.status.deletions_skipped %}<dt>Removals</dt><dd><small class="muted">skipped: {{ pr.status.deletions_skipped|join(', ') }}</small></dd>{% endif %}
     {% elif pr.status %}<dt>Indexer</dt><dd>{{ pr.status.indexed }} indexed · {{ pr.status.changed }} changed · {{ pr.status.deleted }} deleted · index <code>{{ pr.status.index }}</code></dd>{% endif %}
     {% if pr.error %}<dt>Error</dt><dd class="err">{{ pr.error }}{% if pr.status and pr.status.error_detail %} — {{ pr.status.error_detail }}{% endif %}</dd>{% endif %}
-    {% if pr.validation %}<dt>Validation</dt><dd>
+    {% if stats.validating_prod %}<dt>Validation</dt><dd>
+      <span class="kind k-ok" title="OpenSearch makes new documents searchable some time after they are written; the result is only final once the check passes or times out">validating…</span>
+      <small class="muted">{{ job_progress(stats.validating_prod) }}</small></dd>
+    {% elif pr.validation %}<dt>Validation</dt><dd>
       {% if pr.validation_passes(settings.validation_title_match_threshold) %}<span class="kind k-new">pass</span>{% else %}<span class="kind k-deleted">fail</span>{% endif %}
-      {{ pr.validation.indexed_count }} / {{ pr.validation.expected_count }} visible in prod — {{ 'counts match' if pr.validation.count_matches else 'COUNT MISMATCH' }} · titles {{ (pr.validation.title_match_rate * 100)|round(1) }}%</dd>{% endif %}
+      <small class="muted">via {{ pr.validated_by or 'direct' }}</small>
+      {{ pr.validation.indexed_count }} / {{ pr.validation.expected_count }} visible in prod — {{ 'counts match' if pr.validation.count_matches else 'COUNT MISMATCH' }} · titles {{ (pr.validation.title_match_rate * 100)|round(1) }}%
+      {% if pr.validation.titles_mismatched %}<br><small class="muted">{{ pr.validation.titles_mismatched|length }} title mismatches, {{ pr.validation.titles_missing_in_index|length }} missing in index</small>{% endif %}</dd>
+    {% elif pr.state == 'succeeded' %}<dt>Validation</dt><dd><span class="kind k-deleted">not validated</span> <small class="muted">not live until prod validates — Re-validate prod</small></dd>{% endif %}
   </dl>
   {% else %}
   <p class="muted">Publishes the vectors of the validated test run straight to the production index — nothing is re-vectorized.
@@ -138,9 +148,10 @@
            "Publish the validated test run's vectors to the PRODUCTION index", primary=True,
            disabled=(not gate or c.status not in ('config_generated','live') or c.delta_count > 0),
            confirm='Index ' ~ stats.exportable ~ ' URLs into the PRODUCTION index?') }}
+    {% if pr and pr.state == 'succeeded' %}{{ btn('Re-validate prod', '/api/collections/' ~ cid ~ '/index/revalidate?target=prod', 'Check the production index against the curated set now (count + titles, same gate as test)') }}{% endif %}
     <a class="button secondary" href="{{ settings.prod_frontend_url }}" target="_blank" rel="noopener"
        title="Open the production search front end in a new tab to verify what is live">Open prod front end ↗</a>
-    {% if not gate %}<span class="muted small">{% if not t %}Run "Index to test" first.{% elif t.validation %}Test validation did not pass — fix the deltas, re-index to test, or Re-validate.{% else %}Test run not validated yet — Re-validate.{% endif %}</span>{% endif %}
+    {% if not gate %}<span class="muted small">{% if not t %}Run "Index to test" first.{% elif stats.validating_test %}Validating the test run…{% elif t.validation %}Test validation did not pass — fix the deltas, re-index to test, or Re-validate.{% else %}Test run not validated yet — Re-validate.{% endif %}</span>{% endif %}
   </div>
 {% endif %}
 

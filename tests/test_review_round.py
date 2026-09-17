@@ -238,7 +238,7 @@ async def test_recuration_reason(crawler_client):
     assert col["needs_recuration"] is False and col["recuration_reason"] is None
 
 
-async def test_recuration_reason_on_validation_failure(index_client):
+async def test_validation_failure_needs_reindexing_not_recuration(index_client):
     from tests.conftest import prepare
 
     c = index_client
@@ -247,11 +247,14 @@ async def test_recuration_reason_on_validation_failure(index_client):
     await c.post("/api/collections/half.org/index?target=test")
     await wait_job(c, "half.org", timeout=40)
     col = await coll(c, "half.org")
-    assert col["needs_recuration"] is True and col["recuration_reason"].startswith("test-index validation failed")
-    # a recompute with nothing pending does not clear it: the index, not the curation, is what failed
+    assert col["needs_recuration"] is False and col["recuration_reason"] is None
+    assert ">⚠ needs re-indexing<" in (await c.get("/collections/half.org/header")).text
+    # a recompute or promote with nothing pending does not clear it: the index, not the curation, is what failed
     await c.post("/api/collections/half.org/recompute")
+    await c.post("/api/collections/half.org/promote")
     col = await coll(c, "half.org")
-    assert col["status"] == "curated" and col["needs_recuration"] is True and "validation failed" in col["recuration_reason"]
+    assert col["status"] == "curated" and col["needs_recuration"] is False
+    assert ">⚠ needs re-indexing<" in (await c.get("/collections/half.org/header")).text
 
 
 # ── 7. rules never cross collections ───────────────────────────────────

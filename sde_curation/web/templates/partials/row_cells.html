@@ -2,7 +2,9 @@
   <td><a href="/collections/{{ c.collection_id }}">{{ c.name }}</a><br><small class="muted">{{ c.collection_id }}</small></td>
   <td class="status-cell"><span class="status s-{{ c.status }}">{{ status_icon(c.status) }} {{ status_label(c.status) }}</span>
       {% if c.status == 'curating' and c.curation_stage %}<span class="chip stage" title="curation stage">{{ '① Exclusions' if c.curation_stage == 'exclusions' else '② Metadata' }}</span>{% endif %}
-      {% if c.needs_recuration %}<span class="flag" title="needs re-curation: {{ c.recuration_reason or 'a re-crawl happened or validation failed' }}">⚠</span>{% endif %}</td>
+      {% if c.needs_recuration %}<span class="flag" title="needs re-curation: {{ c.recuration_reason or 'a re-crawl happened after a promote' }}">⚠</span>{% endif %}
+      {% if c.needs_reindexing %}<a class="chip warn" href="/collections/{{ c.collection_id }}?step=config_generated" title="The latest test index run failed or did not pass validation — Re-index to test, or Re-validate if the index only needed more time">⚠ needs re-indexing</a>{% endif %}
+      {% if c.prod_not_validated %}<a class="chip warn" href="/collections/{{ c.collection_id }}?step=live" title="The latest prod publish failed its validation or was never checked — see step 6: Re-validate prod, or Re-index to prod">⚠ prod not validated</a>{% endif %}</td>
   <td title="dump URLs"><a href="/collections/{{ c.collection_id }}?tab=dump">{{ c.dump_count }}</a></td>
   <td title="delta URLs"><a href="/collections/{{ c.collection_id }}?tab=delta">{{ c.delta_count }}</a></td>
   <td title="curated URLs"><a href="/collections/{{ c.collection_id }}?tab=curated">{{ c.curated_count }}</a></td>
