@@ -246,12 +246,14 @@ class ProdPublisher:
         self.prod = prod
         self.test = test
         self.index = settings.web_index_name
+        self.published_at = datetime.now(UTC).strftime(_MODIFIED_DATE_FORMAT)  # one stamp per publish
 
     async def _call(self, fn, *args, **kw):
         return await asyncio.to_thread(fn, *args, **kw)
 
     async def run(self, collection_key: str, run_id: str, source_run_id: str, on_progress: ProgressCb) -> dict[str, Any]:
         t0 = time.time()
+        self.published_at = datetime.now(UTC).strftime(_MODIFIED_DATE_FORMAT)
         status: dict[str, Any] = {
             "run_id": run_id, "collection_key": collection_key, "target": "prod", "index": self.index,
             "mode": "publish_vectors", "source_test_run": source_run_id, "state": "failed",
@@ -424,9 +426,8 @@ class ProdPublisher:
 
     def _normalize(self, rec: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
         doc = {f: rec.get(f) for f in DOC_FIELDS if f in rec}
-        # when the indexer wrote this version; records from before it stamped one get the publish time
-        if not doc.get("modified_date"):
-            doc["modified_date"] = datetime.now(UTC).strftime(_MODIFIED_DATE_FORMAT)
+        # in prod "modified" is when the document went live, never the test run's stamp on the vectors
+        doc["modified_date"] = self.published_at
         # non-content fields follow the validated export, not whenever the vectors were made
         doc["collection_key"] = manifest["collection_key"]
         doc["collection_name"] = manifest.get("collection_name")

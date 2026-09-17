@@ -107,14 +107,14 @@ async def test_publish_picks_newest_matching_vectors_falls_back_to_test_and_dele
     manifest = export([a, b, c, d])
     # older run: A at a stale version, B current; newer run: A current
     put_vectors("20260801T000000Z-000001", [vectorized(line("a", "A old"), "a-old"), vectorized(b, "b-1")])
-    put_vectors("20260905T000000Z-000002", [vectorized(a, "a-new")])
+    put_vectors("20260905T000000Z-000002", [{**vectorized(a, "a-new"), "modified_date": "2024-08-22 21:08:32"}])
     prod, test = FakeAoss(), FakeAoss()
     prod.add(vectorized(c, "c-prod", manifest))                                        # unchanged
     prod.add({**vectorized(line("b", "B before"), "b-prod", manifest)})                  # changed → update
     gone = prod.add(vectorized(line("gone", "Gone"), "gone", manifest))                  # removed → deleted
     hidden = prod.add({**vectorized(line("old", "Old"), "old", manifest), "public_visibility": False})  # hidden earlier
     legacy = prod.add({k: v for k, v in vectorized(line("legacy", "Legacy"), "l", manifest).items() if k != "version"})
-    test.add(vectorized(d, "d-test", manifest))                                         # only in the test index
+    test.add({**vectorized(d, "d-test", manifest), "modified_date": "2024-08-22 21:08:32"})                                         # only in the test index
 
     st = await run(publisher(prod, test))
 
@@ -128,9 +128,12 @@ async def test_publish_picks_newest_matching_vectors_falls_back_to_test_and_dele
     assert prod.by_id(to_web_document(d, manifest)["id"])[0]["vectorized_title"] == ["d-test"]
     # really gone — with the unversioned document from before the indexer and the one hidden earlier
     assert not {gone, hidden, legacy} & set(prod.store) and len(prod.store) == 4 and "delete_failed" not in st
-    # written documents carry modified_date in the index's format; the untouched one is left alone
+    # written documents carry the publish time in the index's format — one stamp, and never the date
+    # the test run left on the vectors or the test index; the untouched one is left alone
     import re
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", pa["modified_date"])
+    pd = prod.by_id(to_web_document(d, manifest)["id"])[0]
+    assert pa["modified_date"] == pb["modified_date"] == pd["modified_date"] != "2024-08-22 21:08:32"
     assert "modified_date" not in prod.by_id(to_web_document(c, manifest)["id"])[0]
     phases = [e["phase"] for e in st["_events"] if "phase" in e]
     assert phases == ["preflight", "from_vectorized", "from_test_index", "delete"]
