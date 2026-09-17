@@ -1,6 +1,6 @@
 """Index to prod = publish the validated test run's vectors (S3 vectorized/, then the test index)
 straight into the prod index: identity/version parity with the indexer, source selection, upsert
-without duplicates, tombstones and their guards, assumed-role credentials."""
+without duplicates, deletions and their guards, assumed-role credentials."""
 
 import importlib.util
 import json
@@ -102,7 +102,7 @@ def test_identity_and_version_match_the_indexer():
 # ── the run ─────────────────────────────────────────────────────────────
 
 
-async def test_publish_picks_newest_matching_vectors_falls_back_to_test_and_tombstones(aws):
+async def test_publish_picks_newest_matching_vectors_falls_back_to_test_and_deletes(aws):
     a, b, c, d = line("a", "A new"), line("b", "B"), line("c", "C"), line("d", "D")
     manifest = export([a, b, c, d])
     # older run: A at a stale version, B current; newer run: A current
@@ -111,23 +111,29 @@ async def test_publish_picks_newest_matching_vectors_falls_back_to_test_and_tomb
     prod, test = FakeAoss(), FakeAoss()
     prod.add(vectorized(c, "c-prod", manifest))                                        # unchanged
     prod.add({**vectorized(line("b", "B before"), "b-prod", manifest)})                  # changed → update
-    gone = prod.add(vectorized(line("gone", "Gone"), "gone", manifest))                  # removed → tombstone
-    prod.add({**vectorized(line("old", "Old"), "old", manifest), "public_visibility": False})  # already a tombstone
+    gone = prod.add(vectorized(line("gone", "Gone"), "gone", manifest))                  # removed → deleted
+    hidden = prod.add({**vectorized(line("old", "Old"), "old", manifest), "public_visibility": False})  # hidden earlier
+    legacy = prod.add({k: v for k, v in vectorized(line("legacy", "Legacy"), "l", manifest).items() if k != "version"})
     test.add(vectorized(d, "d-test", manifest))                                         # only in the test index
 
     st = await run(publisher(prod, test))
 
     assert st["state"] == "succeeded", st
     assert (st["documents_in_export"], st["unchanged"], st["changed"], st["indexed"]) == (4, 1, 3, 3)
-    assert (st["from_vectorized"], st["from_test_index"], st["missing"], st["deleted"]) == (2, 1, 0, 1)
+    assert (st["from_vectorized"], st["from_test_index"], st["missing"], st["deleted"]) == (2, 1, 0, 3)
     [pa] = prod.by_id(to_web_document(a, manifest)["id"])
     assert pa["vectorized_title"] == ["a-new"] and pa["title"] == "A new" and pa["collection_name"] == "Ex"
     [pb] = prod.by_id(to_web_document(b, manifest)["id"])  # updated in place, not duplicated
     assert pb["vectorized_title"] == ["b-1"] and pb["title"] == "B"
     assert prod.by_id(to_web_document(d, manifest)["id"])[0]["vectorized_title"] == ["d-test"]
-    assert prod.store[gone]["public_visibility"] is False
+    # really gone — with the unversioned document from before the indexer and the one hidden earlier
+    assert not {gone, hidden, legacy} & set(prod.store) and len(prod.store) == 4 and "delete_failed" not in st
+    # written documents carry modified_date in the index's format; the untouched one is left alone
+    import re
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", pa["modified_date"])
+    assert "modified_date" not in prod.by_id(to_web_document(c, manifest)["id"])[0]
     phases = [e["phase"] for e in st["_events"] if "phase" in e]
-    assert phases == ["preflight", "from_vectorized", "from_test_index", "tombstone"]
+    assert phases == ["preflight", "from_vectorized", "from_test_index", "delete"]
     # audit copy next to the indexer's status files
     import boto3
     body = boto3.client("s3", region_name="us-east-1").get_object(
@@ -152,7 +158,7 @@ async def test_missing_vectors_fail_the_run_and_skip_removals(aws):
     assert st["state"] == "failed" and st["error"] == "vectors_missing"
     assert st["missing"] == 1 and st["missing_urls"] == [b["url"]] and st["indexed"] == 1
     assert st["deleted"] == 0 and st["deletions_skipped"] == ["upsert_incomplete"]
-    assert prod.store[gone]["public_visibility"] is True
+    assert gone in prod.store
 
 
 async def test_failed_bulk_items_are_retried_then_block_removals(aws):
@@ -169,7 +175,21 @@ async def test_failed_bulk_items_are_retried_then_block_removals(aws):
     assert st["state"] == "failed" and st["error"] == "upsert_failed"
     assert (st["indexed"], st["failed"]) == (1, 1)
     assert len(prod.bulk_calls) == 3  # first try + 2 retries of the failed item only
-    assert prod.store[gone]["public_visibility"] is True and st["deletions_skipped"] == ["upsert_incomplete"]
+    assert gone in prod.store and st["deletions_skipped"] == ["upsert_incomplete"]
+
+
+async def test_a_failed_delete_is_reported_and_the_document_stays(aws):
+    a = line("a", "A")
+    manifest = export([a])
+    put_vectors("20260905T000000Z-000002", [vectorized(a, "a")])
+    prod = FakeAoss()
+    prod.add(vectorized(a, "a", manifest))
+    stuck = prod.add(vectorized(line("stuck", "Stuck"), "s", manifest))
+    prod.fail_ids = {prod.store[stuck]["id"]}
+
+    st = await run(publisher(prod, publish_deletion_abort_ratio=0.9))
+
+    assert (st["deleted"], st["delete_failed"]) == (0, 1) and stuck in prod.store
 
 
 async def test_deletion_guard_refuses_before_anything_is_written(aws):

@@ -78,13 +78,19 @@ class FakeAoss:
         lines = [json.loads(x) for x in body.splitlines() if x.strip()]
         self.bulk_calls.append(lines)
         items = []
-        for action, payload in zip(lines[::2], lines[1::2], strict=True):
+        pairs, it = [], iter(lines)
+        for action in it:  # a delete action carries no payload line
+            pairs.append((action, {} if "delete" in action else next(it)))
+        for action, payload in pairs:
             (op, meta), = action.items()
             business_id = payload.get("doc", payload).get("id") or self.store.get(meta.get("_id"), {}).get("id")
             if business_id in self.fail_ids:
                 items.append({op: {"status": 429, "error": {"type": "too_many_requests"}}})
                 continue
-            if op == "update":
+            if op == "delete":
+                found = self.store.pop(meta["_id"], None) is not None
+                items.append({op: {"_id": meta["_id"], "status": 200 if found else 404}})
+            elif op == "update":
                 self.store[meta["_id"]].update(payload["doc"])
                 items.append({op: {"_id": meta["_id"], "status": 200}})
             else:
