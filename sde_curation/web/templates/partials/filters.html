@@ -7,6 +7,8 @@
     <span class="f-title">Filters</span>
     <span class="muted small"><span id="f-shown">{% if active %}{{ shown }} of {{ total }}{% else %}{{ total }}{% endif %}</span></span>
     <a href="/" class="f-clear" title="Clear all filters">Clear</a>
+    <button type="button" class="f-toggle mini" aria-expanded="false" aria-label="Show or hide the filters"
+            onclick="this.setAttribute('aria-expanded', this.form.classList.toggle('open'))"></button>
   </div>
   <fieldset>
     <legend>Workflow status</legend>
