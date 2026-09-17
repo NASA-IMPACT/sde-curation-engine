@@ -10,7 +10,10 @@ matches the export:
   2. the test index itself (full _source, embeddings included) for anything S3 does not have,
      e.g. documents indexed before the S3 copies existed.
 
-A document found in neither fails the run (and no deletions happen).
+A document found in neither fails the run (and no deletions happen). Once everything is written,
+the collection's prod documents the export no longer holds are deleted — really removed, whether or
+not they carry a `version` (documents from before the indexer do not) and whether or not an earlier
+publish had hidden them.
 
 The identity, versioning, scoping and deletion rules are ports of the indexer's
 (sde-api-scrapers/web/{web_processor,scope,id_collision,deletion_guard}.py) and must not drift:
@@ -46,7 +49,10 @@ _VERSION_FIELDS = ("title", "full_text", "document_type", "division")
 VECTOR_FIELDS = ("vectorized_title", "vectorized_full_text")
 # Everything an sde-web document carries; anything else in a vectorized record is dropped.
 DOC_FIELDS = (*_PASSTHROUGH_FIELDS, *_COLLECTION_DEFAULTED_FIELDS, "id", "collection_key", "collection_name",
-              "public_visibility", "is_metadata_viewer", "executive_order_filter", "version", *VECTOR_FIELDS)
+              "public_visibility", "is_metadata_viewer", "executive_order_filter", "version", "modified_date",
+              *VECTOR_FIELDS)
+# web_processor.format_modified_date: the format sde-web already holds, in UTC
+_MODIFIED_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 _PAGE = 1000
 _LOOKUP_CHUNK = 100
@@ -103,9 +109,15 @@ def to_web_document(line: dict[str, Any], manifest: dict[str, Any]) -> dict[str,
 
 
 def scope_filter(collection_key: str) -> dict[str, Any]:
-    """This collection's visible documents. Tombstones are excluded so they are never re-deleted."""
+    """This collection's visible documents: the state scan. A hidden one the export holds again
+    reads as changed, so it is written back visible."""
     return {"bool": {"filter": [{"term": {"collection_key": collection_key}},
                                 {"term": {"public_visibility": True}}]}}
+
+
+def collection_filter(collection_key: str) -> dict[str, Any]:
+    """Every document of the collection, hidden or not, versioned or not: the scope of deletions."""
+    return {"term": {"collection_key": collection_key}}
 
 
 def assert_owned(collection_key: str, ids, boundary: str) -> None:
@@ -178,8 +190,25 @@ def scan_state(client, index: str, collection_key: str) -> dict[str, str]:
             return out
 
 
+def scan_ids(client, index: str, collection_key: str) -> list[str]:
+    """Every id the collection holds. Unlike scan_state it needs no `version`, so documents indexed
+    before the indexer existed are seen — and removed once they are no longer curated."""
+    out: list[str] = []
+    last = None
+    while True:
+        body: dict[str, Any] = {"size": _PAGE, "_source": ["id"], "query": collection_filter(collection_key),
+                                "sort": [{"id": "asc"}]}
+        if last is not None:
+            body["search_after"] = last
+        hits = client.search(index=index, body=body)["hits"]["hits"]
+        out += [i for h in hits if (i := (h.get("_source") or {}).get("id"))]
+        last = hits[-1].get("sort") if hits else None
+        if len(hits) < _PAGE or last is None:
+            return out
+
+
 def deletion_decision(candidates: list[str], state_count: int, settings: Settings) -> float:
-    """Raise when tombstoning would remove too much (web/deletion_guard.py); returns the ratio."""
+    """Raise when the deletions would remove too much (web/deletion_guard.py); returns the ratio."""
     if not candidates:
         return 0.0
     ratio = len(candidates) / state_count if state_count else 1.0
@@ -217,12 +246,14 @@ class ProdPublisher:
         self.prod = prod
         self.test = test
         self.index = settings.web_index_name
+        self.published_at = datetime.now(UTC).strftime(_MODIFIED_DATE_FORMAT)  # one stamp per publish
 
     async def _call(self, fn, *args, **kw):
         return await asyncio.to_thread(fn, *args, **kw)
 
     async def run(self, collection_key: str, run_id: str, source_run_id: str, on_progress: ProgressCb) -> dict[str, Any]:
         t0 = time.time()
+        self.published_at = datetime.now(UTC).strftime(_MODIFIED_DATE_FORMAT)
         status: dict[str, Any] = {
             "run_id": run_id, "collection_key": collection_key, "target": "prod", "index": self.index,
             "mode": "publish_vectors", "source_test_run": source_run_id, "state": "failed",
@@ -273,8 +304,10 @@ class ProdPublisher:
         needed = {i for i, v in expected.items() if state.get(i) != v}
         status["unchanged"] = len(expected) - len(needed)
         status["changed"] = len(needed)
-        candidates = [i for i in state if i not in expected]
-        status["deletion_ratio"] = round(deletion_decision(candidates, len(state), self.s), 6)
+        held = set(await self._call(scan_ids, self.prod, self.index, key)) | set(state)
+        assert_owned(key, held, "collection_scan")
+        candidates = sorted(held - set(expected))
+        status["deletion_ratio"] = round(deletion_decision(candidates, len(held), self.s), 6)
         await progress({"phase": "from_vectorized", "documents_in_export": len(expected),
                         "unchanged": status["unchanged"], "changed": len(needed), "to_remove": len(candidates)})
 
@@ -320,15 +353,17 @@ class ProdPublisher:
         status["missing"] = len(needed)
         status["missing_urls"] = sorted(urls[i] for i in needed)[:_MAX_REPORTED]
 
-        # 5. tombstones — never on top of an incomplete write
+        # 5. deletions — never on top of an incomplete write
         if status["failed"] or needed:
             if candidates:
                 status["deletions_skipped"] = ["upsert_incomplete"]
             return
         if candidates:
-            await progress({"phase": "tombstone", "to_remove": len(candidates)})
+            await progress({"phase": "delete", "to_remove": len(candidates)})
             assert_owned(key, candidates, "deletion_candidates")
-            status["deleted"] = await self._tombstone(key, candidates)
+            status["deleted"], delete_failed = await self._delete(key, candidates)
+            if delete_failed:
+                status["delete_failed"] = delete_failed
 
     async def _load_export(self, key: str, run_id: str) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
         prefix = export_prefix(key, run_id)
@@ -391,6 +426,8 @@ class ProdPublisher:
 
     def _normalize(self, rec: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
         doc = {f: rec.get(f) for f in DOC_FIELDS if f in rec}
+        # in prod "modified" is when the document went live, never the test run's stamp on the vectors
+        doc["modified_date"] = self.published_at
         # non-content fields follow the validated export, not whenever the vectors were made
         doc["collection_key"] = manifest["collection_key"]
         doc["collection_name"] = manifest.get("collection_name")
@@ -406,10 +443,9 @@ class ProdPublisher:
         })
         return [h.get("_source") or {} for h in r["hits"]["hits"]]
 
-    def _aoss_ids(self, key: str, ids: list[str], *, visible_only: bool) -> dict[str, list[str]]:
-        filters: list[dict[str, Any]] = [{"term": {"collection_key": key}}, {"terms": {"id": ids}}]
-        if visible_only:
-            filters.append({"term": {"public_visibility": True}})
+    def _aoss_ids(self, key: str, ids: list[str]) -> dict[str, list[str]]:
+        """Every copy (AOSS _id) of each business id inside the collection, hidden ones included."""
+        filters: list[dict[str, Any]] = [collection_filter(key), {"terms": {"id": ids}}]
         r = self.prod.search(index=self.index, body={"size": min(len(ids) * 5, 10_000), "_source": ["id"],
                                                      "query": {"bool": {"filter": filters}}})
         out: dict[str, list[str]] = {}
@@ -434,14 +470,14 @@ class ProdPublisher:
         return failed
 
     async def _upsert(self, key: str, docs: list[dict[str, Any]]) -> tuple[int, int]:
-        """update existing copies (matched on the business id, tombstones included so they come
+        """update existing copies (matched on the business id, hidden ones included so they come
         back), index the rest. Failed items are re-looked-up and retried, so a lost response to an
         insert becomes an update rather than a duplicate."""
         assert_owned(key, [d["id"] for d in docs], "upsert_batch")
         pending = {d["id"]: d for d in docs}
         for attempt in range(1, _BULK_ATTEMPTS + 1):
             try:
-                existing = await self._call(self._aoss_ids, key, list(pending), visible_only=False)
+                existing = await self._call(self._aoss_ids, key, list(pending))
                 lines: list[dict[str, Any]] = []
                 keys: list[str] = []
                 for i, d in pending.items():
@@ -464,18 +500,17 @@ class ProdPublisher:
                 await asyncio.sleep(2 ** attempt)
         return len(docs) - len(pending), len(pending)
 
-    async def _tombstone(self, key: str, ids: list[str]) -> int:
-        done = 0
+    async def _delete(self, key: str, ids: list[str]) -> tuple[int, int]:
+        """Really remove every copy of these business ids; returns (copies deleted, copies failed)."""
+        done = failed = 0
         for chunk in _chunks(ids, _LOOKUP_CHUNK):
-            copies = await self._call(self._aoss_ids, key, chunk, visible_only=True)
+            copies = await self._call(self._aoss_ids, key, chunk)
             aids = [a for i in chunk for a in copies.get(i, [])]
             for part in _chunks(aids, self.s.publish_bulk_docs):
-                lines: list[dict[str, Any]] = []
-                for a in part:
-                    lines += [{"update": {"_index": self.index, "_id": a}}, {"doc": {"public_visibility": False}}]
-                failed = await self._bulk(lines, part)
-                done += len(part) - len(failed)
-        return done
+                bad = await self._bulk([{"delete": {"_index": self.index, "_id": a}} for a in part], part)
+                done += len(part) - len(bad)
+                failed += len(bad)
+        return done, failed
 
 
 class _Batch:
