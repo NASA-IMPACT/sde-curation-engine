@@ -195,10 +195,13 @@ async def test_manual_status_cannot_skip_promote(crawler_client):
     assert r.status_code == 409 and "delta URLs" in r.text
 
 
-async def test_bad_step_param(crawler_client):
+async def test_delete_removes_files_and_bad_step_param(crawler_client):
     await setup(crawler_client)
-    assert (crawler_client.app.state.settings.collections_dir / "ex.org").is_dir()
+    d = crawler_client.app.state.settings.collections_dir / "ex.org"
+    assert d.is_dir()
     assert (await crawler_client.get("/collections/ex.org?step=bogus")).status_code == 200
+    assert (await crawler_client.delete("/api/collections/ex.org")).status_code == 204
+    assert not d.exists()
 
 
 async def test_dashboard_form_errors_render_banner(client):

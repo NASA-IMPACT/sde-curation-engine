@@ -38,10 +38,10 @@ def export_lines(curated: list[CuratedUrl]) -> Iterator[ExportLine]:
 
 def build_manifest(c: Collection, run_id: str, count: int, target: str) -> ExportManifest:
     return ExportManifest(
-        collection_key=c.collection_id,
+        collection_key=c.collection_key,
         run_id=run_id,
         document_count=count,
-        collection_name=c.name,
+        collection_name=c.collection_name,
         division=c.division,
         document_type=c.document_type,
         target=target,

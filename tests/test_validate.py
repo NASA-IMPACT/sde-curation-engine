@@ -90,10 +90,10 @@ async def test_gate_falls_back_to_second_pass_then_prod(index_client, monkeypatc
     assert (await c.post("/api/collections/ex.org/index?target=prod")).status_code == 409  # no prod endpoint
     settings.opensearch_endpoint_prod = "https://prod.example.aoss.amazonaws.com"
     test_run = runs[0]["run_id"]
-    prefix = f"curated_collections/ex.org/{test_run}"
+    prefix = f"curated_collections/ex_org/{test_run}"
     manifest = json.loads(c.s3.get_object(Bucket="cosmos-idx", Key=f"{prefix}/manifest.json")["Body"].read())
     lines = [json.loads(x) for x in c.s3.get_object(Bucket="cosmos-idx", Key=f"{prefix}/documents.jsonl")["Body"].read().splitlines()]
-    c.s3.put_object(Bucket="cosmos-idx", Key=f"vectorized/ex.org/{test_run}/batch_0001.jsonl", Body="\n".join(
+    c.s3.put_object(Bucket="cosmos-idx", Key=f"vectorized/ex_org/{test_run}/batch_0001.jsonl", Body="\n".join(
         json.dumps({**to_web_document(ln, manifest), "vectorized_title": [1], "vectorized_full_text": []}) for ln in lines).encode())
     prod = FakeAoss()
     c.app.state.jobs._publisher = lambda: ProdPublisher(settings, s3=S3("cosmos-idx", client=c.s3), prod=prod)
@@ -252,10 +252,10 @@ async def _publishable(c):
     settings = c.app.state.settings
     settings.opensearch_endpoint_prod = "https://prod.example.aoss.amazonaws.com"
     test_run = (await c.get("/api/collections/ex.org/index_runs")).json()[0]["run_id"]
-    prefix = f"curated_collections/ex.org/{test_run}"
+    prefix = f"curated_collections/ex_org/{test_run}"
     manifest = json.loads(c.s3.get_object(Bucket="cosmos-idx", Key=f"{prefix}/manifest.json")["Body"].read())
     lines = [json.loads(x) for x in c.s3.get_object(Bucket="cosmos-idx", Key=f"{prefix}/documents.jsonl")["Body"].read().splitlines()]
-    c.s3.put_object(Bucket="cosmos-idx", Key=f"vectorized/ex.org/{test_run}/batch_0001.jsonl", Body="\n".join(
+    c.s3.put_object(Bucket="cosmos-idx", Key=f"vectorized/ex_org/{test_run}/batch_0001.jsonl", Body="\n".join(
         json.dumps({**to_web_document(ln, manifest), "vectorized_title": [1], "vectorized_full_text": []}) for ln in lines).encode())
     prod = FakeAoss()
     c.app.state.jobs._publisher = lambda: ProdPublisher(settings, s3=S3("cosmos-idx", client=c.s3), prod=prod)

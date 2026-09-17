@@ -53,6 +53,7 @@ from ..models import (
     Division,
     DocumentType,
     EditedBy,
+    IndexKeyUpdate,
     IndexRun,
     JobRun,
     PatternCreate,
@@ -64,7 +65,7 @@ from ..models import (
     utcnow,
 )
 from ..notify import Notifier
-from ..store import write_collection_yaml, write_patterns_yaml
+from ..store import remove_collection_files, write_collection_yaml, write_patterns_yaml
 from . import auth
 
 _HERE = Path(__file__).parent
@@ -1021,8 +1022,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_get(request: Request, collection_id: str):
         return await must_get(request, collection_id)
 
-    # Collections cannot be deleted (no DELETE route): a collection's rules, curated URLs and
-    # history are the record of what was indexed. Older audit rows may still name deleted ones.
+    @app.delete("/api/collections/{collection_id}", response_model=None)
+    async def api_delete(request: Request, collection_id: str):
+        """Admin only, and permanent: the collection, its crawl, rules, curated URLs, runs and history
+        go (ON DELETE CASCADE), along with its YAML files. The audit row naming it stays — the ledger
+        keeps rows of deleted collections — and nothing is removed from S3 or any index."""
+        require_admin(request)
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        await audit(request, "collection.delete", collection_id, f"{c.name} ← {c.seed_url} (status {c.status})")
+        if not await db(request).delete_collection(collection_id):
+            raise HTTPException(404, "not found")
+        remove_collection_files(settings.collections_dir, collection_id)
+        bus(request).publish("collection_deleted", {"collection_id": collection_id})
+        if _is_htmx(request):
+            return JSONResponse(None, status_code=200, headers={"HX-Redirect": "/"})
+        return Response(status_code=204)
 
     @app.post("/api/collections/{collection_id}/status", response_model=None)
     async def api_set_status(request: Request, collection_id: str, body: StatusChange):
@@ -1390,6 +1405,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, str(e)) from e
         await audit(request, "revalidate", collection_id, f"{target} run {last.run_id}")
         return htmx_done(request, job)
+
+    @app.post("/api/collections/{collection_id}/index-key", response_model=None)
+    async def api_set_index_key(request: Request, collection_id: str, body: IndexKeyUpdate):
+        """Say by hand which OpenSearch collection this one is indexed as, for a collection whose
+        folder does not follow from its current name. The next test run exports under it."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        name = (body.index_name or "").strip() or (c.index_name if body.index_key == c.index_key else None) or c.name
+        await db(request).set_index_key(collection_id, body.index_key, name)
+        await audit(request, "index.key", collection_id, f"set by hand: '{body.index_key}' ({name})")
+        c = await must_get(request, collection_id)
+        emit_collection(request, c)
+        return htmx_done(request, c)
 
     @app.get("/api/collections/{collection_id}/index_runs")
     async def api_index_runs(request: Request, collection_id: str):

@@ -185,6 +185,18 @@ def collection_id_from_seed(seed: str) -> str:
     return _SLUG_RE.sub("_", apex_host(normalize_seed(seed))).strip("._") or "collection"
 
 
+def collection_key_from_name(name: str) -> str:
+    """The `collection_key` the web index uses for a collection: COSMOS derives its `config_folder`
+    from the collection name with `slugify(name, separator="_")`
+    (sde_collections/models/collection.py::_compute_config_folder_name), and the indexer keys every
+    document on it — so the same rule has to hold here, or a collection is indexed twice.
+
+    "NASA Applied Sciences" -> "nasa_applied_sciences"."""
+    from slugify import slugify
+
+    return slugify(name, separator="_")
+
+
 def crawl_file_stem(seed: str) -> str:
     """Name the crawler gives a seed's output files: scraped_collections/<stem>.json,
     failure_logs/<stem>_failures.jsonl and failure_logs/<stem>_failures_summary.json.
@@ -239,10 +251,26 @@ class Collection(BaseModel):
     updated_at: datetime = Field(default_factory=utcnow)
     last_run_id: str | None = None  # most recent index run (test or prod)
     created_by: str | None = None  # username; None on rows that predate provenance
+    # The OpenSearch collection this one is indexed as. Normally None: the key follows the name by
+    # the COSMOS rule and the first index run pins what it used. Set by hand when a collection's
+    # folder does not follow from its current name.
+    index_key: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9._-]+$")
+    index_name: str | None = None
     # counters kept on the row for a cheap dashboard
     dump_count: int = 0
     delta_count: int = 0
     curated_count: int = 0
+
+    @property
+    def collection_key(self) -> str:
+        """What the export, the indexer, validation and publish key on: the key COSMOS gives the
+        collection (its name, slugified). `collection_id` is the engine's own seed-derived id and is
+        only a fallback for a name that slugifies to nothing."""
+        return self.index_key or collection_key_from_name(self.name) or self.collection_id
+
+    @property
+    def collection_name(self) -> str:
+        return self.index_name or self.name
 
     @property
     def prod_not_validated(self) -> bool:
@@ -255,6 +283,13 @@ class Collection(BaseModel):
         """The latest test index run failed, never finished, or did not pass validation (and no test
         index / validate job is on it now). Set by the web layer; cleared only by a test run that passes."""
         return self._test_unvalidated
+
+
+class IndexKeyUpdate(BaseModel):
+    """Set by hand which OpenSearch collection this one is indexed as."""
+
+    index_key: str = Field(min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9._-]+$")
+    index_name: str | None = Field(default=None, max_length=200)
 
 
 class StatusHistory(BaseModel):

@@ -204,7 +204,7 @@ bucket = os.environ["COSMOS_INDEX_BUCKET"]
 s3 = boto3.client("s3", region_name="us-east-1", endpoint_url=os.environ.get("MOTO_ENDPOINT"))
 m = json.loads(s3.get_object(Bucket=bucket, Key=f"curated_collections/{key}/{run}/manifest.json")["Body"].read())
 docs = s3.get_object(Bucket=bucket, Key=f"curated_collections/{key}/{run}/documents.jsonl")["Body"].read().decode().splitlines()
-fail = key == "fail.org"
+fail = key == "fail_org"  # collection "fail.org" → key "fail_org"
 status = {"run_id": run, "collection_key": key, "target": target, "index": "sde-web-subset",
           "state": "failed" if fail else "succeeded", "documents_in_export": m["document_count"], "changed": len(docs),
           "indexed": 0 if fail else len(docs), "failed": 0, "deleted": 0, "error": "export_incomplete" if fail else None}
@@ -255,8 +255,9 @@ async def index_client(tmp_path, monkeypatch):
     server.stop()
 
 
-async def prepare(c, cid="ex.org"):
-    await c.post("/api/collections", json={"seed_url": f"https://{cid}", "name": cid, "max_pages": 10, "division": "Heliophysics"})
+async def prepare(c, cid="ex.org", *, create=True):
+    if create:
+        await c.post("/api/collections", json={"seed_url": f"https://{cid}", "name": cid, "max_pages": 10, "division": "Heliophysics"})
     await c.post(f"/api/collections/{cid}/scrape"); await wait_job(c, cid)
     await c.post(f"/api/collections/{cid}/recompute")
     await c.post(f"/api/collections/{cid}/patterns", json={"type": "exclude", "match": "*/p1"})

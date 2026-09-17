@@ -205,8 +205,9 @@ broken webhook never blocks a transition (the error is logged).
 
 ## 13. Clean up
 
-Collections cannot be deleted from the engine (no button, no API). The exported files in the
-hand-off bucket and the documents already in the dev index follow the indexer's own lifecycle. If you want the test documents out of the shared dev index, re-scrape
+An admin can delete a collection (*Advanced* › **Delete collection**, or `DELETE
+/api/collections/{id}`); that removes everything the engine holds for it and nothing else. The
+exported files in the hand-off bucket and the documents already in the dev index follow the indexer's own lifecycle. If you want the test documents out of the shared dev index, re-scrape
 with a cap of 1 and re-index, or ask the indexer team.
 
 ## Pass/fail sheet

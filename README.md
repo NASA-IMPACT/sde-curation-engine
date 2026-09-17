@@ -76,7 +76,7 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
    | 6 Live | **Index to prod** (only after a validated test run), prod run summary |
 
    A running job shows a spinner, live doc counts and a **Cancel** button. *Advanced* (collapsed)
-   holds Re-scrape and a manual status override. Collections cannot be deleted.
+   holds Re-scrape, a manual status override, the index key, and — for admins — Delete collection.
 3. **User manual** (`/manual`, also in the ☰ menu): the illustrated curator's handbook — quick path,
    screen-by-screen walkthrough, rule semantics, jobs, parallel work, quirks. Template
    `sde_curation/web/templates/manual.html`, screenshots in `static/manual/`.
@@ -191,6 +191,14 @@ The Curate tab counts them ("N kept") and explains why. Dumps ingested before th
 no failures log, so their next recompute treats absence as before (removed).
 
 ### Indexing (Phase 5)
+`{key}` is the collection's `collection_key` in the web index: **the collection name, slugified**
+(`slugify(name, separator="_")` — "NASA Applied Sciences" → `nasa_applied_sciences`), the same rule
+COSMOS derives its `config_folder` with, because the indexer keys every document on it. The
+engine's own `collection_id` (from the seed host) is never used as the key. The first index run
+pins the key it used on the collection, so renaming it later cannot move it to a second
+collection; `POST …/index-key` sets it by hand when a collection's folder does not follow from its
+current name.
+
 **Index to test** exports the curated, non-excluded URLs, each with the text it was approved
 with, as the indexer's contract —
 `s3://$COSMOS_INDEX_BUCKET/curated_collections/{key}/{run_id}/documents.jsonl` then
@@ -390,7 +398,9 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 |---|---|
 | `GET /events` | SSE stream: `collection`, `collection_created` |
 | `POST /api/collections` | create `{seed_url, name, division?, document_type?, max_pages?}` |
-| `GET /api/collections/{id}` | read (collections cannot be deleted) |
+| `GET /api/collections/{id}` | read |
+| `DELETE /api/collections/{id}` | delete the collection and all its data (admin only; 409 if busy) |
+| `POST …/index-key` | `{index_key, index_name?}` — index this collection as another `collection_key` |
 | `POST …/status` | `{status, note?, force?}` — transition + data rules enforced |
 | `GET …/history`, `…/jobs`, `…/dump` | audit trail, job runs, ingested URLs |
 | `POST …/scrape` | run the crawl → job (202; 409 if busy) |

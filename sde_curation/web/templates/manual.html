@@ -73,7 +73,7 @@
     <li><b>Index to prod</b> and wait for prod validation to pass. The collection is Live.</li>
   </ol>
 </div>
-<p>Signing in: deployed environments require a login. Admins add accounts at <code>/users</code>, everyone changes their own password at <code>/account</code>. Curators can do everything except manage users. Nobody can delete a collection: its rules, curated URLs and history are the record of what was indexed. Every action is recorded under your name.</p>
+<p>Signing in: deployed environments require a login. Admins add accounts at <code>/users</code>, everyone changes their own password at <code>/account</code>. Curators can do everything except manage users and delete collections. Every action is recorded under your name.</p>
 
 <h2 id="walkthrough">Walkthrough with screens</h2>
 <p>The same path, one screen at a time, with what to look at on each.</p>
@@ -160,7 +160,7 @@
   <dt>Rules</dt><dd>Every rule in force for this collection, including exact-URL rules from per-row edits and accepted AI suggestions, each with its source (AI, AI edited, SME, global list).</dd>
 </dl>
 <h3>The pipeline and the tabs</h3>
-<p>The six-step pipeline is always at the top. A collection opens at its current step, and clicking a step shows that step's panel: what it did, its actions, details, the last job, and Advanced (Re-scrape, manual status override). Under steps <b>3 Curating</b> and <b>4 Curated</b> a row of tabs appears, in the order you work: look at what the crawl found, curate, check what will change, check what was approved.</p>
+<p>The six-step pipeline is always at the top. A collection opens at its current step, and clicking a step shows that step's panel: what it did, its actions, details, the last job, and Advanced (Re-scrape, manual status override, index key, Delete for admins). Under steps <b>3 Curating</b> and <b>4 Curated</b> a row of tabs appears, in the order you work: look at what the crawl found, curate, check what will change, check what was approved.</p>
 <dl class="defs">
   <dt>Overview</dt><dd>The step's panel, details and last job.</dd>
   <dt>Dump URLs</dt><dd>Every URL the last crawl found, raw: title, content type, depth, text size and state. Start curating lands here, so you see the whole crawl before deciding anything.</dd>
@@ -292,7 +292,7 @@
   <li><b>Prod indexing is gated on the latest test run.</b> A new test run after a passed one resets the gate until it passes too.</li>
   <li><b>CSV export follows your filters.</b> The download on each URL tab contains exactly the rows you are looking at.</li>
   <li><b>Old links still work.</b> Links to the previous curate page, and <code>set=deltas</code> links, redirect into the Delta URLs tab.</li>
-  <li><b>Collections cannot be deleted.</b> There is no delete button or API; a collection you no longer curate simply stays at its last status.</li>
+  <li><b>Delete is admin only and permanent.</b> It removes the collection, its crawl, its rules, its runs and its history from the engine. The audit ledger keeps the row naming it, and nothing is removed from S3 or the index — a deleted collection's documents stay indexed.</li>
 </ul>
 
 <h2 id="glossary">Statuses and words</h2>

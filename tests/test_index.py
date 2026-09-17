@@ -49,7 +49,7 @@ def test_export_lines_and_manifest(tmp_path):
         n = write_jsonl(iter(lines), fh)
     assert n == 2 and p.read_text().count("\n") == 2
     m = build_manifest(COLL, "r1", n, "test")
-    assert m.collection_key == "ex.org" and m.document_count == 2 and m.division == "Heliophysics"
+    assert m.collection_key == "ex" and m.document_count == 2 and m.division == "Heliophysics"  # name "Ex"
     assert ExportManifest.model_validate_json(m.model_dump_json())
 
 
@@ -67,16 +67,16 @@ def test_export_matches_indexer_contract(monkeypatch):
             import io
             return {"Body": io.BytesIO(json.dumps(m).encode())}
 
-    manifest = load_manifest(FakeS3(), "b", "ex.org", "r1")
+    manifest = load_manifest(FakeS3(), "b", "ex", "r1")
     for ln in export_lines(curated()):
         doc = to_web_document(ln.model_dump(exclude_none=True), manifest)
-        assert doc["id"] == make_web_id("ex.org", ln.url) and doc["public_visibility"] is True
+        assert doc["id"] == make_web_id("ex", ln.url) and doc["public_visibility"] is True
         assert doc["division"] in ("Earth Science", "Heliophysics")  # per-URL or manifest default
 
 
 def test_indexer_command_matches_task_definition():
     assert indexer_command(COLL, "r1", "test") == [
-        "python3", "api_scraper.py", "--source", "WEB_COSMOS", "--collection", "ex.org", "--run-id", "r1", "--target", "test",
+        "python3", "api_scraper.py", "--source", "WEB_COSMOS", "--collection", "ex", "--run-id", "r1", "--target", "test",
     ]
     assert mint_run_id()[8] == "T" and len(mint_run_id()) == 23
 
@@ -157,11 +157,11 @@ async def test_index_to_test_end_to_end(index_client):
     assert job["progress"]["exported"] == 7 and job["progress"]["status"]["state"] == "succeeded"
     assert job["progress"]["validation"]["count_matches"] is True  # after the gate's second pass
     # export written in contract order and shape
-    keys = [o["Key"] for o in c.s3.list_objects_v2(Bucket="cosmos-idx", Prefix=f"curated_collections/ex.org/{run_id}/")["Contents"]]
-    assert sorted(keys) == [f"curated_collections/ex.org/{run_id}/documents.jsonl", f"curated_collections/ex.org/{run_id}/manifest.json"]
-    m = json.loads(c.s3.get_object(Bucket="cosmos-idx", Key=f"curated_collections/ex.org/{run_id}/manifest.json")["Body"].read())
-    assert m["document_count"] == 7 and m["collection_key"] == "ex.org" and m["division"] == "Heliophysics"
-    first = json.loads(c.s3.get_object(Bucket="cosmos-idx", Key=f"curated_collections/ex.org/{run_id}/documents.jsonl")["Body"].read().splitlines()[0])
+    keys = [o["Key"] for o in c.s3.list_objects_v2(Bucket="cosmos-idx", Prefix=f"curated_collections/ex_org/{run_id}/")["Contents"]]
+    assert sorted(keys) == [f"curated_collections/ex_org/{run_id}/documents.jsonl", f"curated_collections/ex_org/{run_id}/manifest.json"]
+    m = json.loads(c.s3.get_object(Bucket="cosmos-idx", Key=f"curated_collections/ex_org/{run_id}/manifest.json")["Body"].read())
+    assert m["document_count"] == 7 and m["collection_key"] == "ex_org" and m["division"] == "Heliophysics"
+    first = json.loads(c.s3.get_object(Bucket="cosmos-idx", Key=f"curated_collections/ex_org/{run_id}/documents.jsonl")["Body"].read().splitlines()[0])
     assert set(first) <= {"url", "title", "full_text", "document_type", "division"} and first["url"] == "https://ex.org/p2"
     # collection advanced; run recorded
     col = (await c.get("/api/collections/ex.org")).json()
