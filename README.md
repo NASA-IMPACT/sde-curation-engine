@@ -239,8 +239,10 @@ latest validated test run and, for every document, the newest record at the same
 `s3://COSMOS_INDEX_BUCKET/vectorized/<key>/*/` (the indexer only vectorizes changed documents, so
 they are spread over runs), falling back to the test index for anything S3 lacks. It upserts them
 into `OPENSEARCH_ENDPOINT_PROD` / `WEB_INDEX_NAME` (existing copies updated in place, never
-duplicated), then tombstones (`public_visibility: false`) the collection's prod documents that are no
-longer curated. The indexer's guards are ported and checked before anything is written, and removals
+duplicated), stamped `modified_date` = the publish time (`2024-08-22 21:08:32` format, UTC, one stamp per publish —
+never the date the test run put on the vectors; unchanged documents are not rewritten and keep theirs), then **deletes** the collection's prod documents that are no
+longer curated: a real removal, of every document under the `collection_key` the export does not hold,
+including ones from before the indexer (no `version`) and ones an earlier publish had hidden. The indexer's guards are ported and checked before anything is written, and removals
 never follow a failed or incomplete write. The engine then runs **the same gate against prod**
 (delay, direct poll until visible or `VALIDATION_TIMEOUT_S`, counts equal and titles ≥ threshold):
 pass → `live`; fail → back to `config_generated` (the written documents stay in prod). Prod has no

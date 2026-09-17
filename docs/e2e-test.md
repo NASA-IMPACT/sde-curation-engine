@@ -154,7 +154,7 @@ the index simply had not refreshed yet.
 
 Click **Index to prod**, confirm. An `index_prod` job publishes the validated test run's vectors to
 the prod target (on dev: the same collection). No indexer task runs. The job moves through
-`preflight → from_vectorized → (from_test_index) → (tombstone) → validating`. When it finishes, the
+`preflight → from_vectorized → (from_test_index) → (delete) → validating`. When it finishes, the
 page shows a **Prod run** line from test run `<id>` and **Published** `N written (N from S3 vectors ·
 0 from the test index) · … unchanged · … removed`, and a **Validation** row (`pass` via direct, N / N
 visible in prod). Only once that passes does status become **Live**, and step 6 shows

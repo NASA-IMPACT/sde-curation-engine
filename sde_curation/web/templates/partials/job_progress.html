@@ -14,7 +14,7 @@
   {%- elif p.phase == 'preflight' %}checking the prod index{% if p.source_test_run %} · publishing test run {{ p.source_test_run }}{% endif %}
   {%- elif p.phase == 'from_vectorized' %}publishing S3 vectors · {{ p.indexed or 0 }}/{{ p.changed or 0 }} written{% if p.unchanged %} · {{ p.unchanged }} unchanged{% endif %}{% if p.failed %} · {{ p.failed }} failed{% endif %}
   {%- elif p.phase == 'from_test_index' %}copying {{ p.remaining }} docs without S3 vectors from the test index · {{ p.indexed or 0 }} written
-  {%- elif p.phase == 'tombstone' %}hiding {{ p.to_remove }} removed docs in prod
+  {%- elif p.phase == 'delete' %}deleting {{ p.to_remove }} removed docs from prod
   {%- elif p.phase == 'validating' %}validating the {{ 'prod' if job.kind in ('index_prod', 'validate_prod') else 'test' }} index{% if p.validation_attempt %} · {{ p.indexed_so_far }}/{{ p.expected_count }} visible so far{% if p.validation_waiting_s %} · waiting {{ p.validation_waiting_s }}s for OpenSearch to refresh{% endif %}{% endif %}
   {%- elif p.phase == 'done' %}{% if p.validation_ok is defined %}validation {{ 'passed' if p.validation_ok else 'failed' }}{% else %}validating the {{ 'prod' if job.kind in ('index_prod', 'validate_prod') else 'test' }} index{% endif %}
   {%- elif p.llm_phase == 'titles' %}regenerating duplicate titles · {{ p.titles_done or 0 }}/{{ p.titles_total or '?' }} URLs{% if p.titles_inflight %} · {{ p.titles_inflight }} in flight{% endif %}{% if p.titles_retrying %} · {{ p.titles_retrying }} to retry{% endif %}{% if p.titles_failed %} · {{ p.titles_failed }} failed{% endif %}
