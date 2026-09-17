@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..config import Settings
-from ..models import Collection
+from ..models import Collection, crawl_file_stem
 
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -87,10 +87,11 @@ class ScrapeBackend(Protocol):
 
 
 def build_job(collection: Collection) -> dict[str, Any]:
-    """Job JSON in the shape sde_crawler.job.merge_job expects."""
+    """Job JSON in the shape sde_crawler.job.merge_job expects. The crawler names its output files
+    after collection_id when one is given, so send the seed-derived stem the engine looks them up by."""
     return {
         "seed": collection.seed_url,
-        "collection_id": collection.collection_id,
+        "collection_id": crawl_file_stem(collection.seed_url),
         "max_pages": collection.max_pages,
     }
 
@@ -174,17 +175,19 @@ class LocalSubprocessScraper:
         self.root = settings.crawler_root
         self.python = settings.resolved_crawler_python
 
-    def _paths(self, collection_id: str) -> dict[str, Path]:
+    def _paths(self, collection: Collection) -> dict[str, Path]:
+        stem = crawl_file_stem(collection.seed_url)
         return {
-            "job": self.s.data_dir / "scrape_jobs" / f"{collection_id}.json",
-            "log": self.root / "logs" / "jobs" / f"{collection_id}.log",
-            "docs": self.root / "output" / "collections" / f"{collection_id}.json",
-            "failures": self.root / "logs" / "collections" / f"{collection_id}_failures.jsonl",
-            "summary": self.root / "logs" / "collections" / f"{collection_id}_failures_summary.json",
+            # run.py names the job log after the job file
+            "job": self.s.data_dir / "scrape_jobs" / f"{stem}.json",
+            "log": self.root / "logs" / "jobs" / f"{stem}.log",
+            "docs": self.root / "output" / "collections" / f"{stem}.json",
+            "failures": self.root / "logs" / "collections" / f"{stem}_failures.jsonl",
+            "summary": self.root / "logs" / "collections" / f"{stem}_failures_summary.json",
         }
 
     async def existing(self, collection: Collection) -> ExistingCrawl | None:
-        p = self._paths(collection.collection_id)["docs"]
+        p = self._paths(collection)["docs"]
         if not p.is_file():
             return None
         st = p.stat()
@@ -195,7 +198,7 @@ class LocalSubprocessScraper:
         if ex is None:
             raise ScrapeError("no existing crawl output to load — run the crawler")
         await on_progress({"reused": True})
-        p = self._paths(collection.collection_id)
+        p = self._paths(collection)
         summary: dict[str, Any] = {}
         if p["summary"].is_file():
             summary = json.loads(p["summary"].read_text(encoding="utf-8"))
@@ -208,7 +211,7 @@ class LocalSubprocessScraper:
         if not self.python.is_file():
             raise ScrapeError(f"crawler python not found: {self.python} (CRAWLER_PYTHON)")
 
-        p = self._paths(collection.collection_id)
+        p = self._paths(collection)
         p["job"].parent.mkdir(parents=True, exist_ok=True)
         p["job"].write_text(json.dumps(build_job(collection), indent=2), encoding="utf-8")
         # run.py truncates the log on start; remove stale outputs so we never ingest an old crawl
@@ -353,7 +356,7 @@ class SsmRemoteScraper:
         self.remote_root = str(Path(settings.crawler_remote_inbox).parent.parent)
 
     def remote_script(self, job: dict[str, Any]) -> str:
-        cid = job["collection_id"]
+        cid = job["collection_id"]  # the crawl file stem (build_job); run.py names the job log after this file
         inbox = self.s.crawler_remote_inbox
         return (
             "set -euo pipefail\n"
@@ -411,17 +414,23 @@ class SsmRemoteScraper:
         prefix = self.s.crawler_s3_prefix.strip("/")
         return f"{prefix}/{rel}" if prefix else rel
 
-    def _docs_key(self, cid: str) -> str:
-        return self._key(f"scraped_collections/{cid}.json")
+    def _crawl_keys(self, collection: Collection) -> dict[str, str]:
+        """S3 keys of the crawler's output for this collection's seed."""
+        stem = crawl_file_stem(collection.seed_url)
+        return {
+            "docs": self._key(f"scraped_collections/{stem}.json"),
+            "failures": self._key(f"failure_logs/{stem}_failures.jsonl"),
+            "summary": self._key(f"failure_logs/{stem}_failures_summary.json"),
+        }
 
     async def existing(self, collection: Collection) -> ExistingCrawl | None:
-        cid = collection.collection_id
-        key = self._docs_key(cid)
+        keys = self._crawl_keys(collection)
+        key = keys["docs"]
         try:
             r = await asyncio.to_thread(self.s3.head_object, Bucket=self.s.crawler_s3_bucket, Key=key)
         except self.s3.exceptions.ClientError:
             return None
-        summary = await self._head(self._key(f"failure_logs/{cid}_failures_summary.json"))
+        summary = await self._head(keys["summary"])
         return ExistingCrawl(modified=r["LastModified"], where=f"s3://{self.s.crawler_s3_bucket}/{key}",
                              size=r.get("ContentLength"),
                              complete=crawl_complete(r["LastModified"], summary[1] if summary else None))
@@ -437,13 +446,13 @@ class SsmRemoteScraper:
                 "collection, or died mid-run. Wait for it to finish, or run the crawler."
             )
         await on_progress({"reused": True})
-        result = await self._download(collection.collection_id)
+        result = await self._download(collection)
         result.external_ref, result.crawled_at = "reused", ex.modified
         return result
 
-    async def _download(self, cid: str) -> ScrapeResult:
-        docs_key, summary_key = self._docs_key(cid), self._key(f"failure_logs/{cid}_failures_summary.json")
-        failures_key = self._key(f"failure_logs/{cid}_failures.jsonl")
+    async def _download(self, collection: Collection) -> ScrapeResult:
+        cid, keys = collection.collection_id, self._crawl_keys(collection)
+        docs_key, summary_key, failures_key = keys["docs"], keys["summary"], keys["failures"]
         local = self.s.data_dir / "scrapes" / f"{cid}.json"
         local_failures = local.with_name(f"{cid}_failures.jsonl")
         local.parent.mkdir(parents=True, exist_ok=True)
@@ -473,8 +482,8 @@ class SsmRemoteScraper:
         return parse_poll(out) if status == "Success" else None
 
     async def run(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult:
-        cid = collection.collection_id
-        docs_key = self._docs_key(cid)
+        cid = crawl_file_stem(collection.seed_url)  # inbox job file and job log name
+        docs_key = self._crawl_keys(collection)["docs"]
         before = await self._head(docs_key)
         # S3 LastModified and the remote log mtime have 1-second resolution: floor our own
         # timestamp so a write landing in the same second still counts.
@@ -543,7 +552,7 @@ class SsmRemoteScraper:
                     f"remote crawl stalled: no log activity for {stalled / 3600:.1f}h"
                 )
 
-        result = await self._download(cid)
+        result = await self._download(collection)
         result.external_ref = cmd_id or "attached"
         return result
 

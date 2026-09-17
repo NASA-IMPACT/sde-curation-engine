@@ -23,7 +23,8 @@ async def test_suggestions_bulk_by_type_and_all(crawler_client):
     assert r.status_code == 200 and r.json()["decided"] == 1
     pats = (await c.get("/api/collections/ex.org/patterns")).json()
     assert [p["type"] for p in pats] == ["exclude"]
-    assert (await c.get("/api/collections/ex.org/delta?q=p9")).json()["items"][0]["excluded"] is True
+    assert (await c.get("/api/collections/ex.org/delta?q=p9")).json()["total"] == 0  # the rule decides it: no delta
+    assert (await c.get("/api/collections/ex.org/dump?q=p9")).json()["items"][0]["excluded"] is True
     left = (await c.get("/api/collections/ex.org/suggestions")).json()
     assert left == []
     assert (await c.post("/api/collections/ex.org/suggestions/bulk", json={"decision": "accept", "type": "exclude"})).status_code == 409
@@ -116,3 +117,31 @@ async def test_pattern_batch_setting(tmp_path):
         sugs = (await c.get("/api/collections/ex.org/suggestions")).json()
         assert len(sugs) == 2 and {s["type"] for s in sugs} == {"exclude"}  # one exact exclude per batch
         assert "56 URLs in 2 calls" in (await c.get("/collections/ex.org?tab=curate")).text
+
+
+async def test_curate_lists_expand_to_their_own_paginated_page(crawler_client):
+    c = crawler_client
+    await setup(c)
+    db = c.app.state.db
+    await db.add_pattern_suggestions("ex.org", [{"type": "exclude", "match": f"*/s{i:02d}*", "matches": 0} for i in range(60)])
+    await db.set_delta_ai("ex.org", [{"url": f"https://ex.org/p{i}", "title": f"AI {i}"} for i in (1, 2, 3)])
+    # collapsed: both lists in place, capped, with Expand; promote is on the page
+    page = (await c.get("/collections/ex.org?tab=curate")).text
+    assert page.count("⤢ Expand</a>") == 3  # two headers + the "showing the first 50 of 60" note
+    assert "Showing the first 50 of 60 suggestions" in page and page.count("/suggestions/") >= 50 * 2
+    assert 'id="promote"' in page and "⤡ Collapse" not in page
+    # expanded exclusions: only that card, no scroll box, paginated, the other cards gone
+    page = (await c.get("/collections/ex.org?tab=curate&focus=exclusions&per=25&page=2")).text
+    assert 'id="exclusions"' in page and 'id="metadata"' not in page and 'id="promote"' not in page
+    assert "⤡ Collapse" in page and 'href="/collections/ex.org?tab=curate#exclusions"' in page
+    assert "26–50 of 60" in page and "page 2 / 3" in page and 'class="sugg-page"' in page
+    assert "*/s25*" in page and "*/s24*" not in page and "*/s50*" not in page
+    assert "focus=exclusions&per=25&page=3" in page
+    # past the end (rows were decided meanwhile): the last page
+    page = (await c.get("/collections/ex.org?tab=curate&focus=exclusions&per=25&page=9")).text
+    assert "51–60 of 60" in page and "page 3 / 3" in page
+    # expanded metadata
+    page = (await c.get("/collections/ex.org?tab=curate&focus=metadata")).text
+    assert 'id="metadata"' in page and 'id="exclusions"' not in page and "1–3 of 3" in page and "AI: AI 2" in page
+    # an unknown focus is the whole page
+    assert 'id="promote"' in (await c.get("/collections/ex.org?tab=curate&focus=bogus")).text

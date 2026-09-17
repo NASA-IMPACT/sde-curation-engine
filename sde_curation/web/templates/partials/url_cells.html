@@ -12,7 +12,7 @@
   {% if r.excluded %}<span class="kind k-excluded" title="{{ why.excluded or 'excluded' }}">excluded</span>{% else %}<span class="kind k-included" title="{{ why.excluded or 'included: no exclude rule matches' }}">included</span>{% endif %}
   <button class="mini {% if r.excluded %}ok{% endif %}" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/urls" hx-ext="json-enc"
           hx-vals='{{ {"url": r.url, "type": ("include" if r.excluded else "exclude")}|tojson }}' hx-swap="none"
-          aria-label="{{ 'force include' if r.excluded else 'exclude' }}" title="{{ 'excluded — click to force include (exact-URL include rule)' if r.excluded else 'included — click to exclude (exact-URL exclude rule)' }}">{{ '✓ include' if r.excluded else '✗ exclude' }}</button>
+          aria-label="{{ 'force include' if r.excluded else 'exclude' }}" title="{{ 'excluded — click to force include (exact-URL include rule: shows up under Delta URLs to promote)' if r.excluded else 'included — click to exclude (exact-URL exclude rule: takes effect at once, never waits under Delta URLs)' }}">{{ '✓ include' if r.excluded else '✗ exclude' }}</button>
 {%- endmacro %}
 
 {% macro title_cell(r, why, editable) -%}

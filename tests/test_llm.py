@@ -161,7 +161,8 @@ async def test_pattern_suggestions_flow(crawler_client):
     assert r.status_code == 200
     pats = (await c.get("/api/collections/ex.org/patterns")).json()
     assert len(pats) == 1 and pats[0]["type"] == "exclude" and pats[0]["matches"] == 1
-    d = (await c.get("/api/collections/ex.org/delta?q=p9")).json()["items"][0]
+    assert (await c.get("/api/collections/ex.org/delta?q=p9")).json()["total"] == 0  # decided by the rule, not a delta
+    d = (await c.get("/api/collections/ex.org/dump?q=p9")).json()["items"][0]
     assert d["excluded"] is True
     assert (await c.post(f"/api/collections/ex.org/suggestions/{ex['id']}/accept")).status_code == 409  # already decided
     # reject leaves nothing behind

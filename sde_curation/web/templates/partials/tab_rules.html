@@ -3,7 +3,7 @@
 {% set cid = c.collection_id %}
 {% set running = job and job.state == 'running' %}
 {% from "partials/add_rules.html" import add_exclude_form, add_metadata_form with context %}
-<p class="subtab-hint muted">Every rule in force for <b>this collection only</b>. The newest rule wins on the URLs it matches (include always beats exclude); every per-URL edit and accepted AI suggestion is an exact-URL rule. The match count is over the <b>{{ {'delta': 'Delta URLs', 'curated': 'Curated URLs', 'dump': 'Dump URLs'}[rows_set] }}</b> — click it to see them. Deleting a rule is the undo: its URLs fall back to the next newest rule, then to the promoted value.</p>
+<p class="subtab-hint muted">Every rule in force for <b>this collection only</b>. The newest rule wins on the URLs it matches (include always beats exclude); every per-URL edit and accepted AI suggestion is an exact-URL rule. The match count is over the <b>{{ {'delta': 'Delta URLs', 'curated': 'Curated URLs', 'dump': 'Dump URLs'}[rows_set] }}</b>{% if rows_set != 'dump' %} (exclude rules: the <b>Dump URLs</b> — an excluded URL is decided by its rule and never waits under Delta URLs){% endif %} — click it to see them. Deleting a rule is the undo: its URLs fall back to the next newest rule, then to the promoted value.</p>
 {{ add_exclude_form() }}
 {{ add_metadata_form() }}
 {# .rules carries the table styles in app.css; .tbl-wrap scrolls it sideways on a narrow screen #}

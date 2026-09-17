@@ -49,7 +49,8 @@ class Settings(BaseSettings):
     aws_profile: str | None = None
     crawler_s3_bucket: str | None = None  # SDE_S3_BUCKET of the crawler stack
     # Folder inside that bucket the crawler writes to ("" = bucket root): keys are
-    # <prefix>/scraped_collections/<id>.json and <prefix>/failure_logs/<id>_failures_summary.json
+    # <prefix>/scraped_collections/<stem>.json and <prefix>/failure_logs/<stem>_failures_summary.json,
+    # <stem> being the slugged seed URL (models.crawl_file_stem)
     crawler_s3_prefix: str = ""
     crawler_instance_id: str | None = None  # EC2 instance running watch_inbox.sh
     crawler_remote_inbox: str = "/opt/sde-crawler/jobs/incoming"

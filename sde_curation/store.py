@@ -36,4 +36,5 @@ def write_patterns_yaml(root: Path, collection_id: str, patterns: list[Pattern])
 
 
 def remove_collection_files(root: Path, collection_id: str) -> None:
+    """Test setup only: the app offers no way to delete a collection."""
     shutil.rmtree(root / collection_id, ignore_errors=True)

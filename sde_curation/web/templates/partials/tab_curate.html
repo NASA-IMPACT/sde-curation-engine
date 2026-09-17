@@ -2,18 +2,41 @@
    ① Exclusions — decide what must never be indexed (suggested exclude rules, bulk accept)
    ② Metadata — titles / divisions / document types (AI per URL, bulk accept)
    ③ Promote — apply the delta URLs to the curated URLs
-   Rules live on their own tab (tab_rules.html), right after this one; a link at the bottom points there #}
+   Rules live on their own tab (tab_rules.html), right after this one; a link at the bottom points there.
+   ① and ② each show their first rows in place; ⤢ Expand (?focus=exclusions|metadata) opens that list
+   on its own page, paginated, and ⤡ Collapse goes back. #}
 {% from "partials/job_progress.html" import job_progress %}
 {% set cid = c.collection_id %}
 {% set running = job and job.state == 'running' %}
 {% from "partials/url_cells.html" import title_cell, select_cell with context %}
 {% from "partials/add_rules.html" import add_exclude_form, add_metadata_form with context %}
+{% from "partials/pager.html" import pager %}
 {% set curating = c.status == 'curating' %}
 {% set stage = c.curation_stage if curating else none %}
 {% set dc = stats.delta_counts %}
 {% set s1 = 'done' if stage == 'metadata' else 'current' if stage == 'exclusions' else 'todo' %}
 {% set s2 = 'current' if stage == 'metadata' and ai_pending_total else 'done' if stage == 'metadata' else 'todo' %}
 {% set s3 = 'current' if stage == 'metadata' and not ai_pending_total else 'todo' %}
+{% set curate = '/collections/' ~ cid ~ '?tab=curate' %}
+{% macro sugg_href(n) %}{{ curate }}&focus=exclusions&per={{ sugg_paging.per }}&page={{ n }}{% endmacro %}
+{% macro ai_href(n) %}{{ curate }}&focus=metadata&per={{ ai_paging.per }}&page={{ n }}{% endmacro %}
+{# ⤢ Expand one list to its own page / ⤡ Collapse back to the whole workspace #}
+{% macro expand_link(name, total) -%}
+  {% if focus == name %}<span class="grow"></span><a class="button secondary small" href="{{ curate }}#{{ name }}" title="back to the whole Curate page">⤡ Collapse</a>
+  {%- elif not focus and total %}<span class="grow"></span><a class="button secondary small" href="{{ curate }}&focus={{ name }}" title="open this list on its own page: all {{ total }}, paginated">⤢ Expand</a>{% endif %}
+{%- endmacro %}
+{# paging for an expanded list: range, ‹ page ›, rows per page #}
+{% macro focus_pager(name, paging, href) -%}
+  <div class="inline pager">
+    {{ pager(paging.page, paging.pages, paging.per, paging.total, href) }}
+    <form method="get" action="/collections/{{ cid }}" class="inline"><input type="hidden" name="tab" value="curate"><input type="hidden" name="focus" value="{{ name }}">
+      <select name="per" aria-label="rows per page" onchange="this.form.submit()">{% for n in [25, 50, 100, 250] %}<option {% if paging.per == n %}selected{% endif %}>{{ n }}</option>{% endfor %}</select></form>
+  </div>
+{%- endmacro %}
+{# the note under a list shown in place when it has more rows than fit #}
+{% macro more_note(name, paging, noun) -%}
+  {% if not focus and paging.total > paging.per %}<p class="muted small">Showing the first {{ paging.per }} of {{ paging.total }} {{ noun }} — <a href="{{ curate }}&focus={{ name }}">⤢ Expand</a> to page through all of them, or use the accept-all buttons.</p>{% endif %}
+{%- endmacro %}
 
 {% if not curating %}
 <section class="next"><div class="next-inner">
@@ -30,18 +53,20 @@
 {% endif %}
 
 <ol class="pipeline stepper" aria-label="curation steps">
-  <li class="{{ s1 }}"><a href="#exclusions"><span class="n">1</span> Exclusions</a></li>
-  <li class="{{ s2 }}"><a href="#metadata"><span class="n">2</span> Metadata</a></li>
-  <li class="{{ s3 }}"><a href="#promote"><span class="n">3</span> Promote</a></li>
+  {% set anchor = curate if focus else '' %}
+  <li class="{{ s1 }}"><a href="{{ anchor }}#exclusions"><span class="n">1</span> Exclusions</a></li>
+  <li class="{{ s2 }}"><a href="{{ anchor }}#metadata"><span class="n">2</span> Metadata</a></li>
+  <li class="{{ s3 }}"><a href="{{ anchor }}#promote"><span class="n">3</span> Promote</a></li>
   {% if running %}<li class="warn" title="editing is locked until the job finishes"><span class="spinner"></span> {{ job.kind }} · {{ job_progress(job) }} · locked <button class="mini" hx-post="/api/collections/{{ cid }}/jobs/cancel" hx-swap="none" hx-confirm="Cancel the running {{ job.kind }} job?">✕</button></li>{% endif %}
 </ol>
 {% if job and job.state == 'failed' and job.kind in ('llm_patterns', 'llm_metadata') %}<div class="banner err">Last {{ job.kind }} failed: {{ job.error }}</div>{% endif %}
 
 {# ── ① Exclusions ─────────────────────────────────────────────────────── #}
+{% if focus in (none, 'exclusions') %}
 <section class="card stage-card {{ s1 }}" id="exclusions">
-  <h2><span class="n">1</span> Exclusions <small class="muted">decide what must never be indexed</small> <span class="state-tag {{ s1 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s1] }}</span></h2>
+  <h2><span class="n">1</span> Exclusions <small class="muted">decide what must never be indexed</small> <span class="state-tag {{ s1 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s1] }}</span>{{ expand_link('exclusions', suggestion_counts.total) }}</h2>
   <p class="muted">{{ c.dump_count }} dump URLs → {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }}
-    ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.renamed %} · <a href="/collections/{{ cid }}?tab=delta&renamed=true" title="same page, new URL spelling (http→https, trailing slash, #fragment): one modified delta, not a new row plus a removal">{{ dc.renamed }} renamed</a>{% endif %}{% if dc.content_changed %} · <a href="/collections/{{ cid }}?tab=delta&changed=true">{{ dc.content_changed }} text changed</a>{% endif %} · {{ dc.deleted }} removed{% if dc.kept %} · <a href="/collections/{{ cid }}?tab=curated&unreachable=true" title="curated URLs the last crawl could not fetch or never reached: kept as approved, not removed">{{ dc.kept }} kept</a>{% endif %} · <b>{{ dc.excluded }} excluded</b> by rules).
+    ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.renamed %} · <a href="/collections/{{ cid }}?tab=delta&renamed=true" title="same page, new URL spelling (http→https, trailing slash, #fragment): one modified delta, not a new row plus a removal">{{ dc.renamed }} renamed</a>{% endif %}{% if dc.content_changed %} · <a href="/collections/{{ cid }}?tab=delta&changed=true">{{ dc.content_changed }} text changed</a>{% endif %} · {{ dc.deleted }} removed{% if dc.kept %} · <a href="/collections/{{ cid }}?tab=curated&unreachable=true" title="curated URLs the last crawl could not fetch or never reached: kept as approved, not removed">{{ dc.kept }} kept</a>{% endif %}).{% if dc.excluded %} <a href="/collections/{{ cid }}?tab=dump&excluded=true" title="dump URLs an exclude rule keeps out: decided by the rule, never queued as delta URLs"><b>{{ dc.excluded }} excluded</b> by rules</a>.{% endif %}
     Exclude what should never be searchable (login, feeds, tag pages…); <code>include</code> always beats <code>exclude</code>.</p>
 
   <div class="next"><div class="next-inner">
@@ -56,27 +81,28 @@
 {{ prompts.patterns.user }}</pre></details>
       {% if last_patterns_job %}<br><small class="muted">Last run {{ last_patterns_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_patterns_job.state }}">{{ last_patterns_job.state }}</span> · {{ job_progress(last_patterns_job) }}</small>{% endif %}
     </div>
-    <button class="{{ 'primary' if not suggestions and s1 == 'current' else 'secondary' }}" {% if running or c.dump_count == 0 or pattern_candidates == 0 %}disabled{% endif %}
+    <button class="{{ 'primary' if not suggestion_counts.total and s1 == 'current' else 'secondary' }}" {% if running or c.dump_count == 0 or pattern_candidates == 0 %}disabled{% endif %}
             title="{% if c.dump_count == 0 %}scrape first{% elif running %}wait for the running job{% elif not c.delta_count %}Start curating first — suggestions are drawn from the delta URLs{% elif pattern_candidates == 0 %}every delta URL is already excluded{% else %}{{ pattern_candidates }} delta URLs in {{ pattern_calls }} call{{ 's' if pattern_calls != 1 }}{% endif %}"
             hx-post="/api/collections/{{ cid }}/suggest/patterns" hx-swap="none"
-            {% if suggestions %}hx-confirm="Re-run? The {{ suggestion_counts.total }} undecided suggestions are replaced."{% endif %}>✨ Suggest exclusions <small>({{ pattern_candidates }} delta URL{{ 's' if pattern_candidates != 1 }} · {{ pattern_calls }} call{{ 's' if pattern_calls != 1 }})</small></button>
+            {% if suggestion_counts.total %}hx-confirm="Re-run? The {{ suggestion_counts.total }} undecided suggestions are replaced."{% endif %}>✨ Suggest exclusions <small>({{ pattern_candidates }} delta URL{{ 's' if pattern_candidates != 1 }} · {{ pattern_calls }} call{{ 's' if pattern_calls != 1 }})</small></button>
   </div></div>
 
-  {% if suggestions %}
+  {% if suggestion_counts.total %}
   <div class="suggestions">
     <div class="inline bulk-bar">
       <b>{{ suggestion_counts.total }} suggestion{{ 's' if suggestion_counts.total != 1 }} to decide</b>
       {% for t in pattern_types if suggestion_counts.by_type[t] %}
       <span class="nowrap"><span class="ptype {{ t }}">{{ t }} {{ suggestion_counts.by_type[t] }}</span>
         <button class="mini ok" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "accept", "type": t}|tojson }}' hx-swap="none"
-                hx-confirm="Accept all {{ suggestion_counts.by_type[t] }} {{ t }} suggestions? They become rules and the delta URLs are recomputed.">✓ accept all</button><button class="mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "type": t}|tojson }}' hx-swap="none"
+                hx-confirm="Accept all {{ suggestion_counts.by_type[t] }} {{ t }} suggestions? They become rules; the URLs they exclude leave the delta URLs.">✓ accept all</button><button class="mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "type": t}|tojson }}' hx-swap="none"
                 hx-confirm="Reject all {{ suggestion_counts.by_type[t] }} {{ t }} suggestions?">✕</button></span>
       {% endfor %}
       <span class="grow"></span>
       <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/bulk" hx-ext="json-enc" hx-vals='{"decision": "accept"}' hx-swap="none" hx-confirm="Accept all {{ suggestion_counts.total }} suggestions?">Accept all ({{ suggestion_counts.total }})</button>
       <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/suggestions/bulk" hx-ext="json-enc" hx-vals='{"decision": "reject"}' hx-swap="none" hx-confirm="Reject all {{ suggestion_counts.total }} suggestions?">Reject all</button>
     </div>
-    <div class="sugg-scroll">
+    {% if focus %}{{ focus_pager('exclusions', sugg_paging, sugg_href) }}{% endif %}
+    <div class="{{ 'sugg-page' if focus else 'sugg-scroll' }}">
     <table>
       <thead><tr><th>Type</th><th>Match</th><th title="global = from the shared exclude list; llm = drafted by the model for this collection">Source</th><th title="dump URLs this rule would match">Matches</th><th>Why</th><th></th></tr></thead>
       <tbody>{% for sg in suggestions %}
@@ -90,6 +116,8 @@
       {% endfor %}</tbody>
     </table>
     </div>
+    {% if focus %}{{ focus_pager('exclusions', sugg_paging, sugg_href) }}{% endif %}
+    {{ more_note('exclusions', sugg_paging, 'suggestions') }}
   </div>
   {% elif patterns_ever_run %}<p class="muted small">No undecided suggestions.</p>{% endif %}
 
@@ -107,10 +135,12 @@
     {% elif stage == 'metadata' %}<button class="secondary mini" hx-post="/api/collections/{{ cid }}/stage" hx-ext="json-enc" hx-vals='{"stage": "exclusions"}' hx-swap="none" {% if running %}disabled{% endif %}>← Back to exclusions</button>{% endif %}
   </div>
 </section>
+{% endif %}
 
 {# ── ② Metadata ──────────────────────────────────────────────────── #}
+{% if focus in (none, 'metadata') %}
 <section class="card stage-card {{ s2 }}" id="metadata">
-  <h2><span class="n">2</span> Metadata <small class="muted">titles, divisions and document types</small> <span class="state-tag {{ s2 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s2] }}</span></h2>
+  <h2><span class="n">2</span> Metadata <small class="muted">titles, divisions and document types</small> <span class="state-tag {{ s2 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s2] }}</span>{{ expand_link('metadata', ai_paging.total) }}</h2>
   {% set gate = (not curating) or stage == 'exclusions' or suggestion_counts.total %}
   <div class="next"><div class="next-inner">
     <div>
@@ -151,14 +181,15 @@
     </div>
     {# The review table: one row per delta URL with a pending suggestion. Same cells as the Delta
        URLs table (✓ accept · ✎ edit then accept · ✕ dismiss per field), plus accept / reject the
-       whole row. Scrolls in place; beyond the cap the rest is under Delta URLs. #}
-    <div class="sugg-scroll">
+       whole row. Scrolls in place (first rows only); ⤢ Expand pages through all of them. #}
+    {% if focus %}{{ focus_pager('metadata', ai_paging, ai_href) }}{% endif %}
+    <div class="{{ 'sugg-page' if focus else 'sugg-scroll' }}">
     <table class="urls ai-review">
       <thead><tr><th class="num">#</th><th>URL</th><th>Title <small class="muted">scraped → effective</small></th><th>Division</th><th>Doc type</th><th title="accept or dismiss every suggestion on this row">Row</th></tr></thead>
       <tbody>{% for r in ai_rows %}
         {% set why = effects.get(r.url, {}) %}
         <tr class="{% if r.excluded %}excluded{% endif %} row-{{ r.kind }}">
-          <td class="num muted">{{ loop.index }}</td>
+          <td class="num muted">{{ ai_paging.offset + loop.index }}</td>
           <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a>{% if r.excluded %}<br><span class="kind k-excluded" title="{{ why.excluded or 'excluded' }}">excluded</span>{% endif %}</td>
           <td>{{ title_cell(r, why, not running) }}</td>
           <td>{{ select_cell(r, why, not running, 'division', divisions) }}</td>
@@ -169,18 +200,21 @@
       {% endfor %}</tbody>
     </table>
     </div>
-    {% if ai_rows|length >= ai_rows_cap %}<p class="muted small">Showing the first {{ ai_rows_cap }} URLs with suggestions — the rest are under <a href="/collections/{{ cid }}?tab=delta&ai=pending">Delta URLs</a>, or use the accept-all buttons.</p>{% endif %}
+    {% if focus %}{{ focus_pager('metadata', ai_paging, ai_href) }}{% endif %}
+    {{ more_note('metadata', ai_paging, 'URLs with suggestions') }}
   </div>
   {% endif %}
 
   {{ add_metadata_form() }}
 </section>
+{% endif %}
 
 {# ── ③ Promote ───────────────────────────────────────────────────── #}
+{% if not focus %}
 <section class="card stage-card {{ s3 }}" id="promote">
   <h2><span class="n">3</span> Promote <small class="muted">apply the delta URLs to the curated URLs</small> <span class="state-tag {{ s3 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s3] }}</span></h2>
   <p class="muted">Promoting writes {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }} into the curated URLs
-    ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.renamed %} (of which {{ dc.renamed }} renamed){% endif %} · {{ dc.deleted }} removed · {{ dc.excluded }} excluded) and marks the collection <b>Curated</b>, ready to index.{% if dc.kept %} {{ dc.kept }} curated URL{{ 's' if dc.kept != 1 }} the crawl could not fetch stay as they are.{% endif %}</p>
+    ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.renamed %} (of which {{ dc.renamed }} renamed){% endif %} · {{ dc.deleted }} removed) and marks the collection <b>Curated</b>, ready to index.{% if dc.kept %} {{ dc.kept }} curated URL{{ 's' if dc.kept != 1 }} the crawl could not fetch stay as they are.{% endif %}</p>
   {% if removal_warning %}<div class="banner warn">⚠ {{ removal_warning }}</div>{% endif %}
   {% if crawl_warning %}<div class="banner info">ℹ {{ crawl_warning }} <a class="small" href="/collections/{{ cid }}?tab=curated&unreachable=true">Show them ↗</a></div>{% endif %}
   {% if ai_pending_total and curating %}<div class="banner info">⚠ {{ ai_pending_total }} AI suggestion{{ 's are' if ai_pending_total != 1 else ' is' }} still undecided — promoting discards them. Accept or reject them in step 2 first.</div>{% endif %}
@@ -195,3 +229,4 @@
 
 {# ── Rules: their own tab; a pointer here so the workflow page says where they went ── #}
 <p class="muted small"><a href="/collections/{{ cid }}?tab=rules"><b>Rules</b> <span class="count">{{ stats.pattern_count }}</span></a> — every rule in force for this collection, with match counts and the superseded ones marked.</p>
+{% endif %}

@@ -36,7 +36,7 @@ async def test_url_tables_sort_by_column(crawler_client):
     assert urls_in_order(page)[0] == "https://ex.org/p9"
     # excluded rows (a rule) sort last ascending, first descending
     await c.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": "https://ex.org/p3", "value": None})
-    page = (await c.get("/collections/ex.org?tab=delta&sort=excluded&dir=desc")).text
+    page = (await c.get("/collections/ex.org?tab=dump&sort=excluded&dir=desc")).text
     assert urls_in_order(page)[0] == "https://ex.org/p3"
     # an unknown key falls back to the default order, never to the SQL
     page = (await c.get("/collections/ex.org?tab=delta&sort=drop%20table&dir=desc")).text

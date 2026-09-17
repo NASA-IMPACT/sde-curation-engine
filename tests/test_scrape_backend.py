@@ -48,7 +48,7 @@ def coll(n: int) -> Collection:
 
 
 def test_build_job_matches_crawler_shape():
-    assert build_job(coll(7)) == {"seed": "https://ex.org", "collection_id": "ex.org", "max_pages": 7}
+    assert build_job(coll(7)) == {"seed": "https://ex.org", "collection_id": "https_ex.org", "max_pages": 7}
 
 
 def test_log_progress_parser():
@@ -105,7 +105,7 @@ async def test_local_success_with_progress(settings, crawler_root):
     assert seen[0]["pid"] and seen[-1] == {"processed": 10, "docs": 8, "failed": 2}
     assert any(0 < s.get("processed", 0) < 10 for s in seen), "no intermediate progress seen"
     # job json written where the crawler expects a path, under our DATA_DIR
-    assert (settings.data_dir / "scrape_jobs" / "ex.org.json").is_file()
+    assert (settings.data_dir / "scrape_jobs" / "https_ex.org.json").is_file()
 
 
 async def test_local_failure_surfaces_error(settings):
@@ -202,11 +202,11 @@ def ssm_env(aws, tmp_path):
 
     def upload(docs=None):
         s3.put_object(
-            Bucket="crawl-bkt", Key="scraped_collections/ex.org.json",
+            Bucket="crawl-bkt", Key="scraped_collections/https_ex.org.json",
             Body=json.dumps(docs or [{"url": "https://ex.org/a", "title": "A", "full_text": "t"}]),
         )
         s3.put_object(
-            Bucket="crawl-bkt", Key="failure_logs/ex.org_failures_summary.json",
+            Bucket="crawl-bkt", Key="failure_logs/https_ex.org_failures_summary.json",
             Body=json.dumps({"documents_scraped": 1, "failures_logged": 0}),
         )
 
@@ -238,9 +238,9 @@ def test_parse_poll_reads_markers_and_tail():
 
 def test_poll_script_targets_inbox_and_job_log(ssm_env):
     _, make, _ = ssm_env
-    script = make().poll_script("ex.org")
-    assert "/opt/sde-crawler/jobs/incoming/ex.org.json" in script
-    assert "/opt/sde-crawler/logs/jobs/ex.org.log" in script and "tail -n 5" in script
+    script = make().poll_script("https_ex.org")
+    assert "/opt/sde-crawler/jobs/incoming/https_ex.org.json" in script
+    assert "/opt/sde-crawler/logs/jobs/https_ex.org.log" in script and "tail -n 5" in script
 
 
 async def test_ssm_queued_behind_batch_then_runs(ssm_env):
@@ -271,7 +271,7 @@ async def test_ssm_queued_behind_batch_then_runs(ssm_env):
     assert seen[-1] == {"processed": 2, "docs": 2, "failed": 0}
     drop = backend.ssm.commands[0]
     assert drop["Comment"] == "sde-curation-engine"
-    assert "jobs/incoming/ex.org.json" in drop["Parameters"]["commands"][0]
+    assert "jobs/incoming/https_ex.org.json" in drop["Parameters"]["commands"][0]
 
 
 async def test_ssm_dead_watcher_fails_fast(ssm_env):
@@ -283,7 +283,7 @@ async def test_ssm_dead_watcher_fails_fast(ssm_env):
 
 async def test_ssm_job_file_vanished(ssm_env):
     host, make, _ = ssm_env
-    host.on_poll = lambda n: host.inbox.discard("ex.org.json")
+    host.on_poll = lambda n: host.inbox.discard("https_ex.org.json")
     with pytest.raises(ScrapeError, match="vanished from the crawler inbox"):
         await make().run(coll(5), lambda p: asyncio.sleep(0))
 
@@ -323,7 +323,7 @@ async def test_ssm_mid_run_checkpoint_upload_does_not_end_the_crawl(ssm_env):
             host.start_crawl(PAGES[:1])
         if n == 2:  # checkpoint: object changes while the crawl is still running
             upload(partial)
-            host.tail = PAGES[:1] + ["  checkpoint  1 docs -> s3://crawl-bkt/scraped_collections/ex.org.json"]
+            host.tail = PAGES[:1] + ["  checkpoint  1 docs -> s3://crawl-bkt/scraped_collections/https_ex.org.json"]
         if n == 4:
             host.tail = PAGES + ["# s3 documents=...", "# exit=0 elapsed_s=9.0"]
             upload(full)
@@ -346,7 +346,7 @@ async def test_ssm_attaches_to_a_job_already_in_the_inbox(ssm_env):
     Dropping a second job file would overwrite the one in the inbox and crawl the site again
     after the batch; the engine must follow the running job and ingest its final upload."""
     host, make, upload = ssm_env
-    host.inbox.add("ex.org.json")  # queued or running on the host already
+    host.inbox.add("https_ex.org.json")  # queued or running on the host already
     seen, cb = await progress_recorder()
 
     def on_poll(n):
@@ -377,4 +377,4 @@ async def test_ssm_drops_the_job_when_the_inbox_has_no_file_for_it(ssm_env):
     s = make()
     seen, cb = await progress_recorder()
     await s.run(coll(5), cb)
-    assert "ex.org.json" in host.inbox and "ssm_command" in seen[0] and "attached" not in seen[0]
+    assert "https_ex.org.json" in host.inbox and "ssm_command" in seen[0] and "attached" not in seen[0]

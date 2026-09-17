@@ -201,6 +201,7 @@ class Database:
             return [Collection(**r) for r in await cur.fetchall()]
 
     async def delete_collection(self, collection_id: str) -> bool:
+        """Test setup only: the app offers no way to delete a collection."""
         async with self._conn() as conn:
             cur = await conn.execute("DELETE FROM collections WHERE collection_id=%s", (collection_id,))
             return cur.rowcount > 0
@@ -335,26 +336,36 @@ class Database:
 
     async def list_dump(
         self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None,
-        match: str | None = None, sort: str | None = None, desc: bool = False,
+        match: str | None = None, sort: str | None = None, desc: bool = False, excluded: bool | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
-        """Dump rows (no full_text) plus `text_len` and `in_curated` / `in_deltas` flags."""
+        """Dump rows (no full_text) plus `text_len` and `in_curated` / `in_deltas` flags. `excluded`
+        is the pending delta's, else the curated row's, else whether an exclude rule keeps the URL
+        out (excluded URLs have no delta row: the rule decides them)."""
         where, args = ["d.collection_id=%s"], [collection_id]
         if q:
             where.append("(d.url ILIKE %s OR d.scraped_title ILIKE %s)"); args += [f"%{q}%"] * 2
         if match:
             m, a = match_clause(match, "d.url"); where.append(m); args += a
+        excl = """COALESCE(x.excluded, c.excluded, EXISTS(
+                      SELECT 1 FROM pattern_effects e JOIN patterns p ON p.id=e.pattern_id
+                      WHERE e.collection_id=d.collection_id AND e.url=d.url
+                        AND e.field='excluded' AND p.type='exclude'))"""
+        if excluded is not None:
+            where.append(f"{excl}=%s"); args.append(excluded)
         w = " AND ".join(where)
+        joins = """LEFT JOIN curated_urls c ON c.collection_id=d.collection_id AND c.url=d.url
+                    LEFT JOIN delta_urls x ON x.collection_id=d.collection_id AND x.url=d.url"""
         async with self._conn() as conn:
-            total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM dump_urls d WHERE {w}", args))
+            total = await _scalar(await conn.execute(
+                f"SELECT COUNT(*) FROM dump_urls d {joins if excluded is not None else ''} WHERE {w}", args))
             cur = await conn.execute(
                 f"""SELECT d.collection_id, d.url, d.scraped_title, d.content_type, d.depth,
                            length(d.full_text) AS text_len,
                            (c.url IS NOT NULL)::int AS in_curated, (x.url IS NOT NULL)::int AS in_deltas,
-                           COALESCE(x.excluded, c.excluded, false) AS excluded,
+                           {excl} AS excluded,
                            COALESCE(x.edited_by, c.edited_by) AS edited_by
                     FROM dump_urls d
-                    LEFT JOIN curated_urls c ON c.collection_id=d.collection_id AND c.url=d.url
-                    LEFT JOIN delta_urls x ON x.collection_id=d.collection_id AND x.url=d.url
+                    {joins}
                     WHERE {w}{order_by(DUMP_SORTS, sort, desc, "d.url")} LIMIT %s OFFSET %s""",
                 [*args, limit, offset],
             )
@@ -655,6 +666,27 @@ class Database:
                 [(eb, collection_id, url) for url, eb in items],
             )
 
+    async def set_curated_excluded(self, collection_id: str, items: list[tuple[str, bool]]) -> None:
+        """Flag curated rows an exclude rule now keeps out, in place: exclusions are decided by the
+        rules, never queued as delta URLs (the next index run drops the rows)."""
+        if not items:
+            return
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.executemany(
+                "UPDATE curated_urls SET excluded=%s WHERE collection_id=%s AND url=%s",
+                [(excluded, collection_id, url) for url, excluded in items],
+            )
+
+    async def count_excluded_by_rules(self, collection_id: str) -> int:
+        """Dump URLs an exclude rule keeps out (no include overrides it) — they have no delta row."""
+        async with self._conn() as conn:
+            return await _scalar(await conn.execute(
+                "SELECT COUNT(DISTINCT e.url) FROM pattern_effects e JOIN patterns p ON p.id=e.pattern_id"
+                " JOIN dump_urls d ON d.collection_id=e.collection_id AND d.url=e.url"
+                " WHERE e.collection_id=%s AND e.field='excluded' AND p.type='exclude'",
+                (collection_id,),
+            ))
+
     async def set_curated_crawl_failure(self, collection_id: str, items: list[tuple[str, str | None]]) -> None:
         """Flag (reason) or clear (None) curated rows after a recompute: the current dump lacks the
         URL but the crawl does not prove it gone, or the crawl fetched it again."""
@@ -829,15 +861,30 @@ class Database:
                 "SELECT COUNT(*) FROM pattern_suggestions WHERE collection_id=%s AND state='pending'", (collection_id,)
             ))
 
-    async def list_pattern_suggestions(self, collection_id: str, state: str | None = "pending") -> list[dict[str, Any]]:
+    async def list_pattern_suggestions(
+        self, collection_id: str, state: str | None = "pending", *, limit: int | None = None, offset: int = 0,
+    ) -> list[dict[str, Any]]:
         """Global-list hits first, then the model's, biggest match count first within each."""
         q = "SELECT * FROM pattern_suggestions WHERE collection_id=%s"
         args: list[Any] = [collection_id]
         if state:
             q += " AND state=%s"; args.append(state)
+        q += " ORDER BY (source='global') DESC, matches DESC, id"
+        if limit is not None:
+            q += " LIMIT %s OFFSET %s"; args += [limit, offset]
         async with self._conn() as conn:
-            cur = await conn.execute(q + " ORDER BY (source='global') DESC, matches DESC, id", args)
+            cur = await conn.execute(q, args)
             return list(await cur.fetchall())
+
+    async def pattern_suggestion_counts(self, collection_id: str) -> dict[str, Any]:
+        """Pending suggestions: {"total": n, "by_type": {type: n}} without loading the rows."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT type, COUNT(*) AS n FROM pattern_suggestions WHERE collection_id=%s AND state='pending'"
+                " GROUP BY type", (collection_id,),
+            )
+            by_type = {r["type"]: r["n"] for r in await cur.fetchall()}
+        return {"total": sum(by_type.values()), "by_type": by_type}
 
     async def get_pattern_suggestion(self, collection_id: str, sid: int) -> dict[str, Any] | None:
         async with self._conn() as conn:
@@ -934,17 +981,20 @@ class Database:
             cur = await conn.execute(sql + " ORDER BY url", args)
             return [(r["url"], r["v"]) for r in await cur.fetchall()]
 
-    async def list_delta_ai(self, collection_id: str, limit: int = 500) -> list[DeltaUrl]:
+    async def list_delta_ai(
+        self, collection_id: str, limit: int = 50, offset: int = 0,
+    ) -> tuple[list[DeltaUrl], int]:
         """Pending, non-removed delta URLs that carry at least one AI suggestion, by URL — the
-        review table under Curate › Metadata."""
+        review table under Curate › Metadata — and how many there are in all."""
+        where = ("collection_id=%s AND kind!='deleted'"
+                 " AND (title_ai IS NOT NULL OR division_ai IS NOT NULL OR document_type_ai IS NOT NULL)")
         async with self._conn() as conn:
+            total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM delta_urls WHERE {where}", (collection_id,)))
             cur = await conn.execute(
-                "SELECT * FROM delta_urls WHERE collection_id=%s AND kind!='deleted'"
-                " AND (title_ai IS NOT NULL OR division_ai IS NOT NULL OR document_type_ai IS NOT NULL)"
-                " ORDER BY url LIMIT %s",
-                (collection_id, limit),
+                f"SELECT * FROM delta_urls WHERE {where} ORDER BY url LIMIT %s OFFSET %s",
+                (collection_id, limit, offset),
             )
-            return [DeltaUrl(**r) for r in await cur.fetchall()]
+            return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
     async def delta_ai_counts(self, collection_id: str) -> dict[str, Any]:
         """Pending AI suggestions per field, plus `by_conf`: suggestions (field-level) per confidence,
