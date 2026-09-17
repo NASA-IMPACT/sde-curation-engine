@@ -46,9 +46,9 @@
   <div><b>Curating</b><small>exclusions → metadata</small></div>
   <div><b>Curated</b><small>approved set promoted</small></div>
   <div><b>Test index</b><small>indexed, validated</small></div>
-  <div><b>Live</b><small>in the prod index</small></div>
+  <div><b>Live</b><small>in prod, validated</small></div>
 </div>
-<p class="caption">Statuses only move forward when the data supports it. A failed validation, or a re-crawl after promotion, sends the collection back to Curating with a <span class="chip warn">⚠ needs re-curation</span> flag.</p>
+<p class="caption">Statuses only move forward when the data supports it. A re-crawl after promotion sends the collection back to Scraped with a <span class="chip warn">⚠ needs re-curation</span> flag. A failed index is not a curation problem: a failed test index run or validation sends it back to Curated with <span class="chip warn">⚠ needs re-indexing</span>, and a failed prod validation back to Test index with <span class="chip warn">⚠ prod not validated</span>.</p>
 
 <p>Three ideas carry the whole app:</p>
 <ul>
@@ -70,7 +70,7 @@
     <li><b>Suggest metadata</b>, then accept all titles, divisions, and types, or review one by one.</li>
     <li><b>Promote</b> the delta URLs into the curated URLs.</li>
     <li><b>Index to test</b> and wait for validation to pass.</li>
-    <li><b>Index to prod</b>. The collection is Live.</li>
+    <li><b>Index to prod</b> and wait for prod validation to pass. The collection is Live.</li>
   </ol>
 </div>
 <p>Signing in: deployed environments require a login. Admins add accounts at <code>/users</code>, everyone changes their own password at <code>/account</code>. Curators can do everything except manage users. Nobody can delete a collection: its rules, curated URLs and history are the record of what was indexed. Every action is recorded under your name.</p>
@@ -81,7 +81,7 @@
 <ol class="steps">
   <li id="s-dashboard">
     <h3>Find or add the collection on the dashboard</h3>
-    <p>The home page lists every collection with its status, the dump / delta / curated URL counts, its last job, and the one button for the next step. The filter pane narrows by status, the curating sub-stage, the needs re-curation flag, division, and curator. Press <kbd>/</kbd> to jump to search. The jobs strip above the table shows everything running anywhere.</p>
+    <p>The home page lists every collection with its status, the dump / delta / curated URL counts, its last job, and the one button for the next step. The filter pane narrows by status, the curating sub-stage, the flags (needs re-curation, needs re-indexing, prod not validated), division, and curator. Press <kbd>/</kbd> to jump to search. The jobs strip above the table shows everything running anywhere.</p>
     <figure><img src="{{ static_url('manual/01-dashboard.png') }}" alt="Dashboard with the filter pane, add-collection form, a jobs strip showing one running scrape, and six collections at different statuses, each with a next-step button">
     <figcaption><b>Dashboard.</b> Six collections at different stages, one of them scraping. The status badge on a curating collection also shows which sub-stage it is in. Each row ends in exactly one action.</figcaption></figure>
     <p>To add a site, fill in the seed URL, a display name, the division, and a page cap, then press <b>Add collection</b>. The collection id is derived from the seed host.</p>
@@ -133,18 +133,24 @@
   <li id="s-index">
     <h3>Index to test, validate, then index to prod</h3>
     <p><b>Index to test</b> exports the included curated rows and dispatches an indexing run against the test index. The step-5 panel shows exported, indexed, changed, and deleted counts as it progresses, then the validation result.</p>
-    <p>The engine validates on its own. About thirty seconds after the run succeeds it queries the index directly for this collection and compares counts and titles against the curated URLs. If it lacks access to query the index, it dispatches a second pass of the same export purely to get a fresh validation file. Nothing is re-vectorised on that pass.</p>
+    <p>The engine validates on its own. About thirty seconds after the run succeeds it queries the index directly for this collection and compares counts and titles against the curated URLs. The index makes new documents searchable some time after they are written, so a short count is not a failure yet: the engine re-checks every fifteen seconds for up to ten minutes, and the panel reads <span class="chip">validating…</span> with how many documents are visible so far. Only once the check passes or the ten minutes run out is the result final. If it lacks access to query the index, it dispatches a second pass of the same export purely to get a fresh validation file. Nothing is re-vectorised on that pass.</p>
     <dl class="defs">
       <dt>Pass</dt><dd>Counts match and at least 99% of titles match. Status becomes Test index and <b>Index to prod</b> is enabled.</dd>
-      <dt>Fail</dt><dd>Back to Curating with the needs re-curation flag and the mismatches listed. Fix and re-index, or press <b>Re-validate</b> if you believe the index only needed more time.</dd>
+      <dt>Fail</dt><dd>Back to Curated with the <b>needs re-indexing</b> chip and the mismatches listed. <b>Re-index to test</b>, or press <b>Re-validate</b> if you believe the index only needed more time. If the mismatches point at the curation, <b>Review / re-curate</b> first. A test index run that fails outright gets the same chip.</dd>
     </dl>
-    <p><b>Index to prod</b> is refused until the latest test run passed. Success marks the collection Live and clears the flag. Every status transition posts to the team Slack channel with a link.</p>
+    <p><b>Index to prod</b> is refused until the latest test run passed. It publishes the test run's vectors to the production index, then runs the same check against prod: the same wait, the same repeated direct query for up to ten minutes, the same counts-and-titles rule. The step-6 panel shows the result, with <b>Re-validate prod</b> beside it.</p>
+    <dl class="defs">
+      <dt>Pass</dt><dd>Status becomes Live and the prod not validated chip goes away.</dd>
+      <dt>Fail</dt><dd>Back to Test index with the <b>prod not validated</b> chip and the mismatches listed. The published documents stay in prod. Check the prod index, then <b>Re-index to prod</b>, or press <b>Re-validate prod</b> if it only needed more time.</dd>
+      <dt>Cannot check</dt><dd>Prod has no second pass to fall back to. If the engine cannot read the prod index, the job fails, the collection goes back to Test index with the chip, and the panel reads "not validated". Fix read access, then <b>Re-validate prod</b>.</dd>
+    </dl>
+    <p>Every status transition posts to the team Slack channel with a link.</p>
   </li>
 </ol>
 
 <h2 id="screens">Screens reference</h2>
 <h3>The workbench header</h3>
-<p>Sticky on every view. Name, seed link, status badge, the running job with a cancel button, and the <b>Next</b> action. The counts sit on the tab row under Curating / Curated:</p>
+<p>Sticky on every view. Name, seed link, status badge, the running job with a cancel button, and the <b>Next</b> action. Next to the status badge, up to three warnings: <span class="chip warn">⚠ needs re-curation</span> (hover for why), <span class="chip warn">⚠ needs re-indexing</span> and <span class="chip warn">⚠ prod not validated</span> (click either to open the step that fixes it). The same warnings show on the pipeline and the dashboard row. The counts sit on the tab row under Curating / Curated:</p>
 <dl class="defs">
   <dt>Dump URLs</dt><dd>Every URL the last crawl found. Raw, but you can exclude or include a row right there.</dd>
   <dt>Delta URLs</dt><dd>What will change in the curated URLs when you promote: new · modified · removed. Excluded URLs are not here: their exclude rule decides them.</dd>
@@ -268,6 +274,8 @@
 <p>The list people wish they had read first. Some repeat points from above, gathered in one place.</p>
 <ul>
   <li><b>A re-scrape replaces the dump URLs and clears the delta URLs</b> and, if anything was ever promoted, raises the needs re-curation flag. Your rules survive. Undecided suggestions do not.</li>
+  <li><b>Three different warnings, three different fixes.</b> <i>Needs re-curation</i> means the crawl changed under what you promoted: Start curating. <i>Needs re-indexing</i> means the test index did not check out: Re-index to test or Re-validate. <i>Prod not validated</i> means prod did not check out: Re-validate prod or Re-index to prod. The last two are read off the latest index run, so they only go away when a run passes; promoting, recomputing, or a passing test run never hides a prod problem.</li>
+  <li><b>"validating…" is not a result.</b> Right after an index run, the index may show only some of the documents. Wait for pass or fail before acting.</li>
   <li id="disappear"><b>When pages disappear from the crawl.</b> Say the first crawl found 100 dump URLs and the next one 90. Start curating lists the 10 as <b>removed</b> delta URLs. Promote drops them from the curated URLs, and the next index run deletes them from the index. That is the right outcome for pages a site took down. It is the wrong outcome for a crawl that stopped early, so Promote warns you when a large share of the curated URLs vanished at once: re-scrape instead. To keep a page out of the index while it is still on the site, <b>exclude</b> it; that is the "delete from the index" action.</li>
   <li><b>An identical re-crawl returns straight to Curated.</b> Recompute never demotes a collection when nothing changed.</li>
   <li><b>Modified includes "text changed".</b> Each page carries a hash of its text. A page whose title and metadata did not move but whose body did shows as modified with a text changed badge, and Suggest metadata re-classifies it. Pages promoted before this existed compare as unchanged the first time.</li>
@@ -293,9 +301,9 @@
     <tr><td>Scraped</td><td>A crawl is loaded. Nothing computed yet.</td><td>Start curating</td></tr>
     <tr><td>Curating · Exclusions</td><td>Deciding what must never be indexed.</td><td>Suggest exclusions, then Continue to metadata</td></tr>
     <tr><td>Curating · Metadata</td><td>Fixing titles, divisions, document types.</td><td>Suggest metadata, accept, then Promote</td></tr>
-    <tr><td>Curated</td><td>Approved set promoted, ready to index.</td><td>Index to test</td></tr>
-    <tr><td>Test index</td><td>Indexed to test and validated.</td><td>Index to prod</td></tr>
-    <tr><td>Live</td><td>In the production index.</td><td>Re-scrape when the site changes</td></tr>
+    <tr><td>Curated</td><td>Approved set promoted, ready to index. Also where a failed test index run or validation lands.</td><td>Index to test, or Re-validate</td></tr>
+    <tr><td>Test index</td><td>Indexed to test and validated. Also where a prod publish that failed validation lands.</td><td>Index to prod, or Re-validate prod</td></tr>
+    <tr><td>Live</td><td>Published to the production index and validated there.</td><td>Re-scrape when the site changes</td></tr>
   </tbody>
 </table></div>
 
@@ -314,7 +322,9 @@
     <tr><td>Suggestion</td><td>A proposed exclude rule awaiting your decision. Nothing is applied until you accept.</td></tr>
     <tr><td>AI badge</td><td>A proposed title, division, or type for one URL, with a confidence. ✓ makes it an exact-URL rule, ✎ lets you change it first, ✕ dismisses it.</td></tr>
     <tr><td>Edited by</td><td>Who set a row's effective values: AI (accepted suggestions), SME (a curator's edit or hand-written rule), or AI + SME. Hover for the rule behind each field.</td></tr>
-    <tr><td>Needs re-curation</td><td>Something promoted is now stale. Exactly two things raise it: a scrape or "load existing" finished after a promote (even an identical one; Start curating clears it if nothing changed), or the test-index validation failed. Hover the badge to see which.</td></tr>
+    <tr><td>Needs re-curation</td><td>Something promoted is now stale. Only one thing raises it: a scrape or "load existing" finished after a promote (even an identical one; Start curating clears it if nothing changed). Hover the badge for when.</td></tr>
+    <tr><td>Needs re-indexing</td><td>The latest test index run failed, never finished, or did not pass validation. It is read off that run, so only a test run that passes (Re-index to test, or Re-validate) removes it; a promote or recompute does not. Filter the home page by it under Flags.</td></tr>
+    <tr><td>Prod not validated</td><td>The latest prod publish wrote documents but its validation failed or could not run. It is read off that prod run, so only a prod check that passes (Re-validate prod, or a new Index to prod) removes it; nothing on the test side does. Filter the home page by it under Flags.</td></tr>
   </tbody>
 </table></div>
 

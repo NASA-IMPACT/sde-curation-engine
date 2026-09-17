@@ -21,8 +21,12 @@
   </fieldset>
   <fieldset>
     <legend>Flags</legend>
-    <label class="f-opt" title="Something promoted is stale: a re-crawl happened or validation failed — review the delta URLs and re-index"><input type="checkbox" name="flag" value="needs_recuration" {% if 'needs_recuration' in filters.flag %}checked{% endif %}>
+    <label class="f-opt" title="Something promoted is stale: a re-crawl happened after a promote — review the delta URLs and promote again"><input type="checkbox" name="flag" value="needs_recuration" {% if 'needs_recuration' in filters.flag %}checked{% endif %}>
       <span class="f-lbl">⚠ needs re-curation</span><span id="f-flag-needs_recuration" class="cnt">{{ counts.flag.needs_recuration }}</span></label>
+    <label class="f-opt" title="The latest test index run failed or did not pass validation"><input type="checkbox" name="flag" value="needs_reindexing" {% if 'needs_reindexing' in filters.flag %}checked{% endif %}>
+      <span class="f-lbl">⚠ needs re-indexing</span><span id="f-flag-needs_reindexing" class="cnt">{{ counts.flag.needs_reindexing }}</span></label>
+    <label class="f-opt" title="The latest prod publish failed its validation or was never checked"><input type="checkbox" name="flag" value="prod_not_validated" {% if 'prod_not_validated' in filters.flag %}checked{% endif %}>
+      <span class="f-lbl">⚠ prod not validated</span><span id="f-flag-prod_not_validated" class="cnt">{{ counts.flag.prod_not_validated }}</span></label>
   </fieldset>
   <fieldset>
     <legend>Division</legend>

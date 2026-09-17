@@ -53,6 +53,8 @@ from ..models import (
     Division,
     DocumentType,
     EditedBy,
+    IndexRun,
+    JobRun,
     PatternCreate,
     PatternType,
     Role,
@@ -124,6 +126,7 @@ _ORDER = {st: i for i, (st, _, _, _) in enumerate(PIPELINE)}
 STEP_FOR_KIND = {
     "scrape": Status.BACKLOG, "llm_patterns": Status.CURATING, "llm_metadata": Status.CURATING,
     "index_test": Status.CONFIG_GENERATED, "validate": Status.CONFIG_GENERATED, "index_prod": Status.LIVE,
+    "validate_prod": Status.LIVE,
 }
 
 
@@ -421,14 +424,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def audit(request: Request, action: str, collection_id: str | None = None, detail: str | None = None) -> None:
         await db(request).audit(actor(request), action, collection_id, detail)
 
-    async def with_validation(request: Request, c: Collection) -> Collection:
-        if c.status is Status.CONFIG_GENERATED:
-            last = await db(request).last_index_run(c.collection_id, "test")
-            c._validated = bool(last and last.state == "succeeded" and last.validation_passes(settings.validation_title_match_threshold))
+    CHECKING = {"test": ("index_test", "validate"), "prod": ("index_prod", "validate_prod")}
+
+    def run_passed(run: IndexRun | None) -> bool:
+        return bool(run and run.state == "succeeded" and run.validation_passes(settings.validation_title_match_threshold))
+
+    def unvalidated(target: str, run: IndexRun | None, active: JobRun | None) -> bool:
+        """Chip rule, read off the latest run of `target`. test ("needs re-indexing"): the run failed,
+        never finished, or did not validate. prod ("prod not validated"): the publish succeeded but its
+        check failed or never ran. Never while a job of that target (`active`: the collection's
+        queued/running job, if any) is still on it."""
+        if not run or run_passed(run) or (target == "prod" and run.state != "succeeded"):
+            return False
+        return not (active and active.state in ("queued", "running") and active.kind in CHECKING[target])
+
+    async def with_validation(request: Request, c: Collection, job: JobRun | None = None,
+                              runs: dict[str, IndexRun | None] | None = None) -> Collection:
+        """`job`: the collection's latest job; `runs`: {target: latest run}, when the caller already has them."""
+        if runs is None:
+            runs = {t: await db(request).last_index_run(c.collection_id, t) for t in CHECKING}
+        c._validated = run_passed(runs["test"])
+        c._test_unvalidated = unvalidated("test", runs["test"], job)
+        c._prod_unvalidated = unvalidated("prod", runs["prod"], job)
         return c
 
-    async def row_context(request: Request, c: Collection) -> dict:
-        return {"c": await with_validation(request, c), "job": await db(request).latest_job(c.collection_id)}
+    async def row_context(request: Request, c: Collection, runs: dict[str, IndexRun | None] | None = None) -> dict:
+        job = await db(request).latest_job(c.collection_id)
+        return {"c": await with_validation(request, c, job, runs), "job": job}
 
     def emit_collection(request: Request, c: Collection) -> None:
         bus(request).publish(
@@ -466,6 +488,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "curator": set(qp.getlist("curator")), "q": (qp.get("q") or "").strip(),
         }
         cols = await db(request).list_collections()
+        latest = {t: await db(request).latest_runs(t) for t in CHECKING}
+        runs = {c.collection_id: {t: latest[t].get(c.collection_id) for t in CHECKING} for c in cols}
+        active = {j.collection_id: j for j in await db(request).active_jobs()}
+        chips = {cid: {t: unvalidated(t, r[t], active.get(cid)) for t in CHECKING} for cid, r in runs.items()}
 
         def curator_of(c: Collection) -> str:
             return c.created_by or NONE_CURATOR
@@ -478,6 +504,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return False
             if "needs_recuration" in f["flag"] and not c.needs_recuration:
                 return False
+            if "needs_reindexing" in f["flag"] and not chips[c.collection_id]["test"]:
+                return False
+            if "prod_not_validated" in f["flag"] and not chips[c.collection_id]["prod"]:
+                return False
             if f["division"] and c.division not in f["division"]:
                 return False
             if f["curator"] and curator_of(c) not in f["curator"]:
@@ -488,7 +518,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         counts = {
             "status": Counter(c.status for c in cols),
             "stage": Counter(c.curation_stage for c in cols if c.status is Status.CURATING and c.curation_stage),
-            "flag": {"needs_recuration": sum(1 for c in cols if c.needs_recuration)},
+            "flag": {"needs_recuration": sum(1 for c in cols if c.needs_recuration),
+                     "needs_reindexing": sum(ch["test"] for ch in chips.values()),
+                     "prod_not_validated": sum(ch["prod"] for ch in chips.values())},
             "division": Counter(c.division for c in cols),
             "curator": Counter(curator_of(c) for c in cols),
         }
@@ -497,7 +529,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             curators.append(NONE_CURATOR)
         shown = [c for c in cols if keep(c)]
         return {
-            "rows": [await row_context(request, c) for c in shown],
+            "rows": [await row_context(request, c, runs[c.collection_id]) for c in shown],
             "statuses": list(Status), "stages": list(CurationStage), "divisions": list(Division), "curators": curators,
             "counts": counts, "filters": f,
             "active": bool(f["q"] or f["status"] or f["stage"] or f["flag"] or f["division"] or f["curator"]),
@@ -872,12 +904,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         counts["kept"] = sum(1 for r in curated if r.crawl_failure)
         runs = await d.list_index_runs(c.collection_id, limit=5)
         failed = jobs[0] if jobs and jobs[0].state == "failed" else None
+        # while an index/validate job is still going, the run's stored report is provisional (the
+        # indexer's pre-refresh validation.json, or the previous check) — show "validating", not fail
+        active = [j for j in jobs if j.state in ("queued", "running")]
         stats = {
             "last_scrape": await d.latest_job_of_kind(c.collection_id, "scrape"),
             "failed_step": STEP_FOR_KIND.get(str(failed.kind)) if failed else None,
             "index_runs": runs,
             "last_test_run": next((r for r in runs if r.target == "test"), None),
             "last_prod_run": next((r for r in runs if r.target == "prod"), None),
+            "validating_test": next((j for j in active if j.kind in ("index_test", "validate")), None),
+            "validating_prod": next((j for j in active if j.kind in ("index_prod", "validate_prod")), None),
             "exportable": await d.curated_export_count(c.collection_id) if c.curated_count else 0,
             "delta_counts": counts,
             "pattern_count": len(await d.list_patterns(c.collection_id)),
@@ -885,7 +922,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
         if step in (Status.BACKLOG, Status.SCRAPED) or c.status in (Status.BACKLOG, Status.SCRAPED):
             stats["existing_crawl"] = await existing_crawl(request, c)
-        await with_validation(request, c)
+        await with_validation(request, c, jobs[0] if jobs else None)
         return {"c": c, "job": jobs[0] if jobs else None, "step": step,
                 "steps": pipeline_steps(c), "stats": stats}
 
@@ -1299,19 +1336,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return htmx_done(request, {**job.model_dump(mode="json"), "run_id": run.run_id})
 
     @app.post("/api/collections/{collection_id}/index/revalidate", status_code=202, response_model=None)
-    async def api_revalidate(request: Request, collection_id: str):
-        """Re-check the latest test run against the index (direct query, or second pass on 403)."""
+    async def api_revalidate(request: Request, collection_id: str, target: Literal["test", "prod"] = "test"):
+        """Re-check the latest run of `target` against its index (direct query; test falls back to a
+        second indexer pass on 403, prod has no fallback and fails)."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        last = await db(request).last_index_run(collection_id, "test")
+        last = await db(request).last_index_run(collection_id, target)
         if not last or last.state != "succeeded":
-            raise HTTPException(409, "no successful test index run to validate")
+            raise HTTPException(409, f"no successful {target} index run to validate")
         jobs: JobManager = request.app.state.jobs
         try:
             job = await jobs.start_revalidate(c, last, actor=actor(request))
         except (JobConflict, IndexError_) as e:
             raise HTTPException(409, str(e)) from e
-        await audit(request, "revalidate", collection_id, f"test run {last.run_id}")
+        await audit(request, "revalidate", collection_id, f"{target} run {last.run_id}")
         return htmx_done(request, job)
 
     @app.get("/api/collections/{collection_id}/index_runs")
