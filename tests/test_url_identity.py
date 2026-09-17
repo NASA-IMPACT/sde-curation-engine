@@ -256,7 +256,7 @@ async def test_per_url_rule_follows_the_page_across_spellings(crawler_client):
     # a rule typed under the http spelling excludes the https row the dump has
     r = await c.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": "http://ex.org/p7/"})
     assert r.status_code == 201 and r.json()["deltas"]["excluded"] == 1
-    d = (await c.get("/api/collections/ex.org/delta?q=p7")).json()["items"][0]
+    d = (await c.get("/api/collections/ex.org/dump?q=p7")).json()["items"][0]
     assert d["excluded"] is True
     # excluding it again under the row's own spelling is a no-op; including it finds the rule under
     # the other spelling and removes it

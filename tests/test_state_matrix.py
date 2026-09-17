@@ -147,18 +147,6 @@ async def test_concurrent_recompute_and_promote(crawler_client):
     assert c["status"] in ("curating", "curated")
 
 
-async def test_delete_collection_while_job_runs(crawler_client):
-    cid = "ex.org"
-    await crawler_client.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 40})
-    await crawler_client.post(f"/api/collections/{cid}/scrape")
-    await asyncio.sleep(0.1)
-    r = await crawler_client.delete(f"/api/collections/{cid}")
-    assert r.status_code == 409, r.text  # refuse: cancel first
-    await crawler_client.post(f"/api/collections/{cid}/jobs/cancel")
-    assert (await crawler_client.delete(f"/api/collections/{cid}")).status_code == 204
-    assert not (await client_active(crawler_client)), "job still active after delete"
-
-
 async def client_active(client):
     return [j for j in await client.app.state.db.active_jobs()]
 
@@ -189,7 +177,8 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     t = (await c.get("/collections/ex.org?tab=delta&division=Earth+Science")).text
     assert "https://ex.org/p2" in t and "https://ex.org/p3" not in t
     assert 'title="division */p2 → Earth Science (by anonymous)"' in t  # "why" tooltip from pattern_effects
-    assert "https://ex.org/p1" in (await c.get("/collections/ex.org?tab=delta&excluded=true")).text
+    assert "https://ex.org/p1" not in (await c.get("/collections/ex.org?tab=delta")).text  # excluded: decided by the rule
+    assert "https://ex.org/p1" in (await c.get("/collections/ex.org?tab=dump&excluded=true")).text
     t = (await c.get("/collections/ex.org?tab=delta&per=25&page=2")).text
     assert "No delta URLs match" in t
     # csv export honours filters
@@ -197,19 +186,20 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     for tab in ("dump", "delta", "curated"):
         page = (await c.get(f"/collections/ex.org?tab={tab}")).text
         assert f'hx-boost="false" download href="/collections/ex.org/urls/{tab}?format=csv&' in page
-    r = await c.get("/collections/ex.org/urls/delta?format=csv&excluded=true")
+    r = await c.get("/collections/ex.org/urls/delta?format=csv&excluded=false")
     assert r.headers["content-type"].startswith("text/csv") and r.text.splitlines()[0].startswith("kind,url,excluded")
-    assert len(r.text.strip().splitlines()) == 2
+    r = await c.get("/collections/ex.org/urls/dump?format=csv&excluded=true")
+    assert r.text.splitlines()[0].startswith("url,excluded") and len(r.text.strip().splitlines()) == 2
     # curated tab after promote: read-only rows, 'Curate ↗' only when a delta exists
     await c.post("/api/collections/ex.org/promote")
     t = (await c.get("/collections/ex.org?tab=curated")).text
-    assert ">included<" in t and ">excluded<" in t and "delta URL ↗</a>" not in t and "Delta URLs</th>" not in t
+    assert ">included<" in t and "https://ex.org/p1" not in t and "delta URL ↗</a>" not in t and "Delta URLs</th>" not in t  # excluded p1 never promoted
     await c.post("/api/collections/ex.org/patterns", json={"type": "title", "match": "*/p3", "value": "Three"})
     t = (await c.get("/collections/ex.org?tab=curated&q=p3")).text
     assert "delta URL ↗</a>" in t
     # the tab row carries the counts (the header has none)
     h = (await c.get("/collections/ex.org?tab=curated")).text
-    assert re.search(r'Dump URLs <span class="count[^"]*">8</span>', h) and re.search(r'Curated URLs <span class="count[^"]*">8</span>', h)
+    assert re.search(r'Dump URLs <span class="count[^"]*">8</span>', h) and re.search(r'Curated URLs <span class="count[^"]*">7</span>', h)
     assert re.search(r'Rules <span class="count[^"]*">3</span>', h) and ">Curate</a>" in h and "wb-chips" not in h
     assert (await c.get("/collections/ex.org/urls/nope")).status_code == 404
 

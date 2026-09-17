@@ -103,8 +103,8 @@ a.chip:hover { border-color: var(--accent); color: var(--fg); }
 .card h2 { margin: .2rem 0 .6rem; display: flex; align-items: center; gap: .5rem; }
 .tbl-toolbar { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; margin-bottom: .5rem; }
 .tbl-toolbar .grow { flex: 1; }
-.tbl-toolbar .page { padding: 0 .5rem; border: 1px solid var(--line); border-radius: 4px; text-decoration: none; color: var(--fg); }
-.tbl-toolbar .page.off { pointer-events: none; opacity: .35; }
+.tbl-toolbar .page, .pager .page { padding: 0 .5rem; border: 1px solid var(--line); border-radius: 4px; text-decoration: none; color: var(--fg); }
+.tbl-toolbar .page.off, .pager .page.off { pointer-events: none; opacity: .35; }
 .tbl-wrap { overflow-x: auto; }
 table.urls { font-size: 13px; } table.urls th { position: sticky; top: 0; background: var(--bg); z-index: 1; }
 table.urls td.url { max-width: 34rem; overflow-wrap: anywhere; } table.urls td.url a { color: var(--link); }
@@ -314,6 +314,10 @@ table.urls td { vertical-align: top; }
 .sugg-scroll { max-height: 32rem; overflow: auto; margin: .4rem 0; border-top: 1px solid var(--line); }
 .sugg-scroll thead th { position: sticky; top: 0; background: var(--bg); z-index: 1; }
 .sugg-scroll table.urls td.url { max-width: 26rem; }
+/* expanded (⤢) list: the page scrolls, not the table; the pager sits above and below */
+.sugg-page { margin: .4rem 0; border-top: 1px solid var(--line); }
+.pager { gap: .4rem; margin: .4rem 0; justify-content: flex-end; }
+.stage-card h2 .grow { flex: 1; }
 /* ── sortable column headers (URL tables, History) ── */
 th a.sort { color: inherit; text-decoration: none; }
 th a.sort:hover { color: var(--fg); }

@@ -46,14 +46,20 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
      chip with **cancel**, and the one **Next** action for the current step. The counts
      (**Dump URLs · Rules · Delta URLs · Curated URLs**) sit on the tab row.
    - **Pipeline stepper**: each step's panel shows what it did, its primary action, and a redo where
-     sensible, with details, last job and *Advanced* (re-scrape, manual status, delete). Under the
+     sensible, with details, last job and *Advanced* (re-scrape, manual status). Under the
      other steps this panel is all there is; under Curating / Curated it is the **Overview** tab.
    - **Dump URLs** (first tab; raw crawl: title, type, depth, text size, state) · **Delta URLs**
      (kind badge, scraped → effective title, division, type, exclude — all editable inline; AI badges)
      · **Curated** (read-only approved set with a **Curate ↗** jump when a delta exists). Search,
      kind / excluded / division / type filters, page size, paging, ⇩ CSV of the filtered rows.
      Hover a field to see *which pattern* set it.
-   - **Curate**: ✨ suggestions with Accept/Reject, add a rule by hand, Recompute and Promote.
+   - **Curate**: ✨ suggestions with Accept/Reject, add a rule by hand, Recompute and Promote. The
+     Exclusions and Metadata lists show their first 50 rows in place; **⤢ Expand**
+     (`?tab=curate&focus=exclusions|metadata`) opens one on its own paginated page, **⤡ Collapse** goes back.
+   - **Excludes are rules, not deltas**: an excluded dump URL has no delta row, and a curated URL an
+     exclude rule newly matches is flagged excluded in place (the next index run drops it; a
+     Test index / Live collection drops back to Curated). Only the way back in (include, or deleting
+     the rule) is a delta to promote. Excluded URLs show under Dump URLs; exclude rules count matches over the dump.
    - **Rules** (right after Curate): every rule in force, the add-by-hand forms, and match counts
      over (and linking to) the delta URLs while reviewing and the curated URLs once promoted.
    - **Activity**: all jobs and the status history.
@@ -70,7 +76,7 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
    | 6 Live | **Index to prod** (only after a validated test run), prod run summary |
 
    A running job shows a spinner, live doc counts and a **Cancel** button. *Advanced* (collapsed)
-   holds Re-scrape, a manual status override and Delete.
+   holds Re-scrape and a manual status override. Collections cannot be deleted.
 3. **User manual** (`/manual`, also in the ☰ menu): the illustrated curator's handbook — quick path,
    screen-by-screen walkthrough, rule semantics, jobs, parallel work, quirks. Template
    `sde_curation/web/templates/manual.html`, screenshots in `static/manual/`.
@@ -218,7 +224,7 @@ secrets set once per environment. Step-by-step runbook (one-time account setup, 
 verification): `docs/deploy-dev.md`; manual end-to-end test plan: `docs/e2e-test.md`; stack reference and the exact IAM the task role gets:
 `infra/README.md`. `APP_PASSWORD` turns on login and seeds the first `admin` account with that value (only while the
 users table is empty); admins create accounts at `/users`, everyone changes their own password at
-`/account`. Roles: admin (users, delete collections), curator (everything else). Every action is
+`/account`. Roles: admin (users), curator (everything else). Every action is
 attributed to the signed-in user: status history, patterns, jobs, an append-only audit trail
 (Activity tab, `/api/collections/{id}/audit`) and the per-collection `collection.yaml` /
 `patterns.yaml`. Locally it is off, so the UI and tests run as `anonymous`.
@@ -329,7 +335,7 @@ are in flight — the ceilings come from the systems behind it.
 | `INDEXER_ROOT`, `INDEXER_PYTHON` | sde-api-scrapers repo (Phase 5) |
 | `SCRAPE_BACKEND` | `local` (subprocess) or `ssm` (drop the job on the EC2 inbox via SSM; the job shows as *queued* until the crawler rewrites its log, then S3 is polled for the documents object) |
 | `AWS_PROFILE` | local runs only: the AWS CLI/SSO profile boto3 uses (the app exports it); unset in ECS |
-| `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET`, `CRAWLER_S3_PREFIX` | needed for `ssm`; the prefix is the folder inside the bucket the crawler writes to (`<prefix>/scraped_collections/…`), empty = bucket root |
+| `CRAWLER_INSTANCE_ID`, `CRAWLER_S3_BUCKET`, `CRAWLER_S3_PREFIX` | needed for `ssm`; the prefix is the folder inside the bucket the crawler writes to (`<prefix>/scraped_collections/<stem>.json`, where `<stem>` is the slugged seed URL, e.g. `https_science.nasa.gov_photojournal`), empty = bucket root |
 | `INDEX_BACKEND` (`local`\|`ecs`), `COSMOS_INDEX_BUCKET`, `WEB_INDEX_NAME` | indexing target bucket / index |
 | `TEST_FRONTEND_URL`, `PROD_FRONTEND_URL` | search front ends the "Open test / prod front end" buttons on steps 5 and 6 link to, so the curator can verify what was indexed |
 | `INDEXING_ECS_CLUSTER`, `INDEXING_TASK_FAMILY`, `INDEXING_CONTAINER_NAME`, `INDEXING_SUBNETS`, `INDEXING_SECURITY_GROUPS`, `INDEXING_DISPATCH_ROLE_ARN` | `ecs` backend |
@@ -349,9 +355,9 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 
 | Route | Purpose |
 |---|---|
-| `GET /events` | SSE stream: `collection`, `collection_created`, `collection_deleted` |
+| `GET /events` | SSE stream: `collection`, `collection_created` |
 | `POST /api/collections` | create `{seed_url, name, division?, document_type?, max_pages?}` |
-| `GET/DELETE /api/collections/{id}` | read / delete (409 while a job runs) |
+| `GET /api/collections/{id}` | read (collections cannot be deleted) |
 | `POST …/status` | `{status, note?, force?}` — transition + data rules enforced |
 | `GET …/history`, `…/jobs`, `…/dump` | audit trail, job runs, ingested URLs |
 | `POST …/scrape` | run the crawl → job (202; 409 if busy) |
@@ -359,7 +365,7 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `POST …/recompute` | diff dump vs curated + apply patterns (idempotent) |
 | `GET/POST /…/patterns`, `DELETE …/patterns/{pid}` | pattern CRUD with match counts |
 | `POST …/urls` | per-URL edit `{url, type, value?}`; exclude/include toggles |
-| `GET …/dump?q`, `…/delta?kind&excluded&division&document_type&q&edited&renamed&limit&offset` (`…/deltas` still works), `…/curated?q&excluded&edited&unreachable` | the three URL sets, paginated |
+| `GET …/dump?q&excluded`, `…/delta?kind&excluded&division&document_type&q&edited&renamed&limit&offset` (`…/deltas` still works), `…/curated?q&excluded&edited&unreachable` | the three URL sets, paginated |
 | `GET /collections/{id}/urls/{dump\|delta\|curated}?format=csv&…` | CSV export of the filtered set |
 | `POST …/promote` | delta URLs → curated URLs; status `curated` |
 | `POST …/index?target=test\|prod` | export to S3 + dispatch WEB_COSMOS → job (202; 409 unless curated, no delta URLs, something to export; prod needs a validated test run) |
@@ -381,7 +387,7 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 4. **Promote** → `curated`; step 3 → Recompute stays `curated` when nothing changed.
 5. Step 1 → **Re-scrape** → `scraped` + ⚠; **Start curating** on an identical crawl → back to `curated`.
 6. Guard rails: start a bigger crawl, try Add pattern / Promote / Advanced status → 409; **Cancel**;
-   Advanced `curated` with delta URLs → 409; delete a collection in one tab → row gone in another.
+   Advanced `curated` with delta URLs → 409.
 7. `curl localhost:8080/api/collections/aurorasaurus.org/history`, `data/collections/aurorasaurus.org/*.yaml`.
 
 ## Layout

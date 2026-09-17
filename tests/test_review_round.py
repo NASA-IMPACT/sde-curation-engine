@@ -104,19 +104,21 @@ async def test_edited_by_survives_promote_and_filters(crawler_client):
     await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "reject", "field": "document_type"})
     await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p2", "type": "division", "value": "Earth Science"})  # SME on p2
     await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "exclude"})  # SME exclude on p3
-    d2, d3, d4 = [await delta(c, f"https://ex.org/p{i}") for i in (2, 3, 4)]
-    assert d2["edited_by"] == "mixed" and d3["edited_by"] == "mixed" and d4["edited_by"] == "ai"
+    d2, d4 = [await delta(c, f"https://ex.org/p{i}") for i in (2, 4)]
+    assert d2["edited_by"] == "mixed" and d4["edited_by"] == "ai"
+    # the excluded p3 is decided by its rule: not a delta, shown excluded under Dump URLs
     page = (await c.get("/collections/ex.org?tab=delta&q=p2")).text
     assert 'class="edited e-mixed"' in page and "AI + SME" in page
     assert 'division */p2' not in page and "division https://ex.org/p2 → Earth Science (by anonymous)" in page  # SME tooltip: unchanged format
     assert "title https://ex.org/p4 → Page 4 (by anonymous) · AI" in (await c.get("/collections/ex.org?tab=delta&q=p4")).text
-    assert 'title="exclude https://ex.org/p3 (by anonymous)"' in (await c.get("/collections/ex.org?tab=delta&q=p3")).text
+    assert (await c.get("/api/collections/ex.org/delta?q=p3")).json()["total"] == 0
+    assert 'title="exclude https://ex.org/p3 (by anonymous)"' in (await c.get("/collections/ex.org?tab=dump&q=p3")).text
     # filter + csv on deltas
-    assert (await c.get("/api/collections/ex.org/delta?limit=100")).json()["total"] == 8
+    assert (await c.get("/api/collections/ex.org/delta?limit=100")).json()["total"] == 7
     only_ai = (await c.get("/collections/ex.org?tab=delta&edited=ai")).text
     assert "https://ex.org/p4" in only_ai and "https://ex.org/p2" not in only_ai
     csv = (await c.get("/collections/ex.org/urls/delta?format=csv&edited=mixed")).text.splitlines()
-    assert "edited_by" in csv[0] and len(csv) == 3
+    assert "edited_by" in csv[0] and len(csv) == 2
     # rules table: source column + counts
     rules = (await c.get("/collections/ex.org/rules")).text
     assert "AI 8" in rules and "SME 2" in rules and 'e-src-llm"' in rules and 'e-src-sme"' in rules and "this collection only" in rules
@@ -185,21 +187,24 @@ async def test_removal_warning_and_edits_on_every_table(crawler_client):
     await c.post("/api/collections/ex.org/promote")
     for st in ("config_generated", "live"):
         await c.post("/api/collections/ex.org/status", json={"status": st})
-    # curated table: toggle exclude on a promoted row → pending modified change, collection back to curating
+    # curated table: toggle exclude on a promoted row → the rule applies in place (no delta); the live
+    # collection drops back to curated so it gets re-indexed
     page = (await c.get("/collections/ex.org?tab=curated")).text
     assert "✗ exclude" in page and ">Edited by<span" in page and "read-only" not in page.lower()
     r = await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p6", "type": "exclude"})
-    assert r.status_code == 200 and r.json()["modified"] == 1 and r.json()["excluded"] == 1
-    d = await delta(c, "https://ex.org/p6")
-    assert d["kind"] == "modified" and d["excluded"] is True and d["edited_by"] == "sme"
-    assert (await coll(c))["status"] == "curating"
+    assert r.status_code == 200 and r.json()["modified"] == 0 and r.json()["excluded"] == 1
+    col = await coll(c)
+    assert col["status"] == "curated" and col["delta_count"] == 0
     page = (await c.get("/collections/ex.org?tab=curated&q=p6")).text
-    assert "delta URL ↗" in page and 'title="exclude https://ex.org/p6 (by anonymous)"' in page
-    # crawl table: the toggle is there, reflects the pending state, and works
+    assert ">excluded<" in page and 'class="kind k-modified nowrap"' not in page and 'title="exclude https://ex.org/p6 (by anonymous)"' in page
+    # crawl table: the toggle is there, reflects the excluded state, and works both ways
     page = (await c.get("/collections/ex.org?tab=dump&q=p6")).text
-    assert ">excluded<" in page and "✓ include" in page and "delta URL ↗" in page
+    assert ">excluded<" in page and "✓ include" in page and 'title="this URL is a delta' not in page
     r = await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p7", "type": "exclude"})
-    assert r.status_code == 200 and r.json()["modified"] == 2
+    assert r.status_code == 200 and r.json()["modified"] == 0 and r.json()["excluded"] == 2
+    r = await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p7", "type": "include"})
+    assert r.status_code == 200 and r.json()["modified"] == 1 and (await coll(c))["status"] == "curating"  # include goes through the deltas
+    assert 'title="this URL is a delta' in (await c.get("/collections/ex.org?tab=dump&q=p7")).text
     # promote, then a crawl that lost most of the set → warning banner
     await c.post("/api/collections/ex.org/promote")
     db = c.app.state.db
@@ -271,8 +276,8 @@ async def test_rules_are_scoped_to_their_collection(crawler_client):
     await c.post("/api/collections/a.org/patterns", json={"type": "exclude", "match": "https://b.org/*"})
     await c.post("/api/collections/b.org/recompute")
     assert (await c.get("/api/collections/b.org/delta?excluded=true")).json()["total"] == 0
-    # deleting A cascades only A's rules
-    await c.delete("/api/collections/a.org")
+    # deleting A (in the database: the app has no delete) cascades only A's rules
+    await c.app.state.db.delete_collection("a.org")
     assert (await c.get("/api/collections/b.org")).status_code == 200
     await c.post("/api/collections/b.org/patterns", json={"type": "exclude", "match": "*/p1"})
     assert len(await patterns(c, "b.org")) == 1

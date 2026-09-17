@@ -19,6 +19,8 @@ q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is 
 {%- endmacro %}
 
 {% from "partials/url_cells.html" import edited_chip, toggle_cell, title_cell, select_cell with context %}
+{% from "partials/pager.html" import pager %}
+{% macro page_href(n) %}{{ qs('&page=' ~ n) }}{% endmacro %}
 
 {# hx-boost on this form also boosts the links inside it (filters, paging): fine for pages, but the
    CSV link opts out — boosted, htmx fetches the CSV and swaps "#tab-body" out of it, blanking the tab #}
@@ -29,8 +31,8 @@ q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is 
   {% if set == 'delta' %}
   <select name="kind" aria-label="kind"><option value="">any kind</option>{% for k in kinds %}<option value="{{ k }}" {% if kind == k %}selected{% endif %}>{{ 'removed' if k == 'deleted' else k }}</option>{% endfor %}</select>
   {% endif %}
-  {% if set != 'dump' %}
   <select name="excluded" aria-label="exclusion"><option value="">included + excluded</option><option value="false" {% if excluded == False %}selected{% endif %}>included only</option><option value="true" {% if excluded %}selected{% endif %}>excluded only</option></select>
+  {% if set != 'dump' %}
   <select name="edited" aria-label="edited by"><option value="">edited by anyone</option><option value="ai" {% if edited == 'ai' %}selected{% endif %}>edited by AI</option><option value="sme" {% if edited == 'sme' %}selected{% endif %}>edited by SME</option><option value="mixed" {% if edited == 'mixed' %}selected{% endif %}>AI + SME</option></select>
   {% endif %}
   {% if set == 'delta' %}
@@ -47,10 +49,7 @@ q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is 
   <button class="secondary">Filter</button>
   {% if q or kind or excluded is not none or division or document_type or ai or changed or edited or renamed or unreachable or match %}<a class="muted" href="{{ base }}">clear</a>{% endif %}
   <span class="grow"></span>
-  <span class="muted small nowrap">{% if total %}{{ (page - 1) * per + 1 }}–{{ [page * per, total]|min }} of {{ total }}{% else %}0 rows{% endif %}</span>
-  <a class="page {% if page <= 1 %}off{% endif %}" href="{{ qs('&page=' ~ (page - 1)) }}" aria-label="previous page">‹</a>
-  <span class="small nowrap">page {{ page }} / {{ pages }}</span>
-  <a class="page {% if page >= pages %}off{% endif %}" href="{{ qs('&page=' ~ (page + 1)) }}" aria-label="next page">›</a>
+  {{ pager(page, pages, per, total, page_href) }}
   <a class="muted small nowrap" hx-boost="false" download href="/collections/{{ cid }}/urls/{{ set }}?format=csv&{{ filters_qs() }}&sort={{ sort or '' }}&dir={{ dir or '' }}" title="download the filtered rows as CSV, in this order">⇩ CSV</a>
 </form>
 
@@ -77,11 +76,11 @@ q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is 
 <table class="urls {{ set }}">
   <thead>
   {% if set == 'dump' %}
-    <tr><th class="num">#</th>{{ th('url', 'URL') }}{{ th('excluded', 'In index', 'included rows are exported to the index; excluded rows are kept out. Click to change: the edit shows up under Delta URLs') }}{{ th('scraped_title', 'Scraped title') }}{{ th('content_type', 'Type') }}{{ th('depth', 'Depth') }}{{ th('text_len', 'Text') }}{{ th('vs_curated', 'vs curated', 'how this URL relates to the curated URLs') }}</tr>
+    <tr><th class="num">#</th>{{ th('url', 'URL') }}{{ th('excluded', 'In index', 'included rows are exported to the index; excluded rows are kept out. Click to change: an exclude is a rule that takes effect at once (see Rules); an include shows up under Delta URLs') }}{{ th('scraped_title', 'Scraped title') }}{{ th('content_type', 'Type') }}{{ th('depth', 'Depth') }}{{ th('text_len', 'Text') }}{{ th('vs_curated', 'vs curated', 'how this URL relates to the curated URLs') }}</tr>
   {% elif set == 'delta' %}
     <tr><th class="pick"><input type="checkbox" onclick="pickAll(this)" {% if running or c.status != 'curating' %}disabled{% endif %} aria-label="select every row on this page" title="select every row on this page"></th><th class="num">#</th>{{ th('kind', 'Change', 'new: not in the curated URLs · modified: differs from the curated URLs (renamed: same page, new URL spelling) · removed: the crawl found it gone (promote drops it from the curated URLs; the next index run deletes it)') }}{{ th('url', 'URL') }}{{ th('excluded', 'In index', 'included rows are exported to the index; excluded rows are kept out') }}{{ th('title', 'Title <small class="muted">scraped → effective</small>') }}{{ th('division', 'Division') }}{{ th('document_type', 'Doc type') }}{{ th('edited_by', 'Edited by', 'who set the effective values: AI (accepted suggestions), SME (typed or toggled by a curator), or both') }}</tr>
   {% else %}
-    <tr><th class="num">#</th>{{ th('url', 'URL') }}{{ th('excluded', 'In index', 'included rows are exported to the index; excluded rows are kept out. Click to change: the edit shows up under Delta URLs') }}{{ th('title', 'Title <small class="muted">scraped → effective</small>') }}{{ th('division', 'Division') }}{{ th('document_type', 'Doc type') }}{{ th('text_len', 'Text', 'size of the page text this row was approved with — the text the index gets; empty means the row was promoted before the engine kept text on the curated URLs') }}{{ th('edited_by', 'Edited by', 'who set the effective values: AI (accepted suggestions), SME (typed or toggled by a curator), or both') }}</tr>
+    <tr><th class="num">#</th>{{ th('url', 'URL') }}{{ th('excluded', 'In index', 'included rows are exported to the index; excluded rows are kept out. Click to change: an exclude is a rule that takes effect at once (see Rules); an include shows up under Delta URLs') }}{{ th('title', 'Title <small class="muted">scraped → effective</small>') }}{{ th('division', 'Division') }}{{ th('document_type', 'Doc type') }}{{ th('text_len', 'Text', 'size of the page text this row was approved with — the text the index gets; empty means the row was promoted before the engine kept text on the curated URLs') }}{{ th('edited_by', 'Edited by', 'who set the effective values: AI (accepted suggestions), SME (typed or toggled by a curator), or both') }}</tr>
   {% endif %}
   </thead>
   <tbody>

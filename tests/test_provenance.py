@@ -92,7 +92,7 @@ async def test_jobs_record_starter_and_system_transitions(authed_crawler_client)
     assert actions[:2] == ["job.cancel", "scrape.start"]
 
 
-async def test_delete_and_pattern_delete_survive_in_ledger(authed_crawler_client):
+async def test_pattern_delete_survives_in_ledger(authed_crawler_client):
     c = authed_crawler_client
     await c.post("/api/collections", json=COLL)
     await c.post("/api/collections/ex.org/scrape"); await wait_job(c, "ex.org")
@@ -100,10 +100,9 @@ async def test_delete_and_pattern_delete_survive_in_ledger(authed_crawler_client
     r = await c.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": "*/p1"})
     pid = r.json()["pattern"]["id"]
     assert (await c.delete(f"/api/collections/ex.org/patterns/{pid}")).status_code == 200
-    assert (await c.delete("/api/collections/ex.org")).status_code == 204
     rows = await c.app.state.db.list_audit("ex.org")
     actions = [x["action"] for x in rows]
-    assert actions[0] == "collection.delete" and "pattern.delete" in actions
+    assert actions[0] == "pattern.delete"
     assert rows[0]["actor"] == "admin" and "exclude */p1" in next(x["detail"] for x in rows if x["action"] == "pattern.delete")
 
 

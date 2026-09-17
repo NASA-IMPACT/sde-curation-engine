@@ -1,0 +1,8 @@
+{# Paging controls shared by the URL tables (partials/urls_table.html) and the expanded Curate lists
+   (partials/tab_curate.html). `href` is a macro or callable: page number -> URL. #}
+{% macro pager(page, pages, per, total, href) -%}
+  <span class="muted small nowrap">{% if total %}{{ (page - 1) * per + 1 }}–{{ [page * per, total]|min }} of {{ total }}{% else %}0 rows{% endif %}</span>
+  <a class="page {% if page <= 1 %}off{% endif %}" href="{{ href(page - 1) }}" aria-label="previous page">‹</a>
+  <span class="small nowrap">page {{ page }} / {{ pages }}</span>
+  <a class="page {% if page >= pages %}off{% endif %}" href="{{ href(page + 1) }}" aria-label="next page">›</a>
+{%- endmacro %}

@@ -59,7 +59,7 @@ def check_transition(current: Status, new: Status) -> None:
 
 
 class Role(StrEnum):
-    ADMIN = "admin"  # manages users, may delete collections
+    ADMIN = "admin"  # manages users
     CURATOR = "curator"
 
 
@@ -181,6 +181,15 @@ def apex_host(url: str) -> str:
 def collection_id_from_seed(seed: str) -> str:
     """Same rule as sde_crawler.job.collection_id_from_seed so ids line up across repos."""
     return _SLUG_RE.sub("_", apex_host(normalize_seed(seed))).strip("._") or "collection"
+
+
+def crawl_file_stem(seed: str) -> str:
+    """Name the crawler gives a seed's output files: scraped_collections/<stem>.json,
+    failure_logs/<stem>_failures.jsonl and failure_logs/<stem>_failures_summary.json.
+    Lowercased full seed with "://" -> "_", anything outside [a-zA-Z0-9._-] -> "_", runs of "_"
+    collapsed and stripped: https://science.nasa.gov/photojournal/ -> https_science.nasa.gov_photojournal."""
+    stem = _SLUG_RE.sub("_", seed.strip().lower().replace("://", "_"))
+    return re.sub(r"_+", "_", stem).strip("_")
 
 
 class CollectionCreate(BaseModel):

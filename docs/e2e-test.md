@@ -47,7 +47,7 @@ Pipeline the UI walks, as shown in the step bar on a collection page:
 | Enter a wrong username or password | "Wrong username or password." on the page, still on `/login` |
 | Sign in as `admin` | the dashboard; header shows **signed in as admin · Account · Users · Sign out** and a green dot (SSE connected) |
 | **Users** → add `tester` (curator, 8+ char password) | row appears; the audit trail on any collection's Activity tab later shows `user.create` by admin |
-| Sign out, sign in as `tester` | header shows **signed in as tester** with **Account** but no **Users** link; a collection page has no **Delete collection** button; `/users` answers 403 |
+| Sign out, sign in as `tester` | header shows **signed in as tester** with **Account** but no **Users** link; no collection page has a **Delete collection** button (nobody can delete one); `/users` answers 403 |
 | **Account** → change password, sign out, sign in with the new one | works; the old password is refused |
 | As admin, **Users** → Disable `tester` while tester is signed in elsewhere | tester's next click lands on `/login`; Enable restores access |
 | Click **Sign out** | back on `/login`; the browser back button does not show the dashboard |
@@ -92,8 +92,8 @@ on the Delta URLs tab after **Recompute delta URLs** (recompute also runs automa
 
 | Type | Example value | Expect |
 |---|---|---|
-| `exclude` | a URL pattern that matches some dump URLs, e.g. `*/tag/*` or `*/page/*` | those URLs flip to *excluded* in Dump/Deltas; excluded count goes up |
-| `include` | a pattern inside the excluded set | those URLs come back (include beats exclude for the most specific match) |
+| `exclude` | a URL pattern that matches some dump URLs, e.g. `*/tag/*` or `*/page/*` | those URLs leave the Delta URLs and show *excluded* under Dump URLs; "N excluded by rules" goes up; the rule's match count (Rules) is over the dump |
+| `include` | a pattern inside the excluded set | those URLs come back as delta URLs (include beats exclude) |
 | `title` | pattern `*` with a title template such as `{title} - Aurorasaurus` | every delta's title shows the templated value |
 | `division` | pattern `*`, value `Heliophysics` | division column filled on every delta |
 | `document_type` | pattern `*`, a document type | document_type column filled |
@@ -114,7 +114,8 @@ Prerequisite: the OpenAI key secret is set (deploy runbook section 4).
 | Do | Expect |
 |---|---|
 | **✨ Suggest patterns** (button says *all N URLs · K calls*) | a `llm_patterns` job runs; the header chip reads *LLM calls in progress · i/K calls*; **Suggested patterns** appear — `global` rows first, then `llm` rows, all `exclude` — with **Accept** / **Reject**; log has no `openai` error |
-| **Accept** one | it becomes a real `exclude` rule, deltas recompute, the matching URLs show *excluded* |
+| **Accept** one | it becomes a real `exclude` rule; the matching URLs leave the Delta URLs and show *excluded* under Dump URLs |
+| more than 50 suggestions → **⤢ Expand** | Exclusions opens alone, paginated (per page 25–250); accept a row on page 2 → still on page 2; **⤡ Collapse** → the whole Curate tab |
 | **Reject** one | it disappears and nothing changes |
 | **✨ Suggest metadata** (shows how many URLs are classifiable and which models) | the chip reads *LLM calls in progress · i/N URLs · k in flight*; per-URL title/division/document_type suggestions with a confidence on the Deltas rows; the review bar counts high / medium / low; job result shows tokens in/out |
 | **Cancel** a running Suggest metadata, then run it again | rows classified before the cancel keep their `AI:` badges; the second run's total is only the remainder |
@@ -202,9 +203,8 @@ broken webhook never blocks a transition (the error is logged).
 
 ## 13. Clean up
 
-**Delete collection** on the page removes the engine's record and its YAML. It does **not** remove
-the exported files in the hand-off bucket or the documents already in the dev index; those follow
-the indexer's own lifecycle. If you want the test documents out of the shared dev index, re-scrape
+Collections cannot be deleted from the engine (no button, no API). The exported files in the
+hand-off bucket and the documents already in the dev index follow the indexer's own lifecycle. If you want the test documents out of the shared dev index, re-scrape
 with a cap of 1 and re-index, or ask the indexer team.
 
 ## Pass/fail sheet

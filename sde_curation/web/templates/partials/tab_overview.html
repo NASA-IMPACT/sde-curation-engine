@@ -45,10 +45,5 @@
       <input id="note" placeholder="note" size="24">
       <button class="secondary">Apply</button>
     </form>
-    {% if is_admin(request) %}
-    <form hx-delete="/api/collections/{{ c.collection_id }}" hx-confirm="Delete this collection and all its data?" class="inline">
-      <button class="danger">Delete collection</button>
-    </form>
-    {% endif %}
   </div>
 </details>

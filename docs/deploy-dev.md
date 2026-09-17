@@ -324,7 +324,7 @@ aws secretsmanager get-secret-value --profile sde-dev \
 Sign in at the CloudFront URL as `admin` with that value, then:
 1. **Users** (header link, admins only) → create one account per teammate (username = what the
    provenance records will show, so use something recognisable; role `curator`, or `admin` for
-   people who may manage accounts and delete collections). Hand each person their initial password
+   people who may manage accounts). Hand each person their initial password
    through a password manager; they change it at **Account**.
 2. **Account** → change the admin password. From now on the secret is only a bootstrap value:
    rotating it does nothing unless the users table is empty again.
