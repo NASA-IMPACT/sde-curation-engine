@@ -12,7 +12,7 @@ from sde_curation.engine.diff import match_urls, promote, recompute
 from sde_curation.engine.patterns import resolve_all
 from sde_curation.engine.urls import canonical_key, spellings
 from sde_curation.models import NOT_VISITED, CuratedUrl, DeltaKind, DumpUrl, Pattern, PatternType
-from tests.conftest import wait_job
+from tests.conftest import classify, wait_job
 
 
 def dump(*pairs, hash_=None):
@@ -174,6 +174,7 @@ async def test_scrape_stores_failures_and_the_flow_keeps_unreachable_rows(crawle
     assert fails["https://ex.org/p10"].reason == "http_403"
     r = await c.post("/api/collections/ex.org/recompute")
     assert r.json() == {"new": 8, "modified": 0, "deleted": 0, "excluded": 0, "content_changed": 0, "renamed": 0, "kept": 0}
+    await classify(c)
     assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
 
     # a re-crawl: p1 gained a trailing slash, p2 a fragment, p3 was blocked (403), p4 is gone (404),
@@ -233,7 +234,8 @@ async def test_capped_crawl_keeps_curated_rows_it_never_reached(crawler_client):
     assert job["progress"]["capped"] is True
     assert (await c.get("/api/collections/ex.org")).json()["last_crawl_capped"] is True
     await c.post("/api/collections/ex.org/recompute")
-    await c.post("/api/collections/ex.org/promote")
+    await classify(c)
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
     # the next (still capped) crawl only got to p1 and p2
     await db.replace_dump("ex.org", [DumpUrl(collection_id="ex.org", url=f"https://ex.org/p{i}", scraped_title=f"Page {i}")
                                      for i in (1, 2)])

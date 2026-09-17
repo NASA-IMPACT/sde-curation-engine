@@ -99,6 +99,7 @@ class JobKind(StrEnum):
     VALIDATE_PROD = "validate_prod"
     LLM_PATTERNS = "llm_patterns"
     LLM_METADATA = "llm_metadata"
+    LLM_TITLES = "llm_titles"
 
 
 class JobState(StrEnum):
@@ -337,6 +338,9 @@ class DeltaUrl(BaseModel):
     ai_content_hash: str | None = None  # hash of the text the model saw (resume / re-classify logic)
     ai_error: str | None = None  # why the last Suggest metadata call for this URL failed (cleared on success)
     ai_failures: int = 0  # Suggest metadata runs in a row that failed for this URL
+    # the title this page shared with other pages of the same document type before "Regenerate duplicate titles"
+    # replaced its AI title (cleared with the AI title, and by a fresh Suggest metadata answer)
+    title_ai_before: str | None = None
 
 
 class CuratedUrl(BaseModel):
@@ -534,13 +538,22 @@ class GlobalExcludeList(BaseModel):
 
 
 class MetadataSuggestion(BaseModel):
-    """The model's answer for ONE document (one call per URL). Confidence is per field and
-    required, so the schema forces the model to commit. Every page gets a document type: SDE
-    documents cannot be indexed without one, so the model picks the closest (low confidence)."""
+    """The model's answer for ONE document (one call per URL). Every field and its confidence is
+    required: nothing may reach the curated set blank, so where the model is unsure it gives its
+    best value with low confidence and the SME reviews the low ones. (An empty title string cannot be
+    ruled out by the schema; the task treats it as a failed call.)"""
 
-    title: str | None = None
+    title: str
     title_confidence: Confidence
-    division: Division | None = None
+    division: Division
     division_confidence: Confidence
     document_type: DocumentType
     document_type_confidence: Confidence
+
+
+class TitleSuggestion(BaseModel):
+    """The model's answer for ONE page whose title other pages of its collection share: a title
+    that tells it apart (the shared title unchanged, or null, when nothing does)."""
+
+    title: str | None = None
+    title_confidence: Confidence

@@ -3,7 +3,7 @@ tooltips, and the notifications all say who did it; job-driven transitions say `
 
 import yaml
 
-from tests.conftest import add_user, login, wait_job
+from tests.conftest import add_user, classify, login, wait_job
 
 COLL = {"seed_url": "https://ex.org", "name": "Ex", "max_pages": 10, "division": "Heliophysics"}
 
@@ -41,6 +41,7 @@ async def test_curation_actions_are_attributed(authed_crawler_client):
     a = type(c)(transport=c._transport, base_url="http://t"); a.app = c.app
     await login(a, "alice", "alicepass1")
     await a.post("/api/collections/ex.org/recompute")
+    await classify(a)  # alice's metadata step; her edits below are newer and win
     r = await a.post("/api/collections/ex.org/patterns", json={"type": "division", "match": "*/p2", "value": "Earth Science"})
     assert r.status_code == 201 and r.json()["pattern"]["created_by"] == "alice"
     await a.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "title", "value": "T3"})
@@ -63,7 +64,8 @@ async def test_curation_actions_are_attributed(authed_crawler_client):
     assert by["scraped"] == "system" and by["curating"] == "alice" and by["curated"] == "alice"
     assert hist[0]["actor"] == "admin"  # created
     actions = [x["action"] for x in (await a.get("/api/collections/ex.org/audit")).json()]
-    assert actions == ["promote", "ai.accept", "url.edit", "pattern.add", "recompute", "scrape.start", "collection.create"]
+    assert actions == ["promote", "ai.accept", "url.edit", "pattern.add", "ai.bulk_accept", "suggest.metadata", "recompute",
+                       "scrape.start", "collection.create"]
     who = {x["action"]: x["actor"] for x in (await a.get("/api/collections/ex.org/audit")).json()}
     assert who["scrape.start"] == "admin" and who["promote"] == "alice"
     # activity tab shows the By columns and the audit trail

@@ -48,7 +48,7 @@ from .urls import canonical_key, url_rank
 
 # AI suggestions (and their provenance) survive a recompute: copied from the previous delta row.
 _AI_FIELDS = ("title_ai", "division_ai", "document_type_ai", "title_ai_conf", "division_ai_conf",
-              "document_type_ai_conf", "ai_model", "ai_content_hash", "ai_error", "ai_failures")
+              "document_type_ai_conf", "ai_model", "ai_content_hash", "ai_error", "ai_failures", "title_ai_before")
 
 
 @dataclass

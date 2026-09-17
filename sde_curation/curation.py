@@ -11,6 +11,20 @@ from .engine.urls import canonical_key
 from .models import Collection, DeltaKind, Pattern, PatternCreate, PatternType, RuleSource, Status
 
 
+class IncompleteMetadata(Exception):
+    """Promote refused: some delta URLs would reach the curated set without a title, a division or a
+    document type. `counts` is Database.incomplete_counts."""
+
+    def __init__(self, counts: dict[str, int]):
+        self.counts = counts
+        missing = ", ".join(f"{counts[f]} without a {label}" for f, label in
+                            (("title", "title"), ("division", "division"), ("document_type", "document type"))
+                            if counts[f])
+        n = counts["urls"]
+        super().__init__(f"{n} delta URL{'s' if n != 1 else ''} cannot be promoted yet ({missing}):"
+                         " accept the AI suggestions or set the values by hand first")
+
+
 class CurationService:
     def __init__(self, db: Database, lock_for=None):
         self.db = db
@@ -166,7 +180,14 @@ class CurationService:
         async with self._lock_for(c.collection_id):
             return await self._promote(c, actor)
 
+    async def _check_complete(self, c: Collection, urls: list[str] | None = None) -> None:
+        """Nothing reaches the curated set without a title, a division and a document type."""
+        counts = await self.db.incomplete_counts(c.collection_id, urls)
+        if counts["urls"]:
+            raise IncompleteMetadata(counts)
+
     async def _promote(self, c: Collection, actor: str | None = None) -> int:
+        await self._check_complete(c)
         deltas = await self.db.load_deltas(c.collection_id)
         curated = promote(
             await self.db.load_curated(c.collection_id), deltas,
@@ -181,7 +202,8 @@ class CurationService:
         return n
 
     async def promote_urls(self, c: Collection, urls: list[str]) -> tuple[int, DeltaSet]:
-        """Promote only these delta URLs: the same pure promote(), applied to the picked rows alone
+        """Promote only these delta URLs (refused with IncompleteMetadata if any lacks a title, division or
+        document type): the same pure promote(), applied to the picked rows alone
         (it already moves renames and drops tombstones). The rest of the queue stays as it is, so
         the curated set is written whole but only the picked rows take the dump's current text and
         hash — a row still under review must not quietly pick up text its metadata was never
@@ -196,6 +218,7 @@ class CurationService:
             left = [d for d in deltas if d.url not in wanted]
             if not picked:
                 return c.curated_count, DeltaSet(left)
+            await self._check_complete(c, [d.url for d in picked])
             hashes = await self.db.dump_content_hashes(c.collection_id)
             curated = promote(
                 await self.db.load_curated(c.collection_id), picked,

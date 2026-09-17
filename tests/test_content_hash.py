@@ -1,7 +1,7 @@
 """Content-aware deltas through the app: hash at ingest, carried at promote, flagged on re-scrape."""
 
 from sde_curation.models import DumpUrl
-from tests.conftest import wait_job
+from tests.conftest import classify, wait_job
 
 CID = "ex.org"
 
@@ -20,6 +20,7 @@ async def test_hash_flows_from_dump_to_curated_and_flags_changed_text(crawler_cl
     assert all(len(d.content_hash) == 64 for d in dump.values())
 
     await c.post(f"/api/collections/{CID}/recompute")
+    await classify(c)
     assert (await c.post(f"/api/collections/{CID}/promote")).status_code == 200
     cur = {r.url: r for r in await db.load_curated(CID)}
     assert cur[f"https://{CID}/p1"].content_hash == dump[f"https://{CID}/p1"].content_hash
@@ -71,6 +72,7 @@ async def test_promote_copies_text_and_export_survives_a_recrawl(crawler_client)
     await _scrape(c)
     dump = {d.url: d for d in await db.load_dump(CID)}
     await c.post(f"/api/collections/{CID}/recompute")
+    await classify(c)
     assert (await c.post(f"/api/collections/{CID}/promote")).status_code == 200
 
     cur = {r.url: r for r in await db.load_curated(CID, with_text=True)}

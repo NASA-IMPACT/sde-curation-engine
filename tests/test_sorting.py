@@ -3,7 +3,7 @@ Curate › Metadata with accept-all / per-row decisions."""
 
 import re
 
-from tests.conftest import wait_job
+from tests.conftest import classify, wait_job
 
 
 async def setup(c, n=10):
@@ -44,7 +44,8 @@ async def test_url_tables_sort_by_column(crawler_client):
     # dump and curated tables sort too
     page = (await c.get("/collections/ex.org?tab=dump&sort=url&dir=desc")).text
     assert urls_in_order(page)[0] == "https://ex.org/p9"
-    await c.post("/api/collections/ex.org/promote")
+    await classify(c)
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
     page = (await c.get("/collections/ex.org?tab=curated&sort=url&dir=desc")).text
     assert urls_in_order(page)[0] == "https://ex.org/p9"
     # the CSV follows the same order
