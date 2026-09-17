@@ -10,6 +10,11 @@ recompute(dump, curated, patterns, failures, capped) -> deltas
   (no delta) url in both and nothing changed; or url in curated, not in dump, but the crawl is
             not evidence it is gone — the row is kept and flagged (`crawl_failure`)
 
+Exclusions are decided by the rules alone, never queued as deltas: a dump URL an exclude rule
+keeps out has no delta row (not new, not modified); a curated row it newly keeps out is flagged
+excluded in place (`curated_excluded`, the next index run drops it). Only the way back in — a
+curated row that was excluded and no longer is — is a `modified` delta, reviewed and promoted.
+
 URL identity. Rows are matched by exact string first, then by canonical key (host + path + query:
 no scheme, no www., no trailing slash, no #fragment — `engine.urls.canonical_key`). A curated URL whose
 only change is the spelling is one `modified` delta carrying `renamed_from`, not a new row plus a
@@ -58,13 +63,17 @@ class DeltaSet:
     curated_crawl_failure: list[tuple[str, str | None]] = field(default_factory=list)
     # every curated URL kept despite being absent from the dump, with the reason (for the counts)
     kept: dict[str, str] = field(default_factory=dict)
+    # curated rows an exclude rule newly keeps out: flagged in place, no delta (url, excluded)
+    curated_excluded: list[tuple[str, bool]] = field(default_factory=list)
+    # dump URLs the rules keep out (they have no delta row, so they are counted here)
+    excluded: int = 0
 
     @property
     def counts(self) -> dict[str, int]:
         c = {k.value: 0 for k in DeltaKind}
         for d in self.deltas:
             c[d.kind.value] += 1
-        c["excluded"] = sum(1 for d in self.deltas if d.excluded and d.kind is not DeltaKind.DELETED)
+        c["excluded"] = self.excluded
         c["content_changed"] = sum(1 for d in self.deltas if d.content_changed)
         c["renamed"] = sum(1 for d in self.deltas if d.renamed_from)
         c["kept"] = len(self.kept)
@@ -133,6 +142,8 @@ def recompute(
     curated_edited_by: list[tuple[str, str | None]] = []
     curated_crawl_failure: list[tuple[str, str | None]] = []
     kept: dict[str, str] = {}
+    curated_excluded: list[tuple[str, bool]] = []
+    n_excluded = 0
     for u in urls:
         d, r = dump_by[u], resolved[u]
         cu = pair.get(u)
@@ -140,6 +151,16 @@ def recompute(
         for fld, pid in r.effects.items():
             effects.append((pid, u, fld))
         edited_by = edited_by_of([source_of[pid] for pid in r.effects.values() if pid in source_of])
+        if r.excluded:  # the rule decides it: no delta to review or promote
+            n_excluded += 1
+            if c is not None:
+                if not c.excluded:
+                    curated_excluded.append((cu, True))  # type: ignore[arg-type]
+                if edited_by != c.edited_by:
+                    curated_edited_by.append((cu, edited_by))  # type: ignore[arg-type]
+                if c.crawl_failure:
+                    curated_crawl_failure.append((cu, None))  # type: ignore[arg-type]
+            continue
         # curated excluded flag is only kept if it came from a pattern; otherwise not excluded
         eff = (d.scraped_title, r.title, r.division, r.document_type, r.excluded)
         # A NULL hash on either side means "unknown", never "changed": rows promoted before
@@ -204,7 +225,7 @@ def recompute(
                 edited_by=c.edited_by,
             )
         )
-    return DeltaSet(deltas, effects, curated_edited_by, curated_crawl_failure, kept)
+    return DeltaSet(deltas, effects, curated_edited_by, curated_crawl_failure, kept, curated_excluded, n_excluded)
 
 
 def promote(

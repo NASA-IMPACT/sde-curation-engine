@@ -62,7 +62,7 @@ from ..models import (
     utcnow,
 )
 from ..notify import Notifier
-from ..store import remove_collection_files, write_collection_yaml, write_patterns_yaml
+from ..store import write_collection_yaml, write_patterns_yaml
 from . import auth
 
 _HERE = Path(__file__).parent
@@ -107,6 +107,7 @@ def static_url(name: str) -> str:
 
 
 templates.env.globals["static_url"] = static_url
+
 
 # (status, label, what to do while this is the current/upcoming step, what it means once done)
 PIPELINE = [
@@ -210,7 +211,8 @@ class SuggestionBulk(BaseModel):
 
 
 AI_FIELDS = ("title", "division", "document_type")
-AI_REVIEW_ROWS = 500  # rows shown in the Curate › Metadata review table; the rest via Delta URLs
+CURATE_PREVIEW_ROWS = 50  # rows each Curate list shows in place; ⤢ Expand pages through all of them
+CURATE_FOCUS = ("exclusions", "metadata")  # ?focus=: one Curate list on its own page, paginated
 
 
 class AiBulk(BaseModel):
@@ -638,7 +640,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         has_delta: dict[str, Any] = {}  # curated: url -> its pending delta row, shown in place of the promoted values
         if set_ == "dump":
             rows, total = await d.list_dump(c.collection_id, limit=lp["per"], offset=off, q=lp["q"],
-                                            match=lp["match"], sort=lp["sort"], desc=lp["dir"] == "desc")
+                                            match=lp["match"], sort=lp["sort"], desc=lp["dir"] == "desc",
+                                            excluded=lp["excluded"])
         elif set_ == "curated":
             rows, total = await d.list_curated(
                 c.collection_id, limit=lp["per"], offset=off, q=lp["q"], excluded=lp["excluded"],
@@ -709,25 +712,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 " their last approved text; re-scrape later to check them again.")
 
     async def curate_context(request: Request, c: Collection) -> dict[str, Any]:
-        """The guided workspace: ① exclusions (suggested exclude rules) → ② metadata (AI per URL) → ③ promote."""
-        d = db(request)
+        """The guided workspace: ① exclusions (suggested exclude rules) → ② metadata (AI per URL) → ③ promote.
+        Each list shows its first CURATE_PREVIEW_ROWS rows in place; ?focus=exclusions|metadata
+        expands one of them to its own page, paginated with ?page= / ?per=."""
+        d, lp = db(request), list_params(request)
         cid = c.collection_id
-        suggestions = await d.list_pattern_suggestions(cid, "pending")
+        focus = request.query_params.get("focus")
+        focus = focus if focus in CURATE_FOCUS else None
+
+        def paging(name: str, total: int) -> dict[str, int]:
+            if focus != name:
+                return {"page": 1, "pages": 1, "per": CURATE_PREVIEW_ROWS, "total": total,
+                        "limit": CURATE_PREVIEW_ROWS, "offset": 0}
+            pages = max(1, -(-total // lp["per"]))
+            page = min(lp["page"], pages)  # deciding rows shrinks the list: stay on its last page
+            return {"page": page, "pages": pages, "per": lp["per"], "total": total,
+                    "limit": lp["per"], "offset": (page - 1) * lp["per"]}
+
+        suggestion_counts = await d.pattern_suggestion_counts(cid)
+        sugg_paging = paging("exclusions", suggestion_counts["total"])
+        suggestions = await d.list_pattern_suggestions(cid, "pending", limit=sugg_paging["limit"],
+                                                       offset=sugg_paging["offset"])
         ai_counts = await d.delta_ai_counts(cid)
-        ai_rows = await d.list_delta_ai(cid, limit=AI_REVIEW_ROWS)
+        _, ai_total = await d.list_delta_ai(cid, limit=0)
+        ai_paging = paging("metadata", ai_total)
+        ai_rows, _ = await d.list_delta_ai(cid, limit=ai_paging["limit"], offset=ai_paging["offset"])
         step = await step_context(request, c, Status.CURATING)
         candidates = await d.count_deltas_for_llm(cid, only_missing=False)  # included delta URLs
         return {
             "stats": step["stats"],
-            "suggestions": suggestions,
-            "suggestion_counts": {"total": len(suggestions), "by_type": Counter(s["type"] for s in suggestions)},
+            "focus": focus, "suggestions": suggestions, "suggestion_counts": suggestion_counts,
+            "sugg_paging": sugg_paging, "ai_paging": ai_paging,
             "patterns_ever_run": await d.job_exists(cid, "llm_patterns"),
             "last_patterns_job": await d.latest_job_of_kind(cid, "llm_patterns"),
             "last_metadata_job": await d.latest_job_of_kind(cid, "llm_metadata"),
             "classifiable": await d.count_deltas_for_llm(cid),
             "classifiable_all": await d.count_deltas_for_llm(cid, only_missing=False),
             "ai_counts": ai_counts, "ai_pending_total": ai_counts["title"] + ai_counts["division"] + ai_counts["document_type"],
-            "ai_rows": ai_rows, "ai_rows_cap": AI_REVIEW_ROWS,
+            "ai_rows": ai_rows,
             "effects": await d.effects_for(cid, [r.url for r in ai_rows]),
             "llm_model": settings.openai_model if settings.llm_provider == "openai" else settings.llm_provider,
             "llm_workers": settings.llm_workers,
@@ -803,8 +825,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         d, lp = db(request), list_params(request)
         if set_ == "dump":
             rows, _ = await d.list_dump(c.collection_id, limit=1_000_000, q=lp["q"], match=lp["match"],
-                                        sort=lp["sort"], desc=lp["dir"] == "desc")
-            cols = ["url", "scraped_title", "content_type", "depth", "text_len", "in_curated"]
+                                        sort=lp["sort"], desc=lp["dir"] == "desc", excluded=lp["excluded"])
+            cols = ["url", "excluded", "scraped_title", "content_type", "depth", "text_len", "in_curated"]
             data = [[r[k] for k in cols] for r in rows]
         elif set_ == "curated":
             rows, _ = await d.list_curated(c.collection_id, limit=1_000_000, q=lp["q"], excluded=lp["excluded"],
@@ -843,9 +865,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if total:
             for k in ("new", "modified", "deleted"):
                 counts[k] = (await d.list_deltas(c.collection_id, kind=k, limit=1))[1]
-            counts["excluded"] = (await d.list_deltas(c.collection_id, excluded=True, limit=1))[1]
             counts["content_changed"] = (await d.list_deltas(c.collection_id, content_changed=True, limit=1))[1]
             counts["renamed"] = (await d.list_deltas(c.collection_id, renamed=True, limit=1))[1]
+        counts["excluded"] = await d.count_excluded_by_rules(c.collection_id)  # rules, not deltas
         curated = await d.load_curated(c.collection_id) if c.curated_count else []
         counts["kept"] = sum(1 for r in curated if r.crawl_failure)
         runs = await d.list_index_runs(c.collection_id, limit=5)
@@ -929,19 +951,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_get(request: Request, collection_id: str):
         return await must_get(request, collection_id)
 
-    @app.delete("/api/collections/{collection_id}", response_model=None)
-    async def api_delete(request: Request, collection_id: str):
-        require_admin(request)
-        c = await must_get(request, collection_id)
-        ensure_idle(request, c)
-        await audit(request, "collection.delete", collection_id, f"{c.name} ← {c.seed_url} (status {c.status})")
-        if not await db(request).delete_collection(collection_id):
-            raise HTTPException(404, "not found")
-        remove_collection_files(settings.collections_dir, collection_id)
-        bus(request).publish("collection_deleted", {"collection_id": collection_id})
-        if _is_htmx(request):
-            return JSONResponse(None, status_code=200, headers={"HX-Redirect": "/"})
-        return Response(status_code=204)
+    # Collections cannot be deleted (no DELETE route): a collection's rules, curated URLs and
+    # history are the record of what was indexed. Older audit rows may still name deleted ones.
 
     @app.post("/api/collections/{collection_id}/status", response_model=None)
     async def api_set_status(request: Request, collection_id: str, body: StatusChange):
@@ -1043,11 +1054,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/collections/{collection_id}/dump")
     async def api_dump(
-        request: Request, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None
+        request: Request, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None,
+        excluded: str | None = None,
     ):
         await must_get(request, collection_id)
         rows, total = await db(request).list_dump(
-            collection_id, limit=max(1, min(limit, 1000)), offset=max(0, offset), q=q or None
+            collection_id, limit=max(1, min(limit, 1000)), offset=max(0, offset), q=q or None,
+            excluded=tri_bool(excluded),
         )
         return {"total": total, "items": rows}
 
@@ -1088,6 +1101,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             c = await db(request).set_status(
                 c.collection_id, Status.CURATING, note=f"delta URLs recomputed: {n}", force=True,
                 actor=actor(request),
+            )
+        elif getattr(ds, "curated_excluded", None) and c.status in (Status.CONFIG_GENERATED, Status.LIVE):
+            # an exclude rule took curated URLs out in place (no delta): the index is behind again
+            k = len(ds.curated_excluded)
+            c = await db(request).set_status(
+                c.collection_id, Status.CURATED, force=True, actor=actor(request),
+                note=f"{k} curated URL{'s' if k != 1 else ''} excluded by rules: re-index to apply",
             )
         elif n == 0 and c.status is Status.CURATING and c.curated_count:
             # nothing left to review on an already-promoted set → it is curated
@@ -1193,10 +1213,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if c.status is not Status.CURATING:
             raise HTTPException(409, f"stages only apply while curating (status is {c.status})")
         if body.stage is CurationStage.METADATA:
-            pending = await db(request).list_pattern_suggestions(collection_id, "pending")
+            pending = (await db(request).pattern_suggestion_counts(collection_id))["total"]
             if pending:
                 raise HTTPException(
-                    409, f"{len(pending)} pattern suggestion{'s are' if len(pending) != 1 else ' is'} pending"
+                    409, f"{pending} pattern suggestion{'s are' if pending != 1 else ' is'} pending"
                          " — accept or reject them first"
                 )
         await _set_stage(request, collection_id, body.stage)

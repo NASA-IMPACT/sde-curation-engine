@@ -73,7 +73,7 @@
     <li><b>Index to prod</b>. The collection is Live.</li>
   </ol>
 </div>
-<p>Signing in: deployed environments require a login. Admins add accounts at <code>/users</code>, everyone changes their own password at <code>/account</code>. Curators can do everything except manage users and delete collections. Every action is recorded under your name.</p>
+<p>Signing in: deployed environments require a login. Admins add accounts at <code>/users</code>, everyone changes their own password at <code>/account</code>. Curators can do everything except manage users. Nobody can delete a collection: its rules, curated URLs and history are the record of what was indexed. Every action is recorded under your name.</p>
 
 <h2 id="walkthrough">Walkthrough with screens</h2>
 <p>The same path, one screen at a time, with what to look at on each.</p>
@@ -103,7 +103,8 @@
     <p>Press <b>Start curating</b>. The engine computes the delta URLs and opens the <b>Dump URLs</b> tab so you see everything the crawl found before deciding anything; when you have seen enough, open the <b>Curate</b> tab at section 1. Press <b>✨ Suggest exclusions</b>. It first applies the team's global exclude list, then sends the <b>included delta URLs</b> and titles to the model in batches and asks for exclude globs. On a first pass that is the whole dump; after a re-crawl only what changed, so 90 delta URLs on a 100k-page site cost one call. The button tells you how many URLs and how many calls before you press it; it stays disabled until you have started curating.</p>
     <figure><img src="{{ static_url('manual/03-exclusions.png') }}" alt="Curate tab, Exclusions section, with thirteen suggested exclude rules listed with their source, match count, and rationale, plus Accept, Edit and Reject buttons">
     <figcaption><b>Exclusion suggestions.</b> Each row is a glob, where it came from (<i>global list</i> or <i>AI</i>), how many dump URLs it matches, and why. Match counts link to the URLs. Accept one, edit one, accept all of a type, or accept all.</figcaption></figure>
-    <p>Every suggestion has three options. <b>Accept</b> creates a real exclude rule and recomputes the delta URLs. <b>Edit</b> turns the glob into a text box so you can narrow or widen it (say <code>*/tag/*</code> to <code>*/blog/tag/*</code>) and then <b>Save &amp; accept</b>: the rule is created with your glob and recorded as <i>AI, edited</i>. <b>Reject</b> dismisses it. You can also add an exclude or include rule by hand: a glob with <code>*</code>, or an exact URL (examples in <a href="#hand-rules">Writing rules by hand</a>). When every suggestion is decided, press <b>Continue to metadata</b>.</p>
+    <p>Every suggestion has three options. <b>Accept</b> creates a real exclude rule; the URLs it excludes leave the delta URLs (see <a href="#rules">excludes are decided by rules</a>). <b>Edit</b> turns the glob into a text box so you can narrow or widen it (say <code>*/tag/*</code> to <code>*/blog/tag/*</code>) and then <b>Save &amp; accept</b>: the rule is created with your glob and recorded as <i>AI, edited</i>. <b>Reject</b> dismisses it. You can also add an exclude or include rule by hand: a glob with <code>*</code>, or an exact URL (examples in <a href="#hand-rules">Writing rules by hand</a>). When every suggestion is decided, press <b>Continue to metadata</b>.</p>
+    <p>The list shows its first 50 suggestions in place. With more than that, press <b>⤢ Expand</b> in the section header: the exclusions open on their own page, paginated (25 to 250 per page), with the same accept, edit, reject and accept-all buttons. <b>⤡ Collapse</b> returns to the whole Curate tab. The Metadata review table expands the same way.</p>
     <div class="know"><span class="eyebrow">Know this</span><p>Re-running Suggest exclusions <b>replaces</b> any suggestions you have not yet decided.</p><p>The Metadata section is locked until every exclusion suggestion is decided. If you skipped Suggest exclusions entirely, metadata is allowed with a hint.</p></div>
   </li>
 
@@ -146,18 +147,18 @@
 <p>Sticky on every view. Name, seed link, status badge, the running job with a cancel button, and the <b>Next</b> action. The counts sit on the tab row under Curating / Curated:</p>
 <dl class="defs">
   <dt>Dump URLs</dt><dd>Every URL the last crawl found. Raw, but you can exclude or include a row right there.</dd>
-  <dt>Delta URLs</dt><dd>What will change in the curated URLs when you promote: new · modified · removed · excluded.</dd>
+  <dt>Delta URLs</dt><dd>What will change in the curated URLs when you promote: new · modified · removed. Excluded URLs are not here: their exclude rule decides them.</dd>
   <dt>Curated URLs</dt><dd>The approved set: metadata plus the page text each row was approved with. Included rows, with that text, are what gets exported to the index. Every field is still editable; an edit becomes a delta URL.</dd>
   <dt>Rules</dt><dd>Every rule in force for this collection, including exact-URL rules from per-row edits and accepted AI suggestions, each with its source (AI, AI edited, SME, global list).</dd>
 </dl>
 <h3>The pipeline and the tabs</h3>
-<p>The six-step pipeline is always at the top. A collection opens at its current step, and clicking a step shows that step's panel: what it did, its actions, details, the last job, and Advanced (Re-scrape, manual status override, Delete for admins). Under steps <b>3 Curating</b> and <b>4 Curated</b> a row of tabs appears, in the order you work: look at what the crawl found, curate, check what will change, check what was approved.</p>
+<p>The six-step pipeline is always at the top. A collection opens at its current step, and clicking a step shows that step's panel: what it did, its actions, details, the last job, and Advanced (Re-scrape, manual status override). Under steps <b>3 Curating</b> and <b>4 Curated</b> a row of tabs appears, in the order you work: look at what the crawl found, curate, check what will change, check what was approved.</p>
 <dl class="defs">
   <dt>Overview</dt><dd>The step's panel, details and last job.</dd>
   <dt>Dump URLs</dt><dd>Every URL the last crawl found, raw: title, content type, depth, text size and state. Start curating lands here, so you see the whole crawl before deciding anything.</dd>
   <dt>Curate</dt><dd>Exclusions, Metadata, Promote, in the order you work them.</dd>
   <dt>Rules</dt><dd>Every rule in force for this collection, with the match count over the URLs it currently shows in (delta while reviewing, curated once promoted), the superseded ones marked, and the add-by-hand forms.</dd>
-  <dt>Delta URLs</dt><dd>What will change in the curated URLs when you promote: new, modified, removed, excluded.</dd>
+  <dt>Delta URLs</dt><dd>What will change in the curated URLs when you promote: new, modified, removed.</dd>
   <dt>Curated URLs</dt><dd>The approved set; included rows are exported to the index.</dd>
   <dt>Activity</dt><dd>Every job, the status history, and the audit trail.</dd>
 </dl>
@@ -177,8 +178,8 @@
   <li><b>No rule, then the curated value, then nothing.</b> Deleting a rule falls back to the next newest rule, then to whatever was last promoted, then to blank. Deleting <em>is</em> the undo.</li>
 </ul>
 <p>Title rules are templates. <code>{title}</code> is the scraped title, <code>{url}</code> the URL, <code>{collection}</code> the collection name. A rule with value <code>{title} | GES DISC</code> appends a suffix to every matching page.</p>
-<p>Hover any field on the Delta, Curated or Dump URLs to see which rule set it, and who made that rule. The <b>Edited by</b> column summarises it per row: a row whose values all come from accepted AI suggestions reads <b>AI</b>; one you typed or toggled reads <b>SME</b>; both, <b>AI + SME</b>. A broad rule you typed (say a <code>*</code> title template) marks every row it wins as SME, which is correct: you decided it. The match count in the rules table is over the URLs where the rule currently shows: the <b>Delta URLs</b> while there is something to review, the <b>Curated URLs</b> once promoted; clicking it opens that table filtered to the rule. A rule a newer one has beaten everywhere is marked <b>superseded</b>.</p>
-<div class="know"><span class="eyebrow">Know this</span><p>A URL excluded by a rule never reaches the export, the index, or the metadata model. Exclude early to save model calls and review time.</p></div>
+<p>Hover any field on the Delta, Curated or Dump URLs to see which rule set it, and who made that rule. The <b>Edited by</b> column summarises it per row: a row whose values all come from accepted AI suggestions reads <b>AI</b>; one you typed or toggled reads <b>SME</b>; both, <b>AI + SME</b>. A broad rule you typed (say a <code>*</code> title template) marks every row it wins as SME, which is correct: you decided it. The match count in the rules table is over the URLs where the rule currently shows: the <b>Delta URLs</b> while there is something to review, the <b>Curated URLs</b> once promoted (an exclude rule's is always over the <b>Dump URLs</b>); clicking it opens that table filtered to the rule. A rule a newer one has beaten everywhere is marked <b>superseded</b>.</p>
+<div class="know"><span class="eyebrow">Know this</span><p>A URL excluded by a rule never reaches the export, the index, or the metadata model. Exclude early to save model calls and review time.</p><p><b>Excludes are decided by rules, not deltas.</b> An excluded URL never waits under Delta URLs: a new page an exclude rule matches is simply left out, and a curated page it matches is flagged excluded in place, so the next index run drops it without a promote. Find excluded URLs under Dump URLs (filter <i>excluded only</i>) and their rules under Rules, where an exclude rule's match count is over the dump. To bring a URL back, delete the rule or press <b>✓ include</b>: coming back in <em>is</em> a delta URL, reviewed and promoted like any other change.</p></div>
 
 <h2 id="hand-rules">Writing rules by hand</h2>
 <p>When no suggestion says what you need, type the rule yourself. Both forms are at the top of the <b>Rules</b> tab, and under their section of the <b>Curate</b> tab: <b>Add an exclude or include rule by hand</b> takes a type and a match; <b>Add a metadata rule by hand</b> takes a type, a match and a value. A rule applies as soon as you add it, is recorded as <b>SME</b>, and is undone by deleting it.</p>
@@ -281,7 +282,7 @@
   <li><b>Prod indexing is gated on the latest test run.</b> A new test run after a passed one resets the gate until it passes too.</li>
   <li><b>CSV export follows your filters.</b> The download on each URL tab contains exactly the rows you are looking at.</li>
   <li><b>Old links still work.</b> Links to the previous curate page, and <code>set=deltas</code> links, redirect into the Delta URLs tab.</li>
-  <li><b>Delete is admin only and permanent.</b> It removes the collection, its crawl, its rules, and its history from the engine. Crawler output in S3 is untouched.</li>
+  <li><b>Collections cannot be deleted.</b> There is no delete button or API; a collection you no longer curate simply stays at its last status.</li>
 </ul>
 
 <h2 id="glossary">Statuses and words</h2>
@@ -307,7 +308,7 @@
     <tr><td>New</td><td>In the dump URLs, not in the curated URLs.</td></tr>
     <tr><td>Modified</td><td>In both, and title, division, type, inclusion, or page text changed.</td></tr>
     <tr><td>Removed</td><td>In the curated URLs, not in the dump URLs. Promoting drops it from the curated URLs; the next index run deletes it from the index. Cannot be edited: there is no page to keep.</td></tr>
-    <tr><td>Excluded</td><td>Matched by an exclude rule and no include rule. Never exported, never classified.</td></tr>
+    <tr><td>Excluded</td><td>Matched by an exclude rule and no include rule. Never a delta URL, never exported, never classified.</td></tr>
     <tr><td>Included</td><td>Not excluded. What the index receives.</td></tr>
     <tr><td>Rule</td><td>A glob or exact URL plus a type (exclude, include, title, division, document_type) and, for the last three, a value.</td></tr>
     <tr><td>Suggestion</td><td>A proposed exclude rule awaiting your decision. Nothing is applied until you accept.</td></tr>

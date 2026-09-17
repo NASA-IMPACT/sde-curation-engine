@@ -38,10 +38,26 @@ def test_pattern_change_on_curated_row_creates_modified_delta_and_effects():
     d = dump(("https://x/a", "A"))
     c = cur({"url": "https://x/a", "scraped_title": "A"})
     assert rc(d, c).deltas == []
-    ds = rc(d, c, [Pattern(id=7, collection_id="x", type=PatternType.EXCLUDE, match="https://x/*")])
-    assert ds.deltas[0].kind is DeltaKind.MODIFIED and ds.deltas[0].excluded is True
     ds = rc(d, c, [Pattern(id=8, collection_id="x", type=PatternType.DIVISION, match="*", value="General")])
     assert ds.deltas[0].division == "General" and ds.effects == [(8, "https://x/a", "division")]
+
+
+def test_excludes_are_decided_by_rules_not_deltas():
+    d = dump(("https://x/a", "A"), ("https://x/new", "N"))
+    c = cur({"url": "https://x/a", "scraped_title": "A"})
+    ex = Pattern(id=7, collection_id="x", type=PatternType.EXCLUDE, match="https://x/*", source="sme")
+    ds = rc(d, c, [ex])
+    # neither the curated row nor the new URL waits under the delta URLs; the curated row is flagged in place
+    assert ds.deltas == [] and ds.curated_excluded == [("https://x/a", True)] and ds.counts["excluded"] == 2
+    assert sorted(ds.effects) == [(7, "https://x/a", "excluded"), (7, "https://x/new", "excluded")]
+    # already excluded in curated: nothing to do, even when its title changed
+    c = cur({"url": "https://x/a", "scraped_title": "old A", "excluded": True, "edited_by": "sme"})
+    ds = rc(d, c, [ex])
+    assert ds.deltas == [] and ds.curated_excluded == []
+    # the way back in is a delta: drop the rule → the curated row is a modified (included) delta, the new URL is new
+    by = {x.url: x for x in rc(d, c).deltas}
+    assert by["https://x/a"].kind is DeltaKind.MODIFIED and by["https://x/a"].excluded is False
+    assert by["https://x/new"].kind is DeltaKind.NEW
 
 
 def test_recompute_preserves_ml_suggestions():
@@ -88,7 +104,7 @@ def test_100k_urls_under_5s():
     ds = rc(d, c, pats)
     promote(c, ds.deltas)
     dt = time.perf_counter() - t0
-    assert len(ds.deltas) == n  # every row changed (title pattern)
+    assert len(ds.deltas) + ds.counts["excluded"] == n  # every row changed (title pattern) or is excluded by the rule
     assert dt < 5, f"took {dt:.1f}s"
 
 

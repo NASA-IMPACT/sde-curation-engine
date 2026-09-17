@@ -199,7 +199,7 @@ async def test_hand_typed_rule_takes_effect_over_accepted_ai_titles(crawler_clie
 
 
 async def test_curated_toggle_is_idempotent_and_shows_the_pending_state(crawler_client):
-    """Excluding a curated row: the row reads excluded at once (the pending delta's values), and a
+    """Excluding a curated row: the rule flags the row excluded in place (no delta), and a
     second click keeps it excluded instead of undoing it. Include on a row a glob excludes adds
     an exact include; include on a row nothing excludes just drops the exact exclude."""
     c = crawler_client
@@ -208,11 +208,12 @@ async def test_curated_toggle_is_idempotent_and_shows_the_pending_state(crawler_
     for _ in range(2):  # clicking twice must not toggle back
         assert (await c.post(f"{API}/urls", json={"url": url(2), "type": "exclude"})).json()["excluded"] == 1
     page = (await c.get(f"/collections/{CID}?tab=curated&q=p2")).text
-    assert "delta URL ↗" in page and 'class="kind k-excluded"' in page and "✓ include" in page
-    assert (await coll(c))["delta_count"] == 1
-    # back to included: the exact exclude goes, no include rule is needed, no delta is left
+    assert 'class="kind k-modified nowrap"' not in page and 'class="kind k-excluded"' in page and "✓ include" in page
+    assert (await coll(c))["delta_count"] == 0
+    # back to included: the exact exclude goes, no include rule is needed; coming back in is a delta to promote
     assert (await c.post(f"{API}/urls", json={"url": url(2), "type": "include"})).json()["excluded"] == 0
-    assert (await c.get(f"{API}/patterns")).json() == [] and (await coll(c))["delta_count"] == 0
+    assert (await c.get(f"{API}/patterns")).json() == [] and (await coll(c))["delta_count"] == 1
+    await c.post(f"{API}/promote")
     # a glob excludes p*; include on p3 must add an exact include (and repeat clicks keep it)
     await c.post(f"{API}/patterns", json={"type": "exclude", "match": f"https://{CID}/p*"})
     for _ in range(2):
@@ -222,7 +223,9 @@ async def test_curated_toggle_is_idempotent_and_shows_the_pending_state(crawler_
     # exclude p3 again: the exact include goes and the glob does the rest — no exact exclude is added
     assert (await c.post(f"{API}/urls", json={"url": url(3), "type": "exclude"})).json()["excluded"] == 8
     assert [p["type"] for p in (await c.get(f"{API}/patterns")).json()] == ["exclude"]
-    # the whole-queue promote sits on the delta table too
+    # the whole-queue promote sits on the delta table too (a title rule gives it something to promote)
+    await c.post(f"{API}/patterns", json={"type": "title", "match": "*", "value": "T"})
+    await c.post(f"{API}/urls", json={"url": url(3), "type": "include"})
     assert f'hx-post="/api/collections/{CID}/promote"' in (await c.get(f"/collections/{CID}?tab=delta")).text
 
 

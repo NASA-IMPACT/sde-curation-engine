@@ -23,11 +23,11 @@ async def test_full_flow(crawler_client):
     c = (await crawler_client.get("/api/collections/ex.org")).json()
     assert c["status"] == "curating" and c["delta_count"] == 8
 
-    # exclude p* (all 8), force-include p2 → 7 excluded
+    # exclude p* (all 8), force-include p2 → 7 excluded; excluded URLs leave the delta URLs (the rule decides them)
     r = await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": "https://ex.org/p*"})
-    assert r.status_code == 201 and r.json()["deltas"]["excluded"] == 8
+    assert r.status_code == 201 and r.json()["deltas"]["excluded"] == 8 and r.json()["deltas"]["new"] == 0
     r = await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "include", "match": "https://ex.org/p2"})
-    assert r.json()["deltas"]["excluded"] == 7
+    assert r.json()["deltas"]["excluded"] == 7 and r.json()["deltas"]["new"] == 1
     # duplicate pattern → 409; bad value → 422
     assert (await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "include", "match": "https://ex.org/p2"})).status_code == 409
     # narrow the exclude to p1 only (delete + re-add) so the rest of the flow has one exclusion
@@ -40,13 +40,18 @@ async def test_full_flow(crawler_client):
     await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "title", "match": "*", "value": "{title} | {collection}"})
     await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "division", "match": "*", "value": "Heliophysics"})
     pats = (await crawler_client.get("/api/collections/ex.org/patterns")).json()
-    assert {p["type"]: p["matches"] for p in pats} == {"exclude": 1, "include": 1, "title": 8, "division": 8}
+    # exclude rules count over the dump; the rest over the delta URLs (p1 is excluded, so not a delta)
+    assert {p["type"]: p["matches"] for p in pats} == {"exclude": 1, "include": 1, "title": 7, "division": 7}
+    assert 'href="/collections/ex.org?tab=dump&match=https%3A//ex.org/p1"' in (await crawler_client.get("/collections/ex.org/rules")).text
     y = yaml.safe_load((crawler_client.app.state.settings.collections_dir / "ex.org" / "patterns.yaml").read_text())
     assert len(y) == 4
 
     d = (await crawler_client.get("/api/collections/ex.org/delta?q=p2")).json()
     assert d["total"] == 1 and d["items"][0]["title"] == "Page 2 | Ex" and d["items"][0]["division"] == "Heliophysics"
-    assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 1
+    assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 0
+    assert (await crawler_client.get("/api/collections/ex.org/delta")).json()["total"] == 7
+    dump = (await crawler_client.get("/api/collections/ex.org/dump?excluded=true")).json()
+    assert dump["total"] == 1 and dump["items"][0]["url"] == "https://ex.org/p1"
 
     # per-URL edit = exact pattern, the newest rule for that URL → wins over the older "*"
     r = await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p2", "type": "division", "value": "Earth Science"})
@@ -56,32 +61,45 @@ async def test_full_flow(crawler_client):
     # the toggle is the wanted state: exclude twice stays excluded; include puts it back (and, with no
     # glob excluding p3, leaves no rule behind)
     await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "exclude"})
-    assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 2
+    assert (await crawler_client.get("/api/collections/ex.org/dump?excluded=true")).json()["total"] == 2
+    assert (await crawler_client.get("/api/collections/ex.org/delta?q=p3")).json()["total"] == 0  # gone from the deltas
     await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "exclude"})
-    assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 2
+    assert (await crawler_client.get("/api/collections/ex.org/dump?excluded=true")).json()["total"] == 2
     await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "include"})
-    assert (await crawler_client.get("/api/collections/ex.org/delta?excluded=true")).json()["total"] == 1
+    assert (await crawler_client.get("/api/collections/ex.org/dump?excluded=true")).json()["total"] == 1
+    assert (await crawler_client.get("/api/collections/ex.org/delta?q=p3")).json()["total"] == 1  # back as a delta
     assert not [p for p in (await crawler_client.get("/api/collections/ex.org/patterns")).json() if p["match"] == "https://ex.org/p3"]
 
     # old curate URL redirects into the workbench (filters preserved); URLs tab renders the deltas
     r = await crawler_client.get("/collections/ex.org/curate?excluded=true")
     assert r.status_code == 302 and r.headers["location"] == "/collections/ex.org?tab=delta&excluded=true"
-    page = await crawler_client.get("/collections/ex.org?tab=delta&excluded=true")
+    page = await crawler_client.get("/collections/ex.org?tab=dump&excluded=true")
     assert page.status_code == 200 and "https://ex.org/p1" in page.text and "https://ex.org/p2" not in page.text
     assert "Promote" in (await crawler_client.get("/collections/ex.org?tab=patterns")).text
 
     # promote
     r = await crawler_client.post("/api/collections/ex.org/promote")
-    assert r.status_code == 200 and r.json() == {"curated": 8, "status": "curated"}
+    assert r.status_code == 200 and r.json() == {"curated": 7, "status": "curated"}  # p1 never reached the curated URLs
     c = (await crawler_client.get("/api/collections/ex.org")).json()
-    assert c["curated_count"] == 8 and c["delta_count"] == 0
+    assert c["curated_count"] == 7 and c["delta_count"] == 0
     assert (await crawler_client.post("/api/collections/ex.org/promote")).status_code == 409  # not curating
 
     # recompute after promote with nothing changed must NOT demote to curating (dead end otherwise)
     assert (await crawler_client.post("/api/collections/ex.org/recompute")).json()["new"] == 0
     assert (await crawler_client.get("/api/collections/ex.org")).json()["status"] == "curated"
-    # a pattern that changes something does reopen curation; deleting it (no deltas left) returns to curated
+    # an exclude on a curated URL applies in place: no delta, still curated, the row is flagged
     r = await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": "https://ex.org/p4"})
+    c = (await crawler_client.get("/api/collections/ex.org")).json()
+    assert c["status"] == "curated" and c["delta_count"] == 0
+    assert [r["url"] for r in (await crawler_client.get("/api/collections/ex.org/curated?excluded=true")).json()["items"]] == ["https://ex.org/p4"]
+    # deleting it is the way back in: a modified delta that reopens curation
+    pid = next(p["id"] for p in (await crawler_client.get("/api/collections/ex.org/patterns")).json() if p["match"] == "https://ex.org/p4")
+    await crawler_client.delete(f"/api/collections/ex.org/patterns/{pid}")
+    c = (await crawler_client.get("/api/collections/ex.org")).json()
+    assert c["status"] == "curating" and c["delta_count"] == 1
+    await crawler_client.post("/api/collections/ex.org/promote")
+    # a pattern that changes something does reopen curation; deleting it (no deltas left) returns to curated
+    r = await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "title", "match": "https://ex.org/p4", "value": "Four"})
     assert (await crawler_client.get("/api/collections/ex.org")).json()["status"] == "curating"
     pid = next(p["id"] for p in (await crawler_client.get("/api/collections/ex.org/patterns")).json() if p["match"] == "https://ex.org/p4")
     await crawler_client.delete(f"/api/collections/ex.org/patterns/{pid}")
@@ -89,7 +107,7 @@ async def test_full_flow(crawler_client):
     # manual 'curating' with zero deltas: promote acts as "mark curated"
     await crawler_client.post("/api/collections/ex.org/status", json={"status": "curating"})
     r = await crawler_client.post("/api/collections/ex.org/promote")
-    assert r.status_code == 200 and r.json() == {"curated": 8, "status": "curated"}
+    assert r.status_code == 200 and r.json() == {"curated": 7, "status": "curated"}
 
     # delete the division pattern → unapply: p2 keeps its exact pattern, others fall back to curated value
     div_all = next(p["id"] for p in pats if p["type"] == "division")
@@ -163,18 +181,15 @@ async def test_manual_status_cannot_skip_promote(crawler_client):
     r = await crawler_client.post("/api/collections/ex.org/status", json={"status": "curated"})
     assert r.status_code == 409 and "nothing has been promoted" in r.text
     await crawler_client.post("/api/collections/ex.org/promote")
-    await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": "*/p4"})
+    await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "title", "match": "*/p4", "value": "Four"})
     r = await crawler_client.post("/api/collections/ex.org/status", json={"status": "live"})
     assert r.status_code == 409 and "delta URLs" in r.text
 
 
-async def test_delete_removes_files_and_bad_step_param(crawler_client):
+async def test_bad_step_param(crawler_client):
     await setup(crawler_client)
-    d = crawler_client.app.state.settings.collections_dir / "ex.org"
-    assert d.is_dir()
+    assert (crawler_client.app.state.settings.collections_dir / "ex.org").is_dir()
     assert (await crawler_client.get("/collections/ex.org?step=bogus")).status_code == 200
-    assert (await crawler_client.delete("/api/collections/ex.org")).status_code == 204
-    assert not d.exists()
 
 
 async def test_dashboard_form_errors_render_banner(client):

@@ -46,6 +46,8 @@ class CurationService:
             await self.db.set_curated_edited_by(c.collection_id, ds.curated_edited_by)
         if ds.curated_crawl_failure:
             await self.db.set_curated_crawl_failure(c.collection_id, ds.curated_crawl_failure)
+        if ds.curated_excluded:
+            await self.db.set_curated_excluded(c.collection_id, ds.curated_excluded)
         return ds
 
     async def add_pattern(
@@ -151,8 +153,13 @@ class CurationService:
         patterns = await self.db.list_patterns(c.collection_id)
         set_ = self.rows_set(c)
         counts = match_counts(patterns, await self.db.set_urls(c.collection_id, set_))
+        # exclude rules keep URLs out of the delta URLs altogether, so theirs are counted over the dump
+        excludes = [p for p in patterns if p.type is PatternType.EXCLUDE]
+        if excludes and set_ != "dump":
+            counts.update(match_counts(excludes, await self.db.set_urls(c.collection_id, "dump")))
         effects = await self.db.effect_counts(c.collection_id)
-        return [{**p.model_dump(mode="json"), "matches": counts.get(p.id, 0), "in_effect": effects.get(p.id, 0)}
+        return [{**p.model_dump(mode="json"), "matches": counts.get(p.id, 0), "in_effect": effects.get(p.id, 0),
+                 "set": "dump" if p.type is PatternType.EXCLUDE else set_}
                 for p in patterns]
 
     async def promote(self, c: Collection, *, actor: str | None = None) -> int:

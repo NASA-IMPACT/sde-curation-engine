@@ -10,6 +10,7 @@ from sde_curation.models import (
     Status,
     check_transition,
     collection_id_from_seed,
+    crawl_file_stem,
 )
 
 
@@ -27,6 +28,17 @@ def test_bad_seed_rejected(bad):
 
 def test_collection_id_matches_crawler_rule():
     assert collection_id_from_seed("https://science.nasa.gov/") == "science.nasa.gov"
+
+
+@pytest.mark.parametrize("seed,stem", [
+    ("https://science.nasa.gov/photojournal/", "https_science.nasa.gov_photojournal"),
+    ("https://lroc.im-ldi.com/", "https_lroc.im-ldi.com"),
+    ("https://science.nasa.gov/", "https_science.nasa.gov"),
+    ("https://ahed.nasa.gov/", "https_ahed.nasa.gov"),
+    ("  HTTPS://Www.Example.org//a b?x=1&y=2  ", "https_www.example.org_a_b_x_1_y_2"),
+])
+def test_crawl_file_stem_matches_crawler_naming(seed, stem):
+    assert crawl_file_stem(seed) == stem
 
 
 def test_illegal_transition_rejected():

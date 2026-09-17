@@ -47,7 +47,7 @@ async def test_stage_lifecycle(crawler_client):
     cc = await coll(c)
     assert (cc["status"], cc["curation_stage"]) == ("curated", None)
     # re-entering curating starts over at exclusions; re-scrape clears it again
-    await c.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": "*/p3"})
+    await c.post("/api/collections/ex.org/patterns", json={"type": "title", "match": "*/p3", "value": "Three"})
     assert (await coll(c))["curation_stage"] == "exclusions"
     await c.post("/api/collections/ex.org/scrape"); await wait_job(c, "ex.org")
     cc = await coll(c)
