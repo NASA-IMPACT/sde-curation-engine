@@ -16,8 +16,9 @@ from ..models import (
     MetadataSuggestion,
     PatternSuggestion,
     PatternSuggestions,
+    TitleSuggestion,
 )
-from .base import Completion, LLMProvider
+from .base import Completion, LLMError, LLMProvider
 
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -56,7 +57,8 @@ DIVISION_DEFINITIONS = """- Astrophysics: the universe beyond the solar system �
 - Planetary Science: planets, moons, asteroids, comets and meteorites of the solar system,
   planetary defense and astrobiology (e.g. Mars rovers, Cassini, the Planetary Data System).
 - General: content that spans several divisions or belongs to none (agency-wide science policy,
-  cross-division education). Not a fallback for a page whose division is unclear: use null."""
+  cross-division education). Not a fallback for a page whose division is unclear: give the most
+  likely division with low confidence instead."""
 
 PATTERN_SYSTEM = f"""You help curate web crawls for NASA's Science Discovery Engine (SDE), a search engine over
 NASA science content used by scientists, educators and the public. You are given one batch of
@@ -110,6 +112,15 @@ Writing globs:
 The SDE document types:
 {DOCUMENT_TYPE_DEFINITIONS}"""
 
+# Shared by both prompts that write titles, so a re-title follows the same rules as the first answer.
+TITLE_RULES = """- Descriptive and self-contained, typically 4–12 words: the page's real subject ("Information for
+  Data Proposers", "Real-Time Geomagnetic Storm Tracker").
+- Do not add the collection or site name to the title, as a prefix or a suffix ("PDS: …",
+  "… | Aurorasaurus"). A mission, instrument, project or dataset name belongs in the title only
+  when the page is about it ("Cassini ISS Calibrated Images"); keep such names and acronyms as the
+  page writes them.
+- Do not copy the site-wide scraped title; no slogans, "Welcome to" or "Home Page"."""
+
 METADATA_SYSTEM = f"""You classify one crawled web page at a time for NASA's Science Discovery Engine (SDE), a
 search engine over NASA science content. You receive the collection (the website the page was
 crawled from), the page URL, its scraped title and its full text (possibly long). The scraped
@@ -121,14 +132,9 @@ each other: apply the rules below the same way every time.
 
 title — a free-form title for this page as it should read in a search result, judged by someone
 who has not seen the site.
-- Descriptive and self-contained, typically 4–12 words: the page's real subject ("Information for
-  Data Proposers", "Real-Time Geomagnetic Storm Tracker").
-- Do not add the collection or site name to the title, as a prefix or a suffix ("PDS: …",
-  "… | Aurorasaurus"). A mission, instrument, project or dataset name belongs in the title only
-  when the page is about it ("Cassini ISS Calibrated Images"); keep such names and acronyms as the
-  page writes them.
-- Do not copy the site-wide scraped title; no slogans, "Welcome to" or "Home Page".
-- Null only if the page has no content of its own.
+{TITLE_RULES}
+- Never empty: a page with little content of its own still gets the best title its URL, scraped
+  title and text support, with low confidence.
 
 division — the NASA Science Mission Directorate division, one of:
 {DIVISION_DEFINITIONS}
@@ -166,9 +172,81 @@ Confidence, one per field:
 - high: stated in the page text or title, or follows directly from the rules above (a dataset
   landing page is Data; a page of a site devoted to one division has that division).
 - medium: a reasonable inference where another answer is also defensible.
-- low: a guess. For title and division, prefer a null value with low confidence over a wrong
-  value; document_type is never null, so give the closest type with low confidence.
+- low: a guess. No field is ever null or empty: when unsure, give the most likely value with low
+  confidence — a reviewer checks every low-confidence answer.
 Never invent facts that are not in the input."""
+
+TITLES_SYSTEM = f"""You write search-result titles for NASA's Science Discovery Engine (SDE), a search engine over
+NASA science content. Several pages of one collection (the website they were crawled from) ended
+up with the same title and the same document type, so a list of search results cannot tell them
+apart. You receive ONE of those pages: the collection, the page URL, its scraped title, the title
+and document type it shares (the type stays as it is: you only write the title), the other pages
+that share it (their URLs; `keeps_title` marks a page whose title is settled and will not change,
+and `pages_sharing_it` says how many there are in all when only some are listed) and the page's
+full text. The text usually starts with the site's navigation menu, alerts and login links: skip
+that chrome and read the page's own content.
+
+title — a new title for this page that is still true to the page and names what sets it apart
+from the other pages: the specific volume, dataset or data product, target, instrument, mission
+phase, version, date or date range, part or region that the page itself states, or that its URL
+shows where the other URLs differ. The other pages get their own calls: say what this page is, do
+not describe or compare with them.
+{TITLE_RULES}
+- Tell pages apart with words a reader understands. No bare IDs, URL fragments, "Page 2" or
+  "(copy)" unless that is truly all that differs; a volume or part number the page states is fine
+  ("Cassini ISS Calibrated Images, Volume 12").
+- If neither the page nor its URL gives anything that sets it apart, return the shared title
+  unchanged with low confidence: a reviewer decides.
+
+Confidence:
+- high: what sets the page apart is stated in its text or title.
+- medium: read from the URL, or a reasonable inference from the text.
+- low: a guess, or the shared title returned unchanged.
+Never invent facts that are not in the input."""
+
+# Other pages sharing the title sent with each call: the URL-order neighbours of the page, where
+# the part of the URL that differs is easiest to see.
+TITLE_SIBLINGS = 30
+
+
+def title_siblings(members: list[dict[str, Any]], url: str, k: int = TITLE_SIBLINGS) -> list[dict[str, Any]]:
+    """Up to `k` other members of a duplicate-title group (sorted by URL), nearest to `url` first
+    in URL order, returned in URL order as {url, keeps_title}."""
+    others = [m for m in members if m["url"] != url]
+    if len(others) <= k:
+        picked = others
+    else:
+        at = next((i for i, m in enumerate(others) if m["url"] > url), len(others))
+        lo = max(0, min(at - k // 2, len(others) - k))
+        picked = others[lo:lo + k]
+    return [{"url": m["url"], "keeps_title": not m.get("rewrite", False)} for m in picked]
+
+
+async def suggest_distinct_title(
+    llm: LLMProvider, doc: dict[str, Any], *, shared_title: str, siblings: list[dict[str, Any]],
+    sharing: int, document_type: str | None = None, collection: Collection | None = None,
+) -> dict[str, Any]:
+    """One call for one page {url, title, text} whose title and document type `sharing - 1` other
+    pages also have. Only a title is asked for.
+    Returns {url, title, title_conf, model} plus the token usage; `title` is None when the model
+    kept the shared title (or gave none)."""
+    text = doc.get("text") or ""
+    header: dict[str, Any] = {}
+    if collection is not None:
+        header["collection"] = collection.name
+        header["collection_seed"] = collection.seed_url
+    header |= {"url": doc["url"], "scraped_title": doc.get("title"), "shared_title": shared_title,
+               "document_type": document_type, "pages_sharing_it": sharing, "other_pages": siblings, "text_chars": len(text)}
+    user = "Page:\n" + json.dumps(header, ensure_ascii=False) + "\n\nText:\n" + text
+    done = await llm.complete(system=TITLES_SYSTEM, user=user, schema=TitleSuggestion)
+    title = (done.parsed.title or "").strip()
+    same = " ".join(title.split()).lower() == " ".join(shared_title.split()).lower()
+    return {
+        "url": doc["url"], "title": None if same or not title else title, "title_conf": done.parsed.title_confidence,
+        "model": done.model,
+        "tokens_in": done.tokens_in, "tokens_out": done.tokens_out, "tokens_cached": done.tokens_cached,
+    }
+
 
 async def suggest_patterns_batch(
     llm: LLMProvider, c: Collection, batch: list[dict[str, Any]], *,
@@ -224,6 +302,8 @@ async def suggest_metadata_one(
     user = "Document:\n" + json.dumps(header, ensure_ascii=False) + "\n\nText:\n" + text
     done = await llm.complete(system=METADATA_SYSTEM, user=user, schema=MetadataSuggestion)
     r = done.parsed
+    if not r.title.strip():  # recorded on the row as a failure; the next Suggest metadata asks again
+        raise LLMError("the model returned an empty title")
     return {
         "url": doc["url"],
         "title": (r.title or "").strip() or None, "title_conf": r.title_confidence,

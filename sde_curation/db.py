@@ -94,6 +94,36 @@ def order_by(sorts: dict[str, tuple[str, ...]], sort: str | None, desc: bool, de
 
 AI_FIELDS = ("title", "division", "document_type")
 
+# ── duplicate titles ──────────────────────────────────────────────────
+# The title and document type each included page of a collection will be indexed with once the
+# delta URLs are promoted: a pending AI suggestion as if accepted, else the effective value; the
+# title falls back to the scraped title (the export's fallback). A curated row that a delta row
+# stands in for (same URL, a rename or a removal) counts once, as the delta row. Two pages are
+# duplicates when BOTH match: the title ignoring case and runs of whitespace, and the document type
+# (two pages with the same title but different types are told apart by the type). Both queries take
+# the collection id twice.
+_PROJECTED_TITLES = """
+SELECT url, delta, pending_ai, title, document_type,
+       lower(regexp_replace(btrim(title), '\\s+', ' ', 'g')) || chr(31) || COALESCE(document_type, '') AS k FROM (
+  SELECT d.url, true AS delta, d.title_ai IS NOT NULL AS pending_ai,
+         COALESCE(d.title_ai, d.title, d.scraped_title) AS title,
+         COALESCE(d.document_type_ai, d.document_type) AS document_type
+    FROM delta_urls d WHERE d.collection_id=%s AND d.kind!='deleted' AND NOT d.excluded
+  UNION ALL
+  SELECT c.url, false, false, COALESCE(c.title, c.scraped_title), c.document_type
+    FROM curated_urls c WHERE c.collection_id=%s AND NOT c.excluded
+     AND NOT EXISTS (SELECT 1 FROM delta_urls x WHERE x.collection_id=c.collection_id AND x.url=c.url)
+     AND NOT EXISTS (SELECT 1 FROM delta_urls x WHERE x.collection_id=c.collection_id AND x.renamed_from=c.url)
+) p WHERE btrim(COALESCE(title, '')) != ''"""
+# A delta URL that promote would write into the curated set without a title, a division or a
+# document type (its effective values: rules or the curated row, never a pending suggestion).
+# Removals and excluded rows carry no metadata to the index, so they never count.
+_INCOMPLETE = ("kind!='deleted' AND NOT excluded"
+               " AND (btrim(COALESCE(title, ''))='' OR division IS NULL OR document_type IS NULL)")
+
+_DUPLICATE_TITLES = (f"SELECT * FROM (SELECT t.*, COUNT(*) OVER (PARTITION BY k) AS n FROM ({_PROJECTED_TITLES}) t) w"
+                     " WHERE n > 1")
+
 
 def match_clause(match: str, col: str) -> tuple[str, list[Any]]:
     """`?match=<glob>` as SQL: the URLs a rule (or a not-yet-saved suggestion) matches, the same
@@ -415,9 +445,11 @@ class Database:
     async def list_curated(
         self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None,
         excluded: bool | None = None, edited: str | None = None, unreachable: bool | None = None,
-        match: str | None = None, sort: str | None = None, desc: bool = False,
+        match: str | None = None, dup_title: bool = False, sort: str | None = None, desc: bool = False,
     ) -> tuple[list[CuratedUrl], int]:
         where, args = ["collection_id=%s"], [collection_id]
+        if dup_title:
+            where.append(f"url IN (SELECT url FROM ({_DUPLICATE_TITLES}) g)"); args += [collection_id] * 2
         if q:
             where.append("(url ILIKE %s OR title ILIKE %s OR scraped_title ILIKE %s)"); args += [f"%{q}%"] * 3
         if match:
@@ -511,12 +543,22 @@ class Database:
         q: str | None = None, division: str | None = None, document_type: str | None = None,
         ai_pending: bool = False, ai_conf: str | None = None, ai_field: str | None = None,
         ai_failed: bool = False, content_changed: bool | None = None, edited: str | None = None, renamed: bool | None = None,
-        match: str | None = None, limit: int = 100, offset: int = 0,
+        match: str | None = None, dup_title: bool = False, retitled: bool = False, incomplete: bool = False,
+        limit: int = 100, offset: int = 0,
         sort: str | None = None, desc: bool = False,
     ) -> tuple[list[DeltaUrl], int]:
         """`ai_field`: rows with a pending suggestion for that one field (title / division /
-        document_type); `match`: rows a rule's glob or exact URL matches (see match_clause)."""
+        document_type); `match`: rows a rule's glob or exact URL matches (see match_clause);
+        `dup_title`: rows whose title and document type another page of the collection will also have;
+        `retitled`: rows whose duplicate AI title was regenerated (the title they shared is kept);
+        `incomplete`: rows promote refuses (no title, division or document type yet)."""
         where, args = ["collection_id=%s"], [collection_id]
+        if dup_title:
+            where.append(f"url IN (SELECT url FROM ({_DUPLICATE_TITLES}) g WHERE delta)"); args += [collection_id] * 2
+        if retitled:
+            where.append("title_ai IS NOT NULL AND title_ai_before IS NOT NULL")
+        if incomplete:
+            where.append(f"({_INCOMPLETE})")
         if ai_field in AI_FIELDS:
             where.append(f"{ai_field}_ai IS NOT NULL")
         if match:
@@ -569,7 +611,7 @@ class Database:
                     "COPY delta_urls (collection_id,url,kind,renamed_from,crawl_failure,scraped_title,title,"
                     "division,document_type,excluded,content_changed,edited_by,title_ai,division_ai,"
                     "document_type_ai,title_ai_conf,division_ai_conf,document_type_ai_conf,ai_model,"
-                    "ai_content_hash,ai_error,ai_failures) FROM STDIN"
+                    "ai_content_hash,ai_error,ai_failures,title_ai_before) FROM STDIN"
                 ) as copy:
                     for d in deltas:
                         await copy.write_row((
@@ -577,6 +619,7 @@ class Database:
                             d.title, d.division, d.document_type, d.excluded, d.content_changed, d.edited_by,
                             d.title_ai, d.division_ai, d.document_type_ai, d.title_ai_conf, d.division_ai_conf,
                             d.document_type_ai_conf, d.ai_model, d.ai_content_hash, d.ai_error, d.ai_failures,
+                            d.title_ai_before,
                         ))
                 if not keep_effects:
                     await cur.execute("DELETE FROM pattern_effects WHERE collection_id=%s", (collection_id,))
@@ -627,7 +670,7 @@ class Database:
             await cur.executemany(
                 """UPDATE delta_urls SET title_ai=%s, division_ai=%s, document_type_ai=%s,
                    title_ai_conf=%s, division_ai_conf=%s, document_type_ai_conf=%s,
-                   ai_model=%s, ai_content_hash=%s, ai_error=NULL, ai_failures=0
+                   ai_model=%s, ai_content_hash=%s, ai_error=NULL, ai_failures=0, title_ai_before=NULL
                    WHERE collection_id=%s AND url=%s""",
                 [(i.get("title"), i.get("division"), i.get("document_type"),
                   i.get("title_conf"), i.get("division_conf"), i.get("document_type_conf"),
@@ -929,11 +972,13 @@ class Database:
     # Pending, included URLs the LLM should classify. `only_missing` = never classified, or the
     # page text changed since the model last saw it (content_changed and a different hash).
     _LLM_WHERE = "d.collection_id=%s AND d.kind!='deleted' AND NOT d.excluded"
-    # "missing": no suggestion left on the row, the last call failed, the model left the document
-    # type empty and no rule sets one (answers from before it was required; a type the SME dismissed
+    # "missing": no suggestion left on the row, the last call failed, the model left a field empty
+    # and no rule sets it (answers from before every field was required; a value the SME dismissed
     # has no confidence either and is not re-asked), or the text changed since the answer
     _LLM_MISSING = (" AND ((d.title_ai IS NULL AND d.division_ai IS NULL AND d.document_type_ai IS NULL)"
                     " OR d.ai_error IS NOT NULL"
+                    " OR (d.title_ai IS NULL AND d.title_ai_conf IS NOT NULL AND d.title IS NULL)"
+                    " OR (d.division_ai IS NULL AND d.division_ai_conf IS NOT NULL AND d.division IS NULL)"
                     " OR (d.document_type_ai IS NULL AND d.document_type_ai_conf IS NOT NULL AND d.document_type IS NULL)"
                     " OR (d.content_changed AND (d.ai_content_hash IS NULL OR d.ai_content_hash != u.content_hash)))")
 
@@ -977,37 +1022,68 @@ class Database:
     async def deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> list[dict[str, Any]]:
         return [r async for r in self.iter_deltas_for_llm(collection_id, only_missing=only_missing)]
 
-    async def deltas_with_ai(self, collection_id: str, field: str, url: str | None = None) -> list[tuple[str, str]]:
+    async def deltas_with_ai(
+        self, collection_id: str, field: str, url: str | None = None, conf: str | None = None,
+    ) -> list[tuple[str, str]]:
         """(url, suggested value) for every pending, non-removed URL with an AI suggestion for `field`
-        (just that one row when `url` is given)."""
+        (just that one row when `url` is given; only suggestions of that confidence when `conf` is)."""
         assert field in ("title", "division", "document_type")
         sql = (f"SELECT url, {field}_ai AS v FROM delta_urls WHERE collection_id=%s AND kind!='deleted'"
                f" AND {field}_ai IS NOT NULL")
         args: list[Any] = [collection_id]
         if url is not None:
             sql += " AND url=%s"; args.append(url)
+        if conf is not None:
+            sql += f" AND {field}_ai_conf=%s"; args.append(conf)
         async with self._conn() as conn:
             cur = await conn.execute(sql + " ORDER BY url", args)
             return [(r["url"], r["v"]) for r in await cur.fetchall()]
 
+    @staticmethod
+    def _ai_filter(field: str | None, conf: str | None) -> tuple[str, list[Any]]:
+        """Rows with a pending suggestion for `field` (any field when None), of confidence `conf`
+        (any when None)."""
+        fields = [field] if field in AI_FIELDS else list(AI_FIELDS)
+        if conf is None:
+            return "(" + " OR ".join(f"{f}_ai IS NOT NULL" for f in fields) + ")", []
+        return ("(" + " OR ".join(f"({f}_ai IS NOT NULL AND {f}_ai_conf=%s)" for f in fields) + ")",
+                [conf] * len(fields))
+
     async def list_delta_ai(
-        self, collection_id: str, limit: int = 50, offset: int = 0,
+        self, collection_id: str, limit: int = 50, offset: int = 0, *,
+        field: str | None = None, conf: str | None = None,
     ) -> tuple[list[DeltaUrl], int]:
-        """Pending, non-removed delta URLs that carry at least one AI suggestion, by URL — the
-        review table under Curate › Metadata — and how many there are in all."""
-        where = ("collection_id=%s AND kind!='deleted'"
-                 " AND (title_ai IS NOT NULL OR division_ai IS NOT NULL OR document_type_ai IS NOT NULL)")
+        """Pending, non-removed delta URLs that carry at least one AI suggestion (for `field`, of
+        confidence `conf`, when given), by URL — the review table under Curate › Metadata — and how
+        many there are in all."""
+        cond, cargs = self._ai_filter(field, conf)
+        where, args = f"collection_id=%s AND kind!='deleted' AND {cond}", [collection_id, *cargs]
         async with self._conn() as conn:
-            total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM delta_urls WHERE {where}", (collection_id,)))
+            total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM delta_urls WHERE {where}", args))
             cur = await conn.execute(
-                f"SELECT * FROM delta_urls WHERE {where} ORDER BY url LIMIT %s OFFSET %s",
-                (collection_id, limit, offset),
+                f"SELECT * FROM delta_urls WHERE {where} ORDER BY url LIMIT %s OFFSET %s", [*args, limit, offset],
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
+    async def count_ai_suggestions(self, collection_id: str, *, field: str | None = None,
+                                   conf: str | None = None) -> int:
+        """Pending field-level AI suggestions for `field` (every field when None) of confidence `conf`
+        (any when None): what an accept / reject of the filtered review decides."""
+        fields = [field] if field in AI_FIELDS else list(AI_FIELDS)
+        parts, args = [], []
+        for f in fields:
+            parts.append(f"COUNT(*) FILTER (WHERE {f}_ai IS NOT NULL" + (f" AND {f}_ai_conf=%s)" if conf else ")"))
+            args += [conf] if conf else []
+        async with self._conn() as conn:
+            return await _scalar(await conn.execute(
+                f"SELECT {' + '.join(parts)} FROM delta_urls WHERE collection_id=%s AND kind!='deleted'",
+                [*args, collection_id],
+            )) or 0
+
     async def delta_ai_counts(self, collection_id: str) -> dict[str, Any]:
         """Pending AI suggestions per field, plus `by_conf`: suggestions (field-level) per confidence,
-        and `failed`: included URLs whose last Suggest metadata call failed."""
+        `failed`: included URLs whose last Suggest metadata call failed, and `retitled`: pending AI
+        titles regenerated over a title the page shared (Regenerate duplicate titles)."""
         conf = ("COUNT(*) FILTER (WHERE title_ai IS NOT NULL AND title_ai_conf=%s)"
                 " + COUNT(*) FILTER (WHERE division_ai IS NOT NULL AND division_ai_conf=%s)"
                 " + COUNT(*) FILTER (WHERE document_type_ai IS NOT NULL AND document_type_ai_conf=%s)")
@@ -1015,21 +1091,28 @@ class Database:
             cur = await conn.execute(
                 f"""SELECT COUNT(title_ai) AS t, COUNT(division_ai) AS d, COUNT(document_type_ai) AS dt,
                            {conf} AS hi, {conf} AS med, {conf} AS lo,
-                           COUNT(*) FILTER (WHERE ai_error IS NOT NULL AND NOT excluded) AS failed
+                           COUNT(*) FILTER (WHERE ai_error IS NOT NULL AND NOT excluded) AS failed,
+                           COUNT(*) FILTER (WHERE title_ai IS NOT NULL AND title_ai_before IS NOT NULL) AS retitled
                     FROM delta_urls WHERE collection_id=%s AND kind!='deleted'""",
                 ("high",) * 3 + ("medium",) * 3 + ("low",) * 3 + (collection_id,),
             )
             r = await cur.fetchone()
         return {"title": r["t"] or 0, "division": r["d"] or 0, "document_type": r["dt"] or 0,
                 "by_conf": {"high": r["hi"] or 0, "medium": r["med"] or 0, "low": r["lo"] or 0},
-                "failed": r["failed"] or 0}
+                "failed": r["failed"] or 0, "retitled": r["retitled"] or 0}
 
-    async def clear_delta_ai_field(self, collection_id: str, field: str, url: str | None = None) -> int:
+    async def clear_delta_ai_field(
+        self, collection_id: str, field: str, url: str | None = None, conf: str | None = None,
+    ) -> int:
         assert field in ("title", "division", "document_type")
-        sql = f"UPDATE delta_urls SET {field}_ai=NULL, {field}_ai_conf=NULL WHERE collection_id=%s AND {field}_ai IS NOT NULL"
+        extra = ", title_ai_before=NULL" if field == "title" else ""
+        sql = (f"UPDATE delta_urls SET {field}_ai=NULL, {field}_ai_conf=NULL{extra}"
+               f" WHERE collection_id=%s AND {field}_ai IS NOT NULL")
         args: list[Any] = [collection_id]
         if url is not None:
             sql += " AND url=%s"; args.append(url)
+        if conf is not None:
+            sql += f" AND {field}_ai_conf=%s"; args.append(conf)
         async with self._conn() as conn:
             cur = await conn.execute(sql, args)
             return cur.rowcount
@@ -1037,10 +1120,104 @@ class Database:
     async def clear_delta_ai(self, collection_id: str, url: str, field: str) -> None:
         assert field in ("title", "division", "document_type")
         async with self._conn() as conn:
+            extra = ", title_ai_before=NULL" if field == "title" else ""
             await conn.execute(
-                f"UPDATE delta_urls SET {field}_ai=NULL, {field}_ai_conf=NULL WHERE collection_id=%s AND url=%s",
+                f"UPDATE delta_urls SET {field}_ai=NULL, {field}_ai_conf=NULL{extra} WHERE collection_id=%s AND url=%s",
                 (collection_id, url),
             )
+
+    async def incomplete_counts(self, collection_id: str, urls: list[str] | None = None) -> dict[str, int]:
+        """Delta URLs promote would refuse (see _INCOMPLETE): how many, and how many lack each field.
+        `urls`: only these rows (a promote of a selection)."""
+        where, args = f"collection_id=%s AND {_INCOMPLETE}", [collection_id]
+        if urls is not None:
+            where += " AND url = ANY(%s)"; args.append(list(urls))
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS urls, COUNT(*) FILTER (WHERE btrim(COALESCE(title, ''))='') AS title,"
+                " COUNT(*) FILTER (WHERE division IS NULL) AS division,"
+                f" COUNT(*) FILTER (WHERE document_type IS NULL) AS document_type FROM delta_urls WHERE {where}", args,
+            )
+            r = await cur.fetchone()
+        return {k: r[k] or 0 for k in ("urls", "title", "division", "document_type")}
+
+    async def set_delta_ai_titles(self, collection_id: str, items: list[dict[str, Any]]) -> int:
+        """Replace just the AI title suggestion (value, confidence, model) of these rows: the other
+        fields' suggestions and any recorded failure stay as they are. `before`: the title the row
+        shared with other pages — kept as `title_ai_before`, unless an earlier retitle already kept one
+        (the first title stays: it is the one the SME needs to see)."""
+        if not items:
+            return 0
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.executemany(
+                "UPDATE delta_urls SET title_ai=%s, title_ai_conf=%s, ai_model=%s,"
+                " title_ai_before=COALESCE(title_ai_before, %s) WHERE collection_id=%s AND url=%s",
+                [(i["title"], i.get("title_conf"), i.get("model"), i.get("before"), collection_id, i["url"])
+                 for i in items],
+            )
+        return len(items)
+
+    async def docs_for_llm(self, collection_id: str, urls: list[str]) -> list[dict[str, Any]]:
+        """{url, title, text, content_hash} of these delta URLs, with the full page text."""
+        if not urls:
+            return []
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT d.url, d.scraped_title AS title, u.full_text AS text, u.content_hash"
+                " FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id AND u.url=d.url"
+                " WHERE d.collection_id=%s AND d.url = ANY(%s) ORDER BY d.url",
+                (collection_id, list(urls)),
+            )
+            return list(await cur.fetchall())
+
+    async def duplicate_title_counts(self, collection_id: str) -> dict[str, int]:
+        """URLs whose title and document type another page of the collection will also have (see
+        _PROJECTED_TITLES), how many distinct title + type combinations they share (`titles`), and
+        how many of those URLs are delta URLs (the ones a suggestion can still change)."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS urls, COUNT(DISTINCT k) AS titles, COUNT(*) FILTER (WHERE delta) AS delta_urls"
+                f" FROM ({_DUPLICATE_TITLES}) g", (collection_id, collection_id),
+            )
+            r = await cur.fetchone()
+        return {"urls": r["urls"] or 0, "titles": r["titles"] or 0, "delta_urls": r["delta_urls"] or 0}
+
+    async def duplicate_title_groups(self, collection_id: str) -> list[dict[str, Any]]:
+        """Every title + document type shared by more than one page:
+        {"title", "document_type", "members": [{url, delta, pending_ai}]}, members by URL."""
+        async with self._conn() as conn:
+            cur = await conn.execute(f"SELECT * FROM ({_DUPLICATE_TITLES}) g ORDER BY k, url",
+                                     (collection_id, collection_id))
+            rows = await cur.fetchall()
+        groups: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            g = groups.setdefault(r["k"], {"title": r["title"], "document_type": r["document_type"], "members": []})
+            g["members"].append({"url": r["url"], "delta": r["delta"], "pending_ai": r["pending_ai"]})
+        return list(groups.values())
+
+    async def duplicate_titles_for(self, collection_id: str, urls: list[str]) -> dict[str, dict[str, Any]]:
+        """For the rows on a page: url -> {"title", "document_type", "others": how many other pages
+        share both, "sample": up to 5 of those URLs}. Rows whose combination is not shared are absent."""
+        if not urls:
+            return {}
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                f"WITH dup AS (SELECT g.*, row_number() OVER (PARTITION BY k ORDER BY url) AS rn FROM ({_DUPLICATE_TITLES}) g)"
+                " SELECT url, title, document_type, k, n FROM dup WHERE k IN (SELECT k FROM dup WHERE url = ANY(%s))"
+                " AND (rn <= 6 OR url = ANY(%s)) ORDER BY k, url",
+                (collection_id, collection_id, list(urls), list(urls)),
+            )
+            rows = await cur.fetchall()
+        by_key: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            by_key.setdefault(r["k"], []).append(r)
+        wanted, out = set(urls), {}
+        for group in by_key.values():
+            for r in group:
+                if r["url"] in wanted:
+                    out[r["url"]] = {"title": r["title"], "document_type": r["document_type"], "others": r["n"] - 1,
+                                     "sample": [o["url"] for o in group if o["url"] != r["url"]][:5]}
+        return out
 
     # ── patterns ───────────────────────────────────────────────────────
 

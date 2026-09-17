@@ -2,7 +2,7 @@
 suggestions, per-URL edits on every table, re-curation reason, removal warning, rule scope."""
 
 from sde_curation.models import DumpUrl
-from tests.conftest import wait_job
+from tests.conftest import classify, wait_job
 
 
 async def setup(c, cid="ex.org", n=10):
@@ -99,9 +99,9 @@ async def test_edited_by_survives_promote_and_filters(crawler_client):
     c = crawler_client
     await setup(c)
     await c.post("/api/collections/ex.org/suggest/metadata"); await wait_job(c, "ex.org")
-    await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "accept", "field": "title"})   # AI on every row
-    await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "reject", "field": "division"})
-    await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "reject", "field": "document_type"})
+    # AI on every row, every field (promote refuses a row without a title, division or document type)
+    for field in ("title", "division", "document_type"):
+        await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "accept", "field": field})
     await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p2", "type": "division", "value": "Earth Science"})  # SME on p2
     await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "exclude"})  # SME exclude on p3
     d2, d4 = [await delta(c, f"https://ex.org/p{i}") for i in (2, 4)]
@@ -121,9 +121,9 @@ async def test_edited_by_survives_promote_and_filters(crawler_client):
     assert "edited_by" in csv[0] and len(csv) == 2
     # rules table: source column + counts
     rules = (await c.get("/collections/ex.org/rules")).text
-    assert "AI 8" in rules and "SME 2" in rules and 'e-src-llm"' in rules and 'e-src-sme"' in rules and "this collection only" in rules
+    assert "AI 23" in rules and "SME 2" in rules  # 8 titles + 8 types + 7 divisions (p2's is the SME's) and 'e-src-llm"' in rules and 'e-src-sme"' in rules and "this collection only" in rules
     # promote: edited_by lands on the curated rows and the tooltips (effects) survive
-    await c.post("/api/collections/ex.org/promote")
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
     cur = {r["url"]: r for r in (await c.get("/api/collections/ex.org/curated?limit=100")).json()["items"]}
     assert cur["https://ex.org/p2"]["edited_by"] == "mixed" and cur["https://ex.org/p4"]["edited_by"] == "ai"
     page = (await c.get("/collections/ex.org?tab=curated&q=p2")).text
@@ -156,7 +156,8 @@ async def test_patterns_only_for_pending_after_promote(crawler_client):
     await setup(c)
     fake = FakeProvider()
     c.app.state.jobs._llm = fake
-    await c.post("/api/collections/ex.org/promote")
+    await classify(c)
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
     # nothing pending → the button is disabled with a reason and the API refuses
     page = (await c.get("/collections/ex.org?tab=curate")).text
     assert "(0 delta URLs · 0 calls)" in page and "Start curating first" in page
@@ -184,7 +185,8 @@ async def test_patterns_only_for_pending_after_promote(crawler_client):
 async def test_removal_warning_and_edits_on_every_table(crawler_client):
     c = crawler_client
     await setup(c)
-    await c.post("/api/collections/ex.org/promote")
+    await classify(c)
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
     for st in ("config_generated", "live"):
         await c.post("/api/collections/ex.org/status", json={"status": st})
     # curated table: toggle exclude on a promoted row → the rule applies in place (no delta); the live
@@ -226,7 +228,8 @@ async def test_recuration_reason(crawler_client):
     c = crawler_client
     await setup(c)
     assert (await coll(c))["recuration_reason"] is None
-    await c.post("/api/collections/ex.org/promote")
+    await classify(c)
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
     await c.post("/api/collections/ex.org/scrape"); await wait_job(c, "ex.org")
     col = await coll(c)
     assert col["needs_recuration"] is True and col["recuration_reason"].startswith("re-crawled on ")

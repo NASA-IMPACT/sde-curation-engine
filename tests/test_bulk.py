@@ -79,6 +79,9 @@ async def test_ai_bulk_accept_and_reject(crawler_client):
     assert all(d["document_type_ai"] is None and d["document_type"] is None for d in items)
     assert len((await c.get("/api/collections/ex.org/patterns")).json()) == 8
     assert (await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "accept", "field": "bogus"})).status_code == 422
+    # every row got a division suggestion too (a guess at low confidence when nothing says)
+    r = await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "reject", "field": "division"})
+    assert r.status_code == 200 and r.json()["decided"] == 8
     # the workspace shows the bulk bar only while something is pending
     assert "accept all" not in (await c.get("/collections/ex.org?tab=curate")).text
 

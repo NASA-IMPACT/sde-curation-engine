@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     # Suggest metadata always sends the FULL page text (no budget, no truncation, one model).
     # Suggest patterns sends every crawled URL (+ title) in batches of this size, one call each.
     llm_pattern_batch_urls: int = Field(default=1000, ge=50, le=10_000)
+    # Off (default): Suggest metadata only flags pages whose AI title and document type another page
+    # of the collection will also have; the SME sees the titles as generated and edits them, or sends
+    # them back with "Regenerate duplicate titles" (one call each, full text, with the other URLs, for a new title
+    # only). On: Suggest metadata ends with that pass by itself.
+    llm_dedupe_titles: bool = False
     # Warn before promoting when this share (or more) of the curated set vanished from the crawl.
     promote_removal_warn_ratio: float = Field(default=0.25, ge=0.0, le=1.0)
     # Exclude globs applied deterministically before the model's own suggestions.

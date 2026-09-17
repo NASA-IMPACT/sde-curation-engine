@@ -107,15 +107,42 @@ appear without a manual reload:
   `LLM_WORKERS` (default 16) in flight. The text is never cut: an accurate title needs the whole
   page, and the default model (`gpt-5.6-luna`, 1.05M-token window) takes any page whole; a page
   beyond the model's window fails that one call (its error recorded on the row, retried on the next run)
-  rather than being guessed from a slice. Every page gets a document type (the closest, with low
-  confidence, when none fits well). The model returns a descriptive search-result title, division and document type, each
-  with a **confidence** (`high` = explicit in the text, `medium` = strong inference, `low` = guess).
+  rather than being guessed from a slice. **Every page gets every field** — a title, a division and a
+  document type — each with a **confidence** (`high` = explicit in the text, `medium` = strong
+  inference, `low` = guess): where the model is unsure it gives its best value at low confidence
+  instead of leaving the field blank (an empty title counts as a failed call, retried next run; a row
+  whose answer left a field blank with no rule setting it is asked again).
   These show as `AI:` badges with the confidence next to each cell in URLs › Delta URLs (filter by
   confidence; the review bar counts them); **✓** accepts (creates an exact-URL pattern, i.e. a
-  manual override), **✕** dismisses. Answers are written as they arrive: **cancel keeps what
+  manual override), **✕** dismisses. Curate › Metadata filters the review table by confidence
+  (all / high / medium / low) and by field, and **✓ accept these / ✕ reject these** decide exactly
+  the suggestions the filter names, on every page. With *any field* a row is listed when any of its
+  title / division / type suggestions has that confidence; picking a field narrows it to that one.
+  A listed row still shows all its suggestions, and its **✓ row** accepts all of them, filter or not.
+- **No blank metadata in the curated set** — Promote (all, or a selection) is refused with a 409
+  while any delta URL it would write has no title, division or document type as an effective value
+  (a pending suggestion is not a value until accepted; removals and excluded rows never count). The
+  Promote card and the Delta URLs table show how many and which field, and
+  `?missing=true` lists those rows. Answers are written as they arrive: **cancel keeps what
   finished**, one bad URL is counted as failed and never fails the job, and re-running classifies
   only what is missing — plus any URL whose text changed since it was last classified. The job
   result shows classified / failed counts and tokens in / out.
+- **Duplicate titles** — two included pages of a collection are duplicates when they will be
+  indexed under the same title (ignoring case and whitespace) **and** the same document type; the
+  same title with different types does not count. Each page is taken as it would be after
+  promote: a pending AI suggestion as if accepted, else the effective value (the title falls back to
+  the scraped title); curated rows count too. Duplicates get a **⚠ same title + type ×N** chip in
+  the Delta / Curated URLs tables (filter `?dup=title`), a count on the Curate › Metadata card and a
+  warning above Promote. By default Suggest metadata only flags them, with the titles as generated,
+  so an SME can fix a handful by hand. **✨ Regenerate duplicate titles** sends every delta URL of a duplicate
+  (including ones set by rules) back to the model for a **new title only** — one call per page,
+  full text, with up to 30 of the other URLs; the document type is left alone. The answer replaces
+  the AI title suggestion (never applied until accepted) and the title the page shared is kept on
+  the row (`title_ai_before`): it shows as **⚠ was same title + type “…”** with **✎ original** to
+  edit it instead, and `?dup=retitled` lists those rows. In a group, only pages with a pending AI
+  title are re-asked when any has one (the rest are sent as settled); otherwise every delta URL in
+  the group is. `LLM_DEDUPE_TITLES=true` makes Suggest metadata run that pass by itself at the end
+  (a failure there never fails the classification: the duplicates simply stay flagged).
 
 Provider is pluggable (`LLM_PROVIDER`): `openai` (default model `gpt-5.6-luna`; any
 OpenAI-compatible endpoint via `OPENAI_BASE_URL`; structured outputs parsed straight into Pydantic
@@ -352,7 +379,7 @@ are in flight — the ceilings come from the systems behind it.
 | `NOTIFY_WEBHOOK_URL`, `PUBLIC_BASE_URL` | Slack-compatible notifications on every status change |
 | `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.6-luna`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` (per attempt), `LLM_MAX_RETRIES`, `LLM_TEMPERATURE` (unset = model default; reasoning models reject any other value) | LLM assist; any OpenAI-compatible endpoint |
 | `PROMOTE_REMOVAL_WARN_RATIO` (0.25) | share of the curated set that must vanish from a crawl before Promote warns |
-| `LLM_WORKERS` (16), `LLM_RETRY_PASSES` (1), `LLM_RETRY_DELAY_S` (30), `LLM_PATTERN_BATCH_URLS` (1000), `GLOBAL_EXCLUDES_PATH` | calls in flight per LLM job; end-of-job retries of rate-limited / 5xx / timed-out calls (a quarter of the workers, after the delay); URLs per Suggest-patterns call; override the packaged global exclude YAML |
+| `LLM_WORKERS` (16), `LLM_RETRY_PASSES` (1), `LLM_RETRY_DELAY_S` (30), `LLM_PATTERN_BATCH_URLS` (1000), `LLM_DEDUPE_TITLES` (false), `GLOBAL_EXCLUDES_PATH` | calls in flight per LLM job; end-of-job retries of rate-limited / 5xx / timed-out calls (a quarter of the workers, after the delay); URLs per Suggest-patterns call; true: Suggest metadata re-titles same title + doc type pages by itself (default: flag only); override the packaged global exclude YAML |
 | `APP_PASSWORD`, `SESSION_SECRET`, `SESSION_TTL_S`, `AUTH_COOKIE_SECURE` | login with local accounts (off when `APP_PASSWORD` is empty; the value seeds the bootstrap `admin`); `/health` stays open |
 
 ## API

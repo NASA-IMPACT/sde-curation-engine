@@ -323,3 +323,15 @@ th a.sort { color: inherit; text-decoration: none; }
 th a.sort:hover { color: var(--fg); }
 th a.sort .arrow { font-size: .7rem; margin-left: .3rem; opacity: .35; }
 th.sorted a.sort { color: var(--fg); } th.sorted a.sort .arrow { opacity: 1; color: var(--accent); }
+
+/* a title another page of the collection will also be indexed under */
+.dup-title { font-size: .72rem; font-weight: 600; white-space: nowrap; padding: .05rem .4rem; border-radius: 3px; background: #fef3c7; color: #78350f; text-decoration: none; }
+.dup-title:hover { text-decoration: underline; }
+@media (prefers-color-scheme: dark) { .dup-title { background: #78350f; color: #fef3c7; } }
+.dup-title.was { font-weight: 500; }
+.was-title { color: var(--muted); overflow-wrap: anywhere; }
+
+/* Curate › Metadata: filter the review table by confidence / field */
+.ai-filter { flex-wrap: wrap; gap: .4rem; margin: .4rem 0; }
+.ai-filter .conf { padding: .05rem .45rem; border-radius: 999px; border: 1px solid var(--line); text-decoration: none; }
+.ai-filter .conf.on { outline: 2px solid var(--accent); outline-offset: 1px; font-weight: 600; }

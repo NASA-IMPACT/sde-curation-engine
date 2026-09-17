@@ -21,6 +21,7 @@ from ..models import (
     PatternSuggestion,
     PatternSuggestions,
     PatternType,
+    TitleSuggestion,
 )
 from .base import Completion, LLMError, T
 
@@ -66,6 +67,8 @@ class FakeProvider:
         if schema is MetadataSuggestion:
             _, header, text = user.split("\n", 2)
             return self._metadata(json.loads(header), text.split("\nText:\n", 1)[-1])  # type: ignore[return-value]
+        if schema is TitleSuggestion:
+            return self._title(json.loads(user.split("\n", 2)[1]))  # type: ignore[return-value]
         raise LLMError(f"fake provider has no handler for {schema.__name__}")
 
     def _patterns(self, payload: dict) -> PatternSuggestions:
@@ -89,7 +92,8 @@ class FakeProvider:
 
     def _metadata(self, header: dict, text: str) -> MetadataSuggestion:
         """Confidence is deterministic: high when the keyword is in the URL or title, medium when
-        only in the page text, low when the value is a default or missing."""
+        only in the page text, low when the value is a fallback (the collection's division or
+        General, Documentation, a title made from the URL)."""
         strong = (header["url"] + " " + (header.get("scraped_title") or "")).lower()
         weak = text.lower()
 
@@ -102,10 +106,23 @@ class FakeProvider:
                     return v, Confidence.MEDIUM
             return default, Confidence.LOW
 
-        div, div_c = pick(_DIV)
+        div, div_c = pick(_DIV, Division(header.get("collection_division") or Division.GENERAL))
         dt, dt_c = pick(_DT, DocumentType.DOCUMENTATION)
-        title = re.sub(r"\s+[-–|]\s+.*$", "", header.get("scraped_title") or "").strip() or None
+        title = re.sub(r"\s+[-–|]\s+.*$", "", header.get("scraped_title") or "").strip()
+        title_c = Confidence.HIGH if title else Confidence.LOW
+        if not title:  # every field is answered: fall back to the last path segment
+            seg = urlsplit(header["url"]).path.rstrip("/").rsplit("/", 1)[-1]
+            title = seg.replace("-", " ").title() or "Home"
         return MetadataSuggestion(
-            title=title, title_confidence=Confidence.HIGH if title else Confidence.LOW,
+            title=title, title_confidence=title_c,
             division=div, division_confidence=div_c, document_type=dt, document_type_confidence=dt_c,
         )
+
+    def _title(self, header: dict) -> TitleSuggestion:
+        """The shared title plus the page's last path segment ("Page — P3"); the shared title
+        unchanged (low confidence) when the URL has no path to tell it apart by."""
+        seg = urlsplit(header["url"]).path.rstrip("/").rsplit("/", 1)[-1]
+        if not seg:
+            return TitleSuggestion(title=header["shared_title"], title_confidence=Confidence.LOW)
+        return TitleSuggestion(title=f"{header['shared_title']} — {seg.replace('-', ' ').title()}",
+                               title_confidence=Confidence.MEDIUM)

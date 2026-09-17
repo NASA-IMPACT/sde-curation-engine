@@ -260,4 +260,17 @@ async def prepare(c, cid="ex.org"):
     await c.post(f"/api/collections/{cid}/scrape"); await wait_job(c, cid)
     await c.post(f"/api/collections/{cid}/recompute")
     await c.post(f"/api/collections/{cid}/patterns", json={"type": "exclude", "match": "*/p1"})
-    await c.post(f"/api/collections/{cid}/promote")
+    await classify(c, cid)
+    r = await c.post(f"/api/collections/{cid}/promote")
+    assert r.status_code == 200, r.text
+
+
+async def classify(c, cid="ex.org"):
+    """The curator's metadata step: Suggest metadata (fake LLM), then accept every suggestion. Promote
+    refuses delta URLs without a title, division or document type, so a flow that promotes runs this first."""
+    r = await c.post(f"/api/collections/{cid}/suggest/metadata")
+    assert r.status_code == 202, r.text
+    job = await wait_job(c, cid)
+    assert job["state"] == "succeeded", job
+    r = await c.post(f"/api/collections/{cid}/ai/bulk", json={"decision": "accept"})
+    assert r.status_code == 200, r.text
