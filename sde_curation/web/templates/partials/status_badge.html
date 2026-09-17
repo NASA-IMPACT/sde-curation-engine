@@ -1,4 +1,6 @@
-{# Workflow status pill + the sub-tags that qualify it (curation stage, needs re-curation). context: c #}
+{# Workflow status pill + the sub-tags that qualify it (curation stage, needs re-curation, needs re-indexing, prod not validated). context: c #}
 <span class="status s-{{ c.status }}" title="workflow status">{{ status_icon(c.status) }} {{ status_label(c.status) }}</span>
 {%- if c.status == 'curating' and c.curation_stage %} <span class="chip stage" title="curation stage: {{ 'deciding the exclusions' if c.curation_stage == 'exclusions' else 'setting titles, divisions and document types' }}">{{ '① Exclusions' if c.curation_stage == 'exclusions' else '② Metadata' }}</span>{% endif %}
-{%- if c.needs_recuration %} <span class="chip warn" title="{{ c.recuration_reason or 'Something promoted is stale: a re-crawl happened or validation failed — review and promote again' }}">⚠ needs re-curation</span>{% endif %}
+{%- if c.needs_recuration %} <span class="chip warn" title="{{ c.recuration_reason or 'Something promoted is stale: a re-crawl happened after a promote — review and promote again' }}">⚠ needs re-curation</span>{% endif %}
+{%- if c.needs_reindexing %} <a class="chip warn" href="/collections/{{ c.collection_id }}?step=config_generated" title="The latest test index run failed or did not pass validation — Re-index to test, or Re-validate if the index only needed more time">⚠ needs re-indexing</a>{% endif %}
+{%- if c.prod_not_validated %} <a class="chip warn" href="/collections/{{ c.collection_id }}?step=live" title="The latest prod publish failed its validation or was never checked — see step 6: Re-validate prod, or Re-index to prod">⚠ prod not validated</a>{% endif %}
