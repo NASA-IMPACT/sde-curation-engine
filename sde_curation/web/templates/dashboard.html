@@ -25,7 +25,7 @@
     <section class="card jobs-card" id="jobs-panel" hx-get="/jobs/panel" hx-trigger="sse:collection, every 10s" hx-sync="this:replace" hx-swap="innerHTML">
       {% with compact=True %}{% include "partials/jobs_panel.html" %}{% endwith %}
     </section>
-    {% include "partials/rows.html" %}
+    <div class="tbl-wrap">{% include "partials/rows.html" %}</div>
   </div>
 </div>
 <script>
