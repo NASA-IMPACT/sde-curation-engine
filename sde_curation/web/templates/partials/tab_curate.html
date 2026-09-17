@@ -19,23 +19,26 @@
 {% set s3 = 'current' if stage == 'metadata' and not ai_pending_total else 'todo' %}
 {% set curate = '/collections/' ~ cid ~ '?tab=curate' %}
 {% macro sugg_href(n) %}{{ curate }}&focus=exclusions&per={{ sugg_paging.per }}&page={{ n }}{% endmacro %}
-{% macro ai_href(n) %}{{ curate }}&focus=metadata&per={{ ai_paging.per }}&page={{ n }}{% endmacro %}
+{# the review table's filter (?conf= / ?field=) rides along on its paging and expand links #}
+{% set ai_qs %}{% if ai_conf %}&conf={{ ai_conf }}{% endif %}{% if ai_field %}&field={{ ai_field }}{% endif %}{% endset %}
+{% macro ai_href(n) %}{{ curate }}&focus=metadata&per={{ ai_paging.per }}&page={{ n }}{{ ai_qs }}{% endmacro %}
 {# ⤢ Expand one list to its own page / ⤡ Collapse back to the whole workspace #}
 {% macro expand_link(name, total) -%}
-  {% if focus == name %}<span class="grow"></span><a class="button secondary small" href="{{ curate }}#{{ name }}" title="back to the whole Curate page">⤡ Collapse</a>
-  {%- elif not focus and total %}<span class="grow"></span><a class="button secondary small" href="{{ curate }}&focus={{ name }}" title="open this list on its own page: all {{ total }}, paginated">⤢ Expand</a>{% endif %}
+  {% set keep = ai_qs if name == 'metadata' else '' %}
+  {% if focus == name %}<span class="grow"></span><a class="button secondary small" href="{{ curate }}{{ keep }}#{{ name }}" title="back to the whole Curate page">⤡ Collapse</a>
+  {%- elif not focus and total %}<span class="grow"></span><a class="button secondary small" href="{{ curate }}&focus={{ name }}{{ keep }}" title="open this list on its own page: all {{ total }}, paginated">⤢ Expand</a>{% endif %}
 {%- endmacro %}
 {# paging for an expanded list: range, ‹ page ›, rows per page #}
 {% macro focus_pager(name, paging, href) -%}
   <div class="inline pager">
     {{ pager(paging.page, paging.pages, paging.per, paging.total, href) }}
-    <form method="get" action="/collections/{{ cid }}" class="inline"><input type="hidden" name="tab" value="curate"><input type="hidden" name="focus" value="{{ name }}">
+    <form method="get" action="/collections/{{ cid }}" class="inline"><input type="hidden" name="tab" value="curate"><input type="hidden" name="focus" value="{{ name }}">{% if name == 'metadata' %}{% if ai_conf %}<input type="hidden" name="conf" value="{{ ai_conf }}">{% endif %}{% if ai_field %}<input type="hidden" name="field" value="{{ ai_field }}">{% endif %}{% endif %}
       <select name="per" aria-label="rows per page" onchange="this.form.submit()">{% for n in [25, 50, 100, 250] %}<option {% if paging.per == n %}selected{% endif %}>{{ n }}</option>{% endfor %}</select></form>
   </div>
 {%- endmacro %}
 {# the note under a list shown in place when it has more rows than fit #}
 {% macro more_note(name, paging, noun) -%}
-  {% if not focus and paging.total > paging.per %}<p class="muted small">Showing the first {{ paging.per }} of {{ paging.total }} {{ noun }} — <a href="{{ curate }}&focus={{ name }}">⤢ Expand</a> to page through all of them, or use the accept-all buttons.</p>{% endif %}
+  {% if not focus and paging.total > paging.per %}<p class="muted small">Showing the first {{ paging.per }} of {{ paging.total }} {{ noun }} — <a href="{{ curate }}&focus={{ name }}{{ ai_qs if name == 'metadata' }}">⤢ Expand</a> to page through all of them, or use the accept-all buttons.</p>{% endif %}
 {%- endmacro %}
 
 {% if not curating %}
@@ -59,7 +62,7 @@
   <li class="{{ s3 }}"><a href="{{ anchor }}#promote"><span class="n">3</span> Promote</a></li>
   {% if running %}<li class="warn" title="editing is locked until the job finishes"><span class="spinner"></span> {{ job.kind }} · {{ job_progress(job) }} · locked <button class="mini" hx-post="/api/collections/{{ cid }}/jobs/cancel" hx-swap="none" hx-confirm="Cancel the running {{ job.kind }} job?">✕</button></li>{% endif %}
 </ol>
-{% if job and job.state == 'failed' and job.kind in ('llm_patterns', 'llm_metadata') %}<div class="banner err">Last {{ job.kind }} failed: {{ job.error }}</div>{% endif %}
+{% if job and job.state == 'failed' and job.kind in ('llm_patterns', 'llm_metadata', 'llm_titles') %}<div class="banner err">Last {{ job.kind }} failed: {{ job.error }}</div>{% endif %}
 
 {# ── ① Exclusions ─────────────────────────────────────────────────────── #}
 {% if focus in (none, 'exclusions') %}
@@ -154,6 +157,7 @@
       {% if not patterns_ever_run %}<br><small class="muted">Tip: run <b>Suggest exclusions</b> first — excluding what should not be indexed means fewer URLs to classify.</small>{% endif %}
       {% if last_metadata_job %}<br><small class="muted">Last run {{ last_metadata_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_metadata_job.state }}">{{ last_metadata_job.state }}</span> · {{ job_progress(last_metadata_job) }}</small>{% endif %}
       {% if ai_counts.failed %}<br><small title="the call failed even after a retry; the error is shown under each URL">⚠ <a href="/collections/{{ cid }}?tab=delta&ai=failed">{{ ai_counts.failed }} URL{{ 's' if ai_counts.failed != 1 }} failed</a> to classify — Suggest metadata tries {{ 'it' if ai_counts.failed == 1 else 'them' }} again.</small>{% endif %}
+      {% if dedupe_titles %}<br><small class="muted">Pages it gives the same title and document type as another page of the collection are then sent back, one call each with the other URLs, for a new title (only) that tells them apart.</small>{% else %}<br><small class="muted">Pages it gives the same title and document type as another page are flagged with the title as generated: edit them yourself, or send them back with <b>✨ Regenerate duplicate titles</b>.</small>{% endif %}
       {% if classifiable == 0 and classifiable_all %}<br><small class="muted">Every included URL already has suggestions — <a href="#" hx-post="/api/collections/{{ cid }}/suggest/metadata?all=true" hx-swap="none" hx-confirm="Re-classify all {{ classifiable_all }} included URLs? Existing AI suggestions are replaced.">redo all {{ classifiable_all }}</a>.</small>{% endif %}
     </div>
     <button class="{{ 'primary' if s2 == 'current' or (stage == 'exclusions' and not suggestion_counts.total) else 'secondary' }}"
@@ -161,6 +165,27 @@
             title="{% if running %}wait for the running job{% elif not curating %}start curating first{% elif suggestion_counts.total %}decide the {{ suggestion_counts.total }} pending pattern suggestion{{ 's' if suggestion_counts.total != 1 }} first{% elif stage == 'exclusions' %}finish the exclusions first (Continue to metadata){% elif classifiable == 0 %}nothing to classify{% else %}classify {{ classifiable }} URLs{% endif %}"
             hx-post="/api/collections/{{ cid }}/suggest/metadata" hx-swap="none">✨ Suggest metadata <small>({{ classifiable }} URL{{ 's' if classifiable != 1 }})</small></button>
   </div></div>
+
+  {% if ai_counts.retitled %}<p class="small">↻ <a href="/collections/{{ cid }}?tab=delta&dup=retitled">{{ ai_counts.retitled }} AI title{{ 's were' if ai_counts.retitled != 1 else ' was' }} regenerated from duplicates</a> — each row shows the title it shared before (⚠ was same title + type), so you can accept the new title or edit the original.</p>{% endif %}
+  {% if dup_counts.urls %}
+  <div class="next dup-bar"><div class="next-inner">
+    <div>
+      <b>⚠ <a href="/collections/{{ cid }}?tab=delta&dup=title" title="the delta URLs involved">{{ dup_counts.urls }} URL{{ 's' if dup_counts.urls != 1 }} share {{ dup_counts.titles }} title + document type combination{{ 's' if dup_counts.titles != 1 }}</a></b>
+      with another page of this collection (as they would be indexed, pending AI suggestions counted as accepted) — search results cannot tell them apart. Pages with the same title but different document types are not counted.
+      {% if dup_counts.delta_urls %}<b>✨ Regenerate duplicate titles</b> sends the {{ dup_counts.delta_urls }} delta URL{{ 's' if dup_counts.delta_urls != 1 }} back to {{ llm_model }} for a new <b>title only</b> (the document type is left as it is), one call each with the full text and the other URLs; where some have a pending AI title only those are re-asked. The answers replace the AI title suggestions — nothing is applied until you accept.
+      {% else %}They are all curated URLs: edit a title under <a href="/collections/{{ cid }}?tab=curated&dup=title">Curated URLs</a> to tell them apart.{% endif %}
+      {% if dup_counts.delta_urls and dup_counts.delta_urls <= 5 %}<br><small class="muted">Only {{ dup_counts.delta_urls }}: editing the titles by hand (✎ on each row below or under <a href="/collections/{{ cid }}?tab=delta&dup=title">Delta URLs</a>) may be quicker.</small>{% endif %}
+      <details class="prompt"><summary class="muted small">Show the prompt</summary><pre class="prompt">{{ prompts.titles.system }}
+
+— user message —
+{{ prompts.titles.user }}</pre></details>
+      {% if last_titles_job %}<br><small class="muted">Last run {{ last_titles_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_titles_job.state }}">{{ last_titles_job.state }}</span> · {{ job_progress(last_titles_job) }}</small>{% endif %}
+    </div>
+    {% if dup_counts.delta_urls %}<button class="secondary" {% if running or not curating %}disabled{% endif %}
+            title="{% if running %}wait for the running job{% elif not curating %}start curating first{% else %}{{ dup_counts.delta_urls }} call{{ 's' if dup_counts.delta_urls != 1 }} at most{% endif %}"
+            hx-post="/api/collections/{{ cid }}/suggest/titles" hx-swap="none">✨ Regenerate duplicate titles <small>(≤ {{ dup_counts.delta_urls }} URL{{ 's' if dup_counts.delta_urls != 1 }})</small></button>{% endif %}
+  </div></div>
+  {% endif %}
 
   {% if ai_pending_total %}
   <div class="suggestions">
@@ -172,13 +197,32 @@
                 hx-confirm="Apply all {{ ai_counts[f] }} AI {{ label }} as exact-URL rules?">✓ accept all</button><button class="mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "field": f}|tojson }}' hx-swap="none"
                 hx-confirm="Discard all {{ ai_counts[f] }} AI {{ label }}?">✕</button></span>
       {% endfor %}
-      <span class="muted small">confidence:</span>
-      {% for lvl in ['high', 'medium', 'low'] %}<a class="conf conf-{{ lvl }}" href="/collections/{{ cid }}?tab=delta&ai={{ lvl }}" title="review the {{ lvl }}-confidence suggestions">{{ lvl }} {{ ai_counts.by_conf[lvl] }}</a> {% endfor %}
       <span class="grow"></span>
       <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{"decision": "accept"}' hx-swap="none" hx-confirm="Accept all {{ ai_pending_total }} AI suggestions — every title, division and doc type — as exact-URL rules? Each is the newest rule for its URL, so it overrides any earlier rule there, including a glob you typed.">Accept all ({{ ai_pending_total }})</button>
       <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{"decision": "reject"}' hx-swap="none" hx-confirm="Discard all {{ ai_pending_total }} AI suggestions?">Reject all</button>
-      <a class="small" href="/collections/{{ cid }}?tab=delta&ai=pending" title="the same rows under Delta URLs, with filters, sorting and paging">Review under Delta URLs ↗</a>
+      <a class="small" href="/collections/{{ cid }}?tab=delta&ai={{ ai_conf or ai_field or 'pending' }}" title="the same rows under Delta URLs, with filters, sorting and paging">Review under Delta URLs ↗</a>
     </div>
+    {# Filter the review table: by confidence (chips) and by field (select). The accept / reject next to
+       it decides exactly the suggestions the filter names, on every page, not just the rows shown. #}
+    {% set fbase = curate ~ ('&focus=metadata' if focus else '') %}
+    <form method="get" action="/collections/{{ cid }}" class="inline ai-filter" id="ai-filter">
+      <input type="hidden" name="tab" value="curate">{% if focus %}<input type="hidden" name="focus" value="metadata">{% endif %}{% if ai_conf %}<input type="hidden" name="conf" value="{{ ai_conf }}">{% endif %}
+      <b class="small">Review by confidence:</b>
+      <a class="conf {{ 'on' if not ai_conf }}" href="{{ fbase }}{% if ai_field %}&field={{ ai_field }}{% endif %}#metadata" title="every confidence">all {{ ai_pending_total }}</a>
+      {% for lvl in ['high', 'medium', 'low'] %}<a class="conf conf-{{ lvl }} {{ 'on' if ai_conf == lvl }}" href="{{ fbase }}&conf={{ lvl }}{% if ai_field %}&field={{ ai_field }}{% endif %}#metadata" title="show only the rows with a {{ lvl }}-confidence suggestion{{ ' for ' ~ ai_field|replace('_', ' ') if ai_field }}">{{ lvl }} {{ ai_counts.by_conf[lvl] }}</a> {% endfor %}
+      <select name="field" aria-label="field" onchange="this.form.submit()">
+        <option value="">any field</option>
+        {% for f, label in [('title','titles'), ('division','divisions'), ('document_type','doc types')] %}<option value="{{ f }}" {% if ai_field == f %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+      {% if ai_conf or ai_field %}
+      <span class="muted small">{{ ai_paging.total }} URL{{ 's' if ai_paging.total != 1 }} · {{ ai_filtered }} {{ ai_conf ~ '-confidence ' if ai_conf }}{{ {'title': 'title', 'division': 'division', 'document_type': 'doc type'}[ai_field] ~ ' ' if ai_field }}suggestion{{ 's' if ai_filtered != 1 }}</span>
+      {% if ai_filtered %}{% set fvals = {"decision": "accept", "conf": ai_conf, "field": ai_field} %}
+      <button class="mini ok" type="button" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ fvals|tojson }}' hx-swap="none"
+              hx-confirm="Accept these {{ ai_filtered }} suggestions as exact-URL rules? Other suggestions on the same rows stay undecided.">✓ accept these {{ ai_filtered }}</button><button class="mini" type="button" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "conf": ai_conf, "field": ai_field}|tojson }}' hx-swap="none"
+              hx-confirm="Dismiss these {{ ai_filtered }} suggestions? The fields stay blank until set by hand, and promote refuses blank fields.">✕ reject these</button>{% endif %}
+      <a class="small" href="{{ fbase }}#metadata">clear filter</a>
+      {% endif %}
+    </form>
     {# The review table: one row per delta URL with a pending suggestion. Same cells as the Delta
        URLs table (✓ accept · ✎ edit then accept · ✕ dismiss per field), plus accept / reject the
        whole row. Scrolls in place (first rows only); ⤢ Expand pages through all of them. #}
@@ -186,7 +230,7 @@
     <div class="{{ 'sugg-page' if focus else 'sugg-scroll' }}">
     <table class="urls ai-review">
       <thead><tr><th class="num">#</th><th>URL</th><th>Title <small class="muted">scraped → effective</small></th><th>Division</th><th>Doc type</th><th title="accept or dismiss every suggestion on this row">Row</th></tr></thead>
-      <tbody>{% for r in ai_rows %}
+      <tbody>{% if not ai_rows %}<tr><td colspan="6" class="muted">No {{ ai_conf ~ '-confidence ' if ai_conf }}{{ ai_field|replace('_', ' ') ~ ' ' if ai_field }}suggestions left to review.</td></tr>{% endif %}{% for r in ai_rows %}
         {% set why = effects.get(r.url, {}) %}
         <tr class="{% if r.excluded %}excluded{% endif %} row-{{ r.kind }}">
           <td class="num muted">{{ ai_paging.offset + loop.index }}</td>
@@ -217,10 +261,14 @@
     ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.renamed %} (of which {{ dc.renamed }} renamed){% endif %} · {{ dc.deleted }} removed) and marks the collection <b>Curated</b>, ready to index.{% if dc.kept %} {{ dc.kept }} curated URL{{ 's' if dc.kept != 1 }} the crawl could not fetch stay as they are.{% endif %}</p>
   {% if removal_warning %}<div class="banner warn">⚠ {{ removal_warning }}</div>{% endif %}
   {% if crawl_warning %}<div class="banner info">ℹ {{ crawl_warning }} <a class="small" href="/collections/{{ cid }}?tab=curated&unreachable=true">Show them ↗</a></div>{% endif %}
+  {% if dup_counts.urls and curating %}<div class="banner warn">⚠ {{ dup_counts.urls }} URL{{ 's' if dup_counts.urls != 1 }} would be indexed under the same title and document type as another page ({{ dup_counts.titles }} shared combination{{ 's' if dup_counts.titles != 1 }}). <a href="#metadata">Regenerate duplicate titles in step 2</a> or <a href="/collections/{{ cid }}?tab=delta&dup=title">review them</a> before promoting.</div>{% endif %}
+  {% if incomplete.urls and curating %}<div class="banner err">⛔ {{ incomplete.urls }} delta URL{{ 's' if incomplete.urls != 1 }} cannot be promoted yet:
+    {% for f, label in [('title', 'title'), ('division', 'division'), ('document_type', 'document type')] if incomplete[f] %}{{ ' · ' if not loop.first }}{{ incomplete[f] }} without a {{ label }}{% endfor %}.
+    Nothing reaches the curated URLs with a blank title, division or document type: accept the AI suggestions in step 2 or set the values by hand. <a href="/collections/{{ cid }}?tab=delta&missing=true">Show them ↗</a></div>{% endif %}
   {% if ai_pending_total and curating %}<div class="banner info">⚠ {{ ai_pending_total }} AI suggestion{{ 's are' if ai_pending_total != 1 else ' is' }} still undecided — promoting discards them. Accept or reject them in step 2 first.</div>{% endif %}
   <div class="inline">
     <button class="{{ 'primary' if s3 == 'current' else 'secondary' }}" hx-post="/api/collections/{{ cid }}/promote" hx-swap="none"
-            {% if not curating or running %}disabled title="requires status curating and no running job"{% endif %}
+            {% if not curating or running %}disabled title="requires status curating and no running job"{% elif incomplete.urls %}disabled title="{{ incomplete.urls }} delta URLs still lack a title, division or document type"{% endif %}
             {% if c.delta_count %}hx-confirm="Promote {{ c.delta_count }} delta URLs to the curated URLs?"{% endif %}>{% if c.delta_count %}Promote {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }} → curated{% else %}Mark curated (no delta URLs){% endif %}</button>
     <button class="secondary" title="Re-run the diff of the dump URLs against the curated URLs (safe to repeat)" {% if running or not c.dump_count %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/recompute" hx-swap="none">Recompute delta URLs</button>
     <a class="small" href="/collections/{{ cid }}?tab=delta" title="tick rows under Delta URLs to promote only those">Review delta URLs · promote a selection ↗</a>

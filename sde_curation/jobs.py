@@ -32,7 +32,12 @@ from .events import EventBus
 from .llm.base import LLMError, LLMProvider
 from .llm.global_excludes import global_exclude_hits, load_global_excludes
 from .llm.pool import run_pool
-from .llm.tasks import suggest_metadata_one, suggest_patterns_batch
+from .llm.tasks import (
+    suggest_distinct_title,
+    suggest_metadata_one,
+    suggest_patterns_batch,
+    title_siblings,
+)
 from .models import (
     SYSTEM_ACTOR,
     Collection,
@@ -239,6 +244,9 @@ class JobManager:
             c, JobKind.LLM_METADATA, lambda job: self._run_llm_metadata(c, job, only_missing), actor=actor
         )
 
+    async def start_llm_titles(self, c: Collection, *, actor: str | None = None) -> JobRun:
+        return await self._start(c, JobKind.LLM_TITLES, lambda job: self._run_llm_titles(c, job), actor=actor)
+
     def _progress_cb(self, c: Collection, job: JobRun):
         """Merge a progress dict into the job, persist it and publish it over SSE."""
         async def on_progress(p: dict[str, Any]) -> None:
@@ -342,6 +350,7 @@ class JobManager:
             errs: list[tuple[str, str]] = []
             last_flush = time.monotonic()
             written = 0
+            titled: set[str] = set()  # URLs this run gave an AI title
 
             async def flush() -> None:
                 nonlocal last_flush, written
@@ -360,10 +369,9 @@ class JobManager:
                     await flush()
 
             async def on_result(doc, row):
-                p = job.progress
-                p["tokens_in"] = p.get("tokens_in", 0) + row.pop("tokens_in", 0)
-                p["tokens_out"] = p.get("tokens_out", 0) + row.pop("tokens_out", 0)
-                p["tokens_cached"] = p.get("tokens_cached", 0) + row.pop("tokens_cached", 0)
+                _add_tokens(job, row)
+                if row["title"]:
+                    titled.add(row["url"])
                 buf.append(row)
                 if len(buf) >= AI_FLUSH_ROWS or time.monotonic() - last_flush > AI_FLUSH_SECONDS:
                     await flush()
@@ -378,7 +386,91 @@ class JobManager:
             finally:
                 await flush()  # a cancel still keeps every answer that arrived
             await progress({"classified": written, "inflight": 0})
+            if self.s.llm_dedupe_titles and titled:
+                try:
+                    await self._retitle_duplicates(c, job, llm, touching=titled)
+                except LLMError as e:  # the classification stands; the duplicates stay flagged
+                    log.warning("titles %s: telling duplicate titles apart failed: %s", cid, e)
+                    await progress({"titles_error": str(e)[:500]})
         await self._guarded(c, job, body)
+
+    async def _run_llm_titles(self, c: Collection, job: JobRun) -> None:
+        """Regenerate duplicate titles, on demand: the same pass Suggest metadata ends with, over every title +
+        document type that a delta URL shares with another page (whoever set them: AI, a rule, a curator)."""
+        async def body():
+            await self._progress_cb(c, job)({"llm": "titles", "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
+            if not await self._retitle_duplicates(c, job, self.llm()):
+                raise LLMError("no delta URL shares its title and document type with another page")
+        await self._guarded(c, job, body)
+
+    async def _retitle_duplicates(self, c: Collection, job: JobRun, llm: LLMProvider, *,
+                                  touching: set[str] | None = None) -> int:
+        """Pages of one collection that will be indexed under the same title AND document type go back
+        to the model, one call per page with its full text and the other URLs, for a title that tells
+        it apart. Only the title is asked for: the answer replaces the page's AI title suggestion and
+        the document type is left alone (nothing is applied until accepted).
+        Only delta URLs can take a suggestion. In a group, the ones with a pending AI title are
+        re-asked and the rest keep theirs; when none has one (a rule or a curator set them all)
+        every delta URL of the group is. `touching`: only groups with one of these URLs (the pages
+        Suggest metadata just titled). Returns how many pages were sent."""
+        cid = c.collection_id
+        work: list[tuple[str, dict[str, Any]]] = []
+        for g in await self.db.duplicate_title_groups(cid):
+            members = g["members"]
+            if touching is not None and not any(m["url"] in touching for m in members):
+                continue
+            delta = [m for m in members if m["delta"]]
+            ask = {m["url"] for m in ([m for m in delta if m["pending_ai"]] or delta)}
+            for m in members:
+                m["rewrite"] = m["url"] in ask
+            work += [(m["url"], g) for m in members if m["rewrite"]]
+        progress = self._progress_cb(c, job)
+        await progress({"llm_phase": "titles", "titles_total": len(work), "titles_done": 0, "titles_failed": 0})
+        if not work:
+            return 0
+        buf: list[dict[str, Any]] = []
+        retitled = 0
+
+        async def flush() -> None:
+            nonlocal retitled
+            if buf:
+                rows, buf[:] = list(buf), []
+                retitled += await self.db.set_delta_ai_titles(cid, rows)
+
+        async def items():  # page text in chunks: a big group never sits in memory at once
+            for chunk in batches(work, 200):
+                docs = {d["url"]: d for d in await self.db.docs_for_llm(cid, [u for u, _ in chunk])}
+                for u, g in chunk:
+                    if u in docs:
+                        yield docs[u], g
+
+        async def one(item):
+            doc, g = item
+            return await suggest_distinct_title(llm, doc, shared_title=g["title"], document_type=g["document_type"],
+                                                sharing=len(g["members"]),
+                                                siblings=title_siblings(g["members"], doc["url"]), collection=c)
+
+        async def on_result(item, row):
+            _add_tokens(job, row)
+            if row["title"]:  # None: the model kept the shared title — the old suggestion stays
+                buf.append({**row, "before": item[1]["title"]})
+                if len(buf) >= AI_FLUSH_ROWS:
+                    await flush()
+
+        async def on_error(item, e: Exception) -> None:
+            log.warning("titles %s: %s failed: %s", cid, item[0]["url"], e)
+
+        async def pool_progress(p: dict[str, Any]) -> None:
+            await progress({f"titles_{k}": v for k, v in p.items()})
+
+        try:
+            await run_pool(items(), one, workers=self.s.llm_workers, on_result=on_result, on_error=on_error,
+                           on_progress=pool_progress, total=len(work), **self._retry())
+        finally:
+            await flush()
+        still = await self.db.duplicate_title_counts(cid)
+        await progress({"retitled": retitled, "still_duplicate": still["urls"], "titles_inflight": 0})
+        return len(work)
 
     # ── index (export → S3 → WEB_COSMOS → status.json) ─────────────────
 
@@ -681,6 +773,13 @@ class JobManager:
         ]
         n = await self.db.replace_dump(collection_id, rows, fails)
         return n
+
+
+def _add_tokens(job: JobRun, row: dict[str, Any]) -> None:
+    """Move a call's token usage from its result row onto the job's running totals."""
+    p = job.progress
+    for k in ("tokens_in", "tokens_out", "tokens_cached"):
+        p[k] = p.get(k, 0) + row.pop(k, 0)
 
 
 def _no_nul(v: Any) -> Any:

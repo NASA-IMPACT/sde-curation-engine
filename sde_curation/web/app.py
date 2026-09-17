@@ -27,7 +27,7 @@ from ..backends.index import IndexError_, make_index_backend
 from ..backends.publish import make_prod_publisher
 from ..backends.scrape import make_scrape_backend
 from ..config import Settings, get_settings
-from ..curation import CurationService
+from ..curation import CurationService, IncompleteMetadata
 from ..db import (
     AUDIT_SORTS,
     CURATED_SORTS,
@@ -43,7 +43,7 @@ from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
 from ..llm.base import LLMError, make_llm
 from ..llm.global_excludes import load_global_excludes
-from ..llm.tasks import METADATA_SYSTEM, PATTERN_SYSTEM
+from ..llm.tasks import METADATA_SYSTEM, PATTERN_SYSTEM, TITLE_SIBLINGS, TITLES_SYSTEM
 from ..models import (
     ANONYMOUS_ACTOR,
     NOT_VISITED,
@@ -124,7 +124,7 @@ _ORDER = {st: i for i, (st, _, _, _) in enumerate(PIPELINE)}
 
 # Which pipeline step a job kind belongs to (failure footers, step panels).
 STEP_FOR_KIND = {
-    "scrape": Status.BACKLOG, "llm_patterns": Status.CURATING, "llm_metadata": Status.CURATING,
+    "scrape": Status.BACKLOG, "llm_patterns": Status.CURATING, "llm_metadata": Status.CURATING, "llm_titles": Status.CURATING,
     "index_test": Status.CONFIG_GENERATED, "validate": Status.CONFIG_GENERATED, "index_prod": Status.LIVE,
     "validate_prod": Status.LIVE,
 }
@@ -220,11 +220,13 @@ CURATE_FOCUS = ("exclusions", "metadata")  # ?focus=: one Curate list on its own
 
 class AiBulk(BaseModel):
     """Decide AI metadata suggestions in bulk: every field (default) or one `field`, on every
-    delta URL (default) or on one `url` — the whole review, one column, or one row."""
+    delta URL (default) or on one `url`, of any confidence (default) or one `conf` — the whole
+    review, one column, one row, or what the review table's filter shows."""
 
     decision: Literal["accept", "reject"]
     field: Literal["title", "division", "document_type"] | None = None
     url: str | None = None
+    conf: Literal["high", "medium", "low"] | None = None  # only suggestions of this confidence
 
 
 class SuggestionAccept(BaseModel):
@@ -272,6 +274,13 @@ def llm_prompts(settings: Settings) -> dict[str, dict[str, str]]:
                      " General, \"collection_document_type\": only when set, \"url\": …, \"scraped_title\": …,"
                      " \"text_chars\": N}\n\nText:\n"
                      f"<the FULL page text, never cut; every page goes to {settings.openai_model}>"),
+        },
+        "titles": {
+            "system": TITLES_SYSTEM,
+            "user": ("Page:\n{\"collection\": name, \"collection_seed\": …, \"url\": …, \"scraped_title\": …,"
+                     " \"shared_title\": the title it shares, \"document_type\": the type it shares too, \"pages_sharing_it\": N, \"other_pages\": [{\"url\": …,"
+                     f" \"keeps_title\": true|false}}, … up to {TITLE_SIBLINGS}, its URL-order neighbours], \"text_chars\": N}}"
+                     "\n\nText:\n<the FULL page text, never cut>"),
         },
     }
 
@@ -661,6 +670,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # ?match=<glob or exact URL>: the rows a rule matches (the Rules table links here)
             "match": (qp.get("match") or "").strip() or None,
             "changed": "true" if qp.get("changed") == "true" else None,
+            # ?dup=title: rows whose title and document type another page of the collection will also have
+            # ?dup=retitled: delta rows whose duplicate AI title was regenerated
+            "dup": qp.get("dup") if qp.get("dup") in ("title", "retitled") else None,
+            # ?missing=true: delta rows promote refuses (no title, division or document type yet)
+            "missing": "true" if qp.get("missing") == "true" else None,
             "edited": qp.get("edited") if qp.get("edited") in {e.value for e in EditedBy} else None,
             # column sort: the key is validated against the set's whitelist in the db layer
             "sort": qp.get("sort") or None, "dir": "desc" if qp.get("dir") == "desc" else "asc",
@@ -678,7 +692,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows, total = await d.list_curated(
                 c.collection_id, limit=lp["per"], offset=off, q=lp["q"], excluded=lp["excluded"],
                 edited=lp["edited"], unreachable=True if lp["unreachable"] else None, match=lp["match"],
-                sort=lp["sort"], desc=lp["dir"] == "desc",
+                dup_title=lp["dup"] == "title", sort=lp["sort"], desc=lp["dir"] == "desc",
             )
             has_delta = await d.deltas_for(c.collection_id, [r.url for r in rows])
         else:
@@ -688,14 +702,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ai_conf=lp["ai"] if lp["ai"] in ("high", "medium", "low") else None,
                 ai_field=lp["ai"] if lp["ai"] in AI_FIELDS else None,
                 content_changed=True if lp["changed"] else None, edited=lp["edited"],
-                renamed=True if lp["renamed"] else None, match=lp["match"], limit=lp["per"], offset=off,
-                sort=lp["sort"], desc=lp["dir"] == "desc",
+                renamed=True if lp["renamed"] else None, match=lp["match"], dup_title=lp["dup"] == "title",
+                retitled=lp["dup"] == "retitled", incomplete=bool(lp["missing"]),
+                limit=lp["per"], offset=off, sort=lp["sort"], desc=lp["dir"] == "desc",
             )
         # every row can be edited in place, so every table explains which rule set what
-        effects = await d.effects_for(c.collection_id, [r["url"] if isinstance(r, dict) else r.url for r in rows])
+        urls = [r["url"] if isinstance(r, dict) else r.url for r in rows]
+        effects = await d.effects_for(c.collection_id, urls)
+        dup_titles = await d.duplicate_titles_for(c.collection_id, urls) if set_ != "dump" else {}
+        incomplete = await d.incomplete_counts(c.collection_id) if set_ == "delta" else None
         return {
             **lp, "set": set_, "rows": rows, "total": total, "pages": max(1, -(-total // lp["per"])),
-            "effects": effects, "has_delta": has_delta, "divisions": list(Division),
+            "effects": effects, "dup_titles": dup_titles, "incomplete": incomplete, "has_delta": has_delta,
+            "divisions": list(Division),
             "doc_types": list(DocumentType), "kinds": ["new", "modified", "deleted"],
             "edited_values": list(EditedBy), "source_label": SOURCE_LABEL,
             "failure_label": failure_label, "sortable": SORTABLE[set_],
@@ -766,9 +785,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         suggestions = await d.list_pattern_suggestions(cid, "pending", limit=sugg_paging["limit"],
                                                        offset=sugg_paging["offset"])
         ai_counts = await d.delta_ai_counts(cid)
-        _, ai_total = await d.list_delta_ai(cid, limit=0)
+        # the review table's filter: ?conf=high|medium|low and ?field=title|division|document_type
+        qp = request.query_params
+        ai_conf = qp.get("conf") if qp.get("conf") in ("high", "medium", "low") else None
+        ai_field = qp.get("field") if qp.get("field") in AI_FIELDS else None
+        _, ai_total = await d.list_delta_ai(cid, limit=0, field=ai_field, conf=ai_conf)
         ai_paging = paging("metadata", ai_total)
-        ai_rows, _ = await d.list_delta_ai(cid, limit=ai_paging["limit"], offset=ai_paging["offset"])
+        ai_rows, _ = await d.list_delta_ai(cid, limit=ai_paging["limit"], offset=ai_paging["offset"],
+                                           field=ai_field, conf=ai_conf)
         step = await step_context(request, c, Status.CURATING)
         candidates = await d.count_deltas_for_llm(cid, only_missing=False)  # included delta URLs
         return {
@@ -781,8 +805,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "classifiable": await d.count_deltas_for_llm(cid),
             "classifiable_all": await d.count_deltas_for_llm(cid, only_missing=False),
             "ai_counts": ai_counts, "ai_pending_total": ai_counts["title"] + ai_counts["division"] + ai_counts["document_type"],
-            "ai_rows": ai_rows,
+            "ai_rows": ai_rows, "ai_conf": ai_conf, "ai_field": ai_field,
+            "ai_filtered": await d.count_ai_suggestions(cid, field=ai_field, conf=ai_conf) if (ai_conf or ai_field) else 0,
+            "incomplete": await d.incomplete_counts(cid),
             "effects": await d.effects_for(cid, [r.url for r in ai_rows]),
+            "dup_counts": await d.duplicate_title_counts(cid),
+            "dup_titles": await d.duplicate_titles_for(cid, [r.url for r in ai_rows]),
+            "last_titles_job": await d.latest_job_of_kind(cid, "llm_titles"),
+            "dedupe_titles": settings.llm_dedupe_titles,
             "llm_model": settings.openai_model if settings.llm_provider == "openai" else settings.llm_provider,
             "llm_workers": settings.llm_workers,
             "prompts": llm_prompts(settings),
@@ -863,7 +893,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         elif set_ == "curated":
             rows, _ = await d.list_curated(c.collection_id, limit=1_000_000, q=lp["q"], excluded=lp["excluded"],
                                            edited=lp["edited"], unreachable=True if lp["unreachable"] else None,
-                                           match=lp["match"], sort=lp["sort"], desc=lp["dir"] == "desc")
+                                           match=lp["match"], dup_title=lp["dup"] == "title",
+                                           sort=lp["sort"], desc=lp["dir"] == "desc")
             cols = ["url", "excluded", "scraped_title", "title", "division", "document_type", "text_len", "edited_by",
                     "crawl_failure"]
             data = [[getattr(r, k) for k in cols] for r in rows]
@@ -874,12 +905,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ai_conf=lp["ai"] if lp["ai"] in ("high", "medium", "low") else None,
                 ai_field=lp["ai"] if lp["ai"] in AI_FIELDS else None,
                 content_changed=True if lp["changed"] else None, edited=lp["edited"],
-                renamed=True if lp["renamed"] else None, match=lp["match"], limit=1_000_000,
-                sort=lp["sort"], desc=lp["dir"] == "desc",
+                renamed=True if lp["renamed"] else None, match=lp["match"], dup_title=lp["dup"] == "title",
+                retitled=lp["dup"] == "retitled", incomplete=bool(lp["missing"]),
+                limit=1_000_000, sort=lp["sort"], desc=lp["dir"] == "desc",
             )
             cols = ["kind", "url", "excluded", "content_changed", "edited_by", "scraped_title", "title", "division",
                     "document_type", "title_ai", "title_ai_conf", "division_ai", "division_ai_conf",
-                    "document_type_ai", "document_type_ai_conf", "ai_model", "ai_error", "renamed_from", "crawl_failure"]
+                    "document_type_ai", "document_type_ai_conf", "ai_model", "ai_error", "renamed_from", "crawl_failure",
+                    "title_ai_before"]
             data = [[getattr(r, k) for k in cols] for r in rows]
         buf = io.StringIO()
         w = csv.writer(buf); w.writerow(cols); w.writerows(data)
@@ -1272,7 +1305,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ensure_idle(request, c)
         if c.status is not Status.CURATING:
             raise HTTPException(409, f"promote requires status 'curating' (is {c.status})")
-        n = await curation(request).promote(c, actor=actor(request))
+        try:
+            n = await curation(request).promote(c, actor=actor(request))
+        except IncompleteMetadata as e:
+            raise HTTPException(409, str(e)) from e
         c = await must_get(request, collection_id)
         await audit(request, "promote", collection_id, f"{n} curated")
         emit_collection(request, c)
@@ -1292,7 +1328,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if stale:
             raise HTTPException(409, f"{len(stale)} of the selected URLs are no longer delta URLs"
                                      f" (e.g. {stale[0]}) — reload the page and pick again")
-        n, ds = await curation(request).promote_urls(c, body.urls)
+        try:
+            n, ds = await curation(request).promote_urls(c, body.urls)
+        except IncompleteMetadata as e:
+            raise HTTPException(409, str(e)) from e
         c = await must_get(request, collection_id)  # fresh counts for the status rules
         await _after_curation_change(request, c, ds, note=f"promoted {len(body.urls)} selected delta URLs")
         c = await must_get(request, collection_id)
@@ -1405,6 +1444,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await _set_stage(request, collection_id, CurationStage.METADATA)
         return resp
 
+    @app.post("/api/collections/{collection_id}/suggest/titles", status_code=202, response_model=None)
+    async def api_suggest_titles(request: Request, collection_id: str):
+        """Regenerate duplicate titles: every delta URL whose title and document type another page of the collection
+        will also have goes back to the LLM for a title (only) that sets it apart → title_ai suggestions
+        (never applied)."""
+        await must_get(request, collection_id)
+        if not (await db(request).duplicate_title_counts(collection_id))["delta_urls"]:
+            raise HTTPException(409, "no delta URL shares its title and document type with another page")
+        return await _start_llm(request, collection_id, "suggest.titles",
+                                lambda j, c, who: j.start_llm_titles(c, actor=who))
+
     @app.get("/api/llm/prompts")
     async def api_llm_prompts(request: Request):
         """The exact system prompts and the shape of the user message for both LLM jobs."""
@@ -1490,10 +1540,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ensure_idle(request, c)
         d = db(request)
         fields = [body.field] if body.field else list(AI_FIELDS)
-        per_field = {f: await d.deltas_with_ai(collection_id, f, url=body.url) for f in fields}
+        per_field = {f: await d.deltas_with_ai(collection_id, f, url=body.url, conf=body.conf) for f in fields}
         n = sum(len(v) for v in per_field.values())
         if not n:
-            what = f"AI {body.field} suggestions" if body.field else "AI suggestions"
+            what = (f"{body.conf}-confidence " if body.conf else "") + (f"AI {body.field} suggestions" if body.field else "AI suggestions")
             raise HTTPException(409, f"no {what} to {body.decision}" + (f" on {body.url}" if body.url else ""))
         if body.decision == "accept":
             ds = await curation(request).replace_exact_patterns(
@@ -1504,9 +1554,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await _after_curation_change(request, c, ds)
         for f, rows in per_field.items():
             if rows:
-                await d.clear_delta_ai_field(collection_id, f, url=body.url)
+                await d.clear_delta_ai_field(collection_id, f, url=body.url, conf=body.conf)
         detail = " · ".join(f"{f} × {len(rows)}" for f, rows in per_field.items() if rows)
-        await audit(request, f"ai.bulk_{body.decision}", collection_id, detail + (f" ({body.url})" if body.url else ""))
+        await audit(request, f"ai.bulk_{body.decision}", collection_id, detail + (f" ({body.url})" if body.url else "")
+                    + (f" [{body.conf} confidence]" if body.conf else ""))
         return htmx_done(request, {"decided": n, "field": body.field, "url": body.url,
                                    "state": body.decision + "ed"})
 

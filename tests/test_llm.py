@@ -105,17 +105,22 @@ async def test_schemas_reject_bad_enums():
     from pydantic import ValidationError
 
     ok = {"title_confidence": "high", "division_confidence": "low", "document_type_confidence": "low"}
+    full = {"title": "T", "division": "General", "document_type": "Data", **ok}
+    MetadataSuggestion.model_validate(full)
     with pytest.raises(ValidationError):
-        MetadataSuggestion.model_validate({"division": "Kitchen", **ok})
+        MetadataSuggestion.model_validate({**full, "division": "Kitchen"})
     with pytest.raises(ValidationError):
-        MetadataSuggestion.model_validate({"title": "T"})  # confidence is required per field
+        MetadataSuggestion.model_validate({"title": "T", "division": "General", "document_type": "Data"})  # confidence per field
+    # every page gets every field: none may be missing or null
+    for field in ("title", "division", "document_type"):
+        with pytest.raises(ValidationError):
+            MetadataSuggestion.model_validate({k: v for k, v in full.items() if k != field})
+        with pytest.raises(ValidationError):
+            MetadataSuggestion.model_validate({**full, field: None})
+        schema = MetadataSuggestion.model_json_schema()
+        assert field in schema["required"] and "null" not in str(schema["properties"][field])
     with pytest.raises(ValidationError):
-        MetadataSuggestion.model_validate({"title": "T", **ok})  # every page gets a document type
-    with pytest.raises(ValidationError):
-        MetadataSuggestion.model_validate({"title": "T", **ok, "document_type": None})
-    assert "null" not in str(MetadataSuggestion.model_json_schema()["properties"]["document_type"])
-    with pytest.raises(ValidationError):
-        MetadataSuggestion.model_validate({"title": "T", **ok, "title_confidence": "certain"})
+        MetadataSuggestion.model_validate({**full, "title_confidence": "certain"})
     with pytest.raises(ValidationError):
         PatternSuggestions.model_validate({"suggestions": [{"type": "title", "match": "*", "rationale": "no value"}]})
     PatternSuggestions.model_validate({"suggestions": []})
@@ -239,6 +244,8 @@ async def test_metadata_suggestions_flow(crawler_client):
     await c.post("/api/collections/ex.org/ai/reject", json={"url": "https://ex.org/p2", "field": "document_type"})
     d = (await c.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["document_type_ai"] is None and d["document_type"] is None
+    assert d["division_ai"] == "General" and d["division_ai_conf"] == "low"  # every field is answered, guesses too
+    await c.post("/api/collections/ex.org/ai/reject", json={"url": "https://ex.org/p2", "field": "division"})
     assert (await c.post("/api/collections/ex.org/ai/accept", json={"url": "https://ex.org/p2", "field": "division"})).status_code == 409  # none
     assert (await c.post("/api/collections/ex.org/ai/accept", json={"url": "https://ex.org/p2", "field": "bogus"})).status_code == 422
     # second run: URLs still missing suggestions only → p2 (cleared) is the only candidate again
@@ -392,7 +399,8 @@ async def test_content_changed_rows_are_reclassified(crawler_client):
     await setup(c)
     await c.post("/api/collections/ex.org/suggest/metadata"); await wait_job(c, "ex.org")
     assert (await c.post("/api/collections/ex.org/suggest/metadata")).status_code == 409  # all classified
-    await c.post("/api/collections/ex.org/promote")
+    await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "accept"})
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
     dump = await db.load_dump("ex.org")
     rows = [DumpUrl(collection_id="ex.org", url=d.url, scraped_title=d.scraped_title,
                     full_text="new aurora text" if d.url.endswith("/p2") else "text " * 5) for d in dump]
@@ -455,7 +463,7 @@ async def test_openai_provider_sends_temperature_only_when_configured():
 
         async def parse(self, **kw):
             self.calls.append(kw)
-            answer = MetadataSuggestion(title="T", title_confidence="high", division_confidence="low", document_type="Data",
+            answer = MetadataSuggestion(title="T", title_confidence="high", division="General", division_confidence="low", document_type="Data",
                                         document_type_confidence="low")
             msg = SimpleNamespace(parsed=answer, refusal=None, content=None)
             return SimpleNamespace(choices=[SimpleNamespace(message=msg)], model=kw["model"], usage=None)

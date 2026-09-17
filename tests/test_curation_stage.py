@@ -43,7 +43,8 @@ async def test_stage_lifecycle(crawler_client):
     # a recompute while curating keeps the stage; promote clears it
     await c.post("/api/collections/ex.org/recompute")
     assert (await coll(c))["curation_stage"] == "metadata"
-    await c.post("/api/collections/ex.org/promote")
+    assert (await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "accept"})).status_code == 200
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
     cc = await coll(c)
     assert (cc["status"], cc["curation_stage"]) == ("curated", None)
     # re-entering curating starts over at exclusions; re-scrape clears it again

@@ -218,7 +218,13 @@ ALTER TABLE delta_urls ADD COLUMN ai_error text;
 ALTER TABLE delta_urls ADD COLUMN ai_failures integer NOT NULL DEFAULT 0;
 """
 
-MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4)]
+# V5: "Regenerate duplicate titles" replaces a page's AI title with one that sets it apart from the pages it shared
+# its title and document type with; the title it shared is kept, so the SME sees what it was.
+V5 = """
+ALTER TABLE delta_urls ADD COLUMN title_ai_before text;
+"""
+
+MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).

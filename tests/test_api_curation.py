@@ -2,7 +2,7 @@
 
 import yaml
 
-from tests.conftest import wait_job
+from tests.conftest import classify, wait_job
 
 
 async def setup(client, n=10):
@@ -77,6 +77,12 @@ async def test_full_flow(crawler_client):
     assert page.status_code == 200 and "https://ex.org/p1" in page.text and "https://ex.org/p2" not in page.text
     assert "Promote" in (await crawler_client.get("/collections/ex.org?tab=patterns")).text
 
+    # promote refuses rows without a title, division or document type: the rules above set no type
+    r = await crawler_client.post("/api/collections/ex.org/promote")
+    assert r.status_code == 409 and "7 delta URLs cannot be promoted yet (7 without a document type)" in r.text
+    assert (await crawler_client.get("/api/collections/ex.org")).json()["curated_count"] == 0  # nothing written
+    await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "document_type", "match": "*", "value": "Documentation"})
+
     # promote
     r = await crawler_client.post("/api/collections/ex.org/promote")
     assert r.status_code == 200 and r.json() == {"curated": 7, "status": "curated"}  # p1 never reached the curated URLs
@@ -120,7 +126,8 @@ async def test_full_flow(crawler_client):
 async def test_shrunk_dump_after_promote_yields_tombstones(crawler_client):
     await setup(crawler_client, n=10)
     await crawler_client.post("/api/collections/ex.org/recompute")
-    await crawler_client.post("/api/collections/ex.org/promote")
+    await classify(crawler_client)
+    assert (await crawler_client.post("/api/collections/ex.org/promote")).status_code == 200
     for st in ("config_generated", "live"):
         await crawler_client.post("/api/collections/ex.org/status", json={"status": st})
     # simulate a re-crawl that lost p7..p10 and retitled p1
@@ -140,7 +147,8 @@ async def test_shrunk_dump_after_promote_yields_tombstones(crawler_client):
 async def test_identical_recrawl_goes_straight_to_curated(crawler_client):
     await setup(crawler_client, n=10)
     await crawler_client.post("/api/collections/ex.org/recompute")
-    await crawler_client.post("/api/collections/ex.org/promote")
+    await classify(crawler_client)
+    assert (await crawler_client.post("/api/collections/ex.org/promote")).status_code == 200
     for st in ("config_generated", "live"):
         await crawler_client.post("/api/collections/ex.org/status", json={"status": st})
     await crawler_client.post("/api/collections/ex.org/scrape")
@@ -180,7 +188,8 @@ async def test_manual_status_cannot_skip_promote(crawler_client):
     await crawler_client.post("/api/collections/ex.org/recompute")
     r = await crawler_client.post("/api/collections/ex.org/status", json={"status": "curated"})
     assert r.status_code == 409 and "nothing has been promoted" in r.text
-    await crawler_client.post("/api/collections/ex.org/promote")
+    await classify(crawler_client)
+    assert (await crawler_client.post("/api/collections/ex.org/promote")).status_code == 200
     await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "title", "match": "*/p4", "value": "Four"})
     r = await crawler_client.post("/api/collections/ex.org/status", json={"status": "live"})
     assert r.status_code == 409 and "delta URLs" in r.text

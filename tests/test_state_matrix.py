@@ -14,7 +14,7 @@ import re
 import pytest
 
 from sde_curation.models import Status
-from tests.conftest import wait_job
+from tests.conftest import classify, wait_job
 
 ACTIONS = [
     ("POST", "/api/collections/{c}/scrape", None),
@@ -74,7 +74,9 @@ async def drive_to(client, cid, status):
     await client.post(f"/api/collections/{cid}/recompute")
     if status == "curating":
         return
-    await client.post(f"/api/collections/{cid}/promote")
+    await classify(client, cid)  # promote refuses rows without a title, division or document type
+    r = await client.post(f"/api/collections/{cid}/promote")
+    assert r.status_code == 200, r.text
     for s in order[order.index("curated") + 1 : order.index(status) + 1]:
         r = await client.post(f"/api/collections/{cid}/status", json={"status": s})
         assert r.status_code == 200, r.text
@@ -191,7 +193,8 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     r = await c.get("/collections/ex.org/urls/dump?format=csv&excluded=true")
     assert r.text.splitlines()[0].startswith("url,excluded") and len(r.text.strip().splitlines()) == 2
     # curated tab after promote: read-only rows, 'Curate ↗' only when a delta exists
-    await c.post("/api/collections/ex.org/promote")
+    await classify(c)
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
     t = (await c.get("/collections/ex.org?tab=curated")).text
     assert ">included<" in t and "https://ex.org/p1" not in t and "delta URL ↗</a>" not in t and "Delta URLs</th>" not in t  # excluded p1 never promoted
     await c.post("/api/collections/ex.org/patterns", json={"type": "title", "match": "*/p3", "value": "Three"})
@@ -200,7 +203,8 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     # the tab row carries the counts (the header has none)
     h = (await c.get("/collections/ex.org?tab=curated")).text
     assert re.search(r'Dump URLs <span class="count[^"]*">8</span>', h) and re.search(r'Curated URLs <span class="count[^"]*">7</span>', h)
-    assert re.search(r'Rules <span class="count[^"]*">3</span>', h) and ">Curate</a>" in h and "wb-chips" not in h
+    # 3 typed rules + 21 from accepted AI suggestions (a title, division and type for each of the 7 included URLs)
+    assert re.search(r'Rules <span class="count[^"]*">24</span>', h) and ">Curate</a>" in h and "wb-chips" not in h
     assert (await c.get("/collections/ex.org/urls/nope")).status_code == 404
 
 

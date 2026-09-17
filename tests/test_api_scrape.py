@@ -1,7 +1,7 @@
 """POST /scrape end-to-end through the JobManager with the fake crawler."""
 
 from sde_curation.engine.text import content_hash
-from tests.conftest import wait_job
+from tests.conftest import classify, wait_job
 
 
 async def test_scrape_success_ingests_dump_and_sets_status(crawler_client):
@@ -37,7 +37,8 @@ async def test_rescrape_of_live_collection_flags_recuration(crawler_client):
     await crawler_client.post("/api/collections/ex.org/scrape")
     await wait_job(crawler_client, "ex.org")
     await crawler_client.post("/api/collections/ex.org/recompute")
-    await crawler_client.post("/api/collections/ex.org/promote")
+    await classify(crawler_client)
+    assert (await crawler_client.post("/api/collections/ex.org/promote")).status_code == 200
     for s in ("config_generated", "live"):
         assert (await crawler_client.post("/api/collections/ex.org/status", json={"status": s})).status_code == 200
     await crawler_client.post("/api/collections/ex.org/scrape")

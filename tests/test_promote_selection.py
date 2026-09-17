@@ -3,7 +3,7 @@ that holds the rows (delta → curated → dump) through a real `?match=` filter
 takes effect over accepted AI suggestions (newest rule wins) and the rules it beats read superseded."""
 
 from sde_curation.models import DumpUrl
-from tests.conftest import wait_job
+from tests.conftest import classify, wait_job
 
 CID = "ex.org"
 API = f"/api/collections/{CID}"
@@ -28,6 +28,11 @@ def url(i):
     return f"https://{CID}/p{i}"
 
 
+async def scope_rules(c):
+    """The exclude / include rules (the metadata rules from accepted suggestions left out)."""
+    return [p for p in (await c.get(f"{API}/patterns")).json() if p["type"] in ("exclude", "include")]
+
+
 # ── promote a selection ──────────────────────────────────────────────────
 
 
@@ -35,11 +40,17 @@ async def test_promote_selection_flow(crawler_client):
     c = crawler_client
     await setup(c)
     assert (await coll(c))["delta_count"] == 8
+    # a selection without a title, division or document type is refused, and nothing is written
+    r = await c.post(f"{API}/promote/urls", json={"urls": [url(1), url(2)]})
+    assert r.status_code == 409 and "2 delta URLs cannot be promoted yet" in r.json()["detail"]
+    assert (await coll(c))["curated_count"] == 0 and (await coll(c))["delta_count"] == 8
+    await classify(c)
+    stage = (await coll(c))["curation_stage"]
     r = await c.post(f"{API}/promote/urls", json={"urls": [url(1), url(2)]})
     assert r.status_code == 200 and r.json() == {"curated": 2, "promoted": 2, "left": 6, "status": "curating"}
     k = await coll(c)
     assert k["curated_count"] == 2 and k["delta_count"] == 6 and k["status"] == "curating"
-    assert k["curation_stage"] == "exclusions", "a partial promote does not move the stage"
+    assert k["curation_stage"] == stage, "a partial promote does not move the stage"
     # htmx json-enc sends one ticked box as a string
     assert (await c.post(f"{API}/promote/urls", json={"urls": url(3)})).json()["promoted"] == 1
     # already promoted → stale; nothing selected → 422
@@ -67,7 +78,8 @@ async def test_partial_promote_leaves_rows_under_review_untouched(crawler_client
     metadata was approved with, so it stays a delta (and the index never gets unapproved text)."""
     c = crawler_client
     await setup(c)
-    await c.post(f"{API}/promote")
+    await classify(c)
+    assert (await c.post(f"{API}/promote")).status_code == 200
     db = c.app.state.db
     old = {r["url"]: r for r in await db.fetch(
         "SELECT url, full_text, content_hash FROM curated_urls WHERE collection_id=%s", (CID,))}
@@ -91,7 +103,9 @@ async def test_promoted_tombstone_drops_row_and_effects(crawler_client):
     c = crawler_client
     await setup(c)
     await c.post(f"{API}/patterns", json={"type": "title", "match": "*", "value": "{title}!"})
-    await c.post(f"{API}/promote")
+    await c.post(f"{API}/patterns", json={"type": "division", "match": "*", "value": "Heliophysics"})
+    await c.post(f"{API}/patterns", json={"type": "document_type", "match": "*", "value": "Data"})
+    assert (await c.post(f"{API}/promote")).status_code == 200
     db = c.app.state.db
     await db.replace_dump(CID, [DumpUrl(collection_id=CID, url=url(i), scraped_title=f"Page {i}")
                                 for i in (1, 2, 3, 6, 7, 8, 9)])  # p4 gone, crawl complete
@@ -101,8 +115,8 @@ async def test_promoted_tombstone_drops_row_and_effects(crawler_client):
     assert (await c.post(f"{API}/promote/urls", json={"urls": [url(4)]})).json() == {
         "curated": 7, "promoted": 1, "left": 0, "status": "curated"}
     assert url(4) not in {r["url"] for r in (await c.get(f"{API}/curated?limit=100")).json()["items"]}
-    pid = (await c.get(f"{API}/patterns")).json()[0]["id"]
-    assert (await db.effect_counts(CID)) == {pid: 7}
+    pids = [p["id"] for p in (await c.get(f"{API}/patterns")).json()]
+    assert (await db.effect_counts(CID)) == {pid: 7 for pid in pids}  # title, division, type: 7 rows each
 
 
 # ── match counts and links ────────────────────────────────────────────────
@@ -127,11 +141,13 @@ async def test_rule_count_is_over_and_links_to_the_set_with_the_rows(crawler_cli
     rules = (await c.get(f"/collections/{CID}/rules")).text
     assert rules.count(">superseded<") == 2
     assert (await coll(c))["delta_count"] == 8  # never promoted: every row is still a new delta
-    # promote: the count is now over the curated URLs and links there
-    await c.post(f"{API}/promote")
+    # promote (the rest of each row's metadata typed as rules): the count is now over the curated URLs and links there
+    await c.post(f"{API}/patterns", json={"type": "division", "match": "*", "value": "Heliophysics"})
+    await c.post(f"{API}/patterns", json={"type": "document_type", "match": "*", "value": "Data"})
+    assert (await c.post(f"{API}/promote")).status_code == 200
     rules = (await c.get(f"/collections/{CID}/rules")).text
     assert f'href="/collections/{CID}?tab=curated&match=https%3A//{CID}/p%2A"' in rules
-    assert {p["match"]: p["matches"] for p in (await c.get(f"{API}/patterns")).json()} == {
+    assert {p["match"]: p["matches"] for p in (await c.get(f"{API}/patterns")).json() if p["type"] == "title"} == {
         f"https://{CID}/p*": 8, url(2): 1, "*": 8}
     assert len(await csv_rows(c, "curated", match=f"https://{CID}/p*")) == 8
 
@@ -149,7 +165,8 @@ async def test_match_filter_on_every_set(crawler_client):
         assert await csv_rows(c, set_, match=f"https://{CID}/%") == []
         page = (await c.get(f"/collections/{CID}?tab={set_}&match=https://{CID}/p*")).text
         assert f"rule <code>https://{CID}/p*</code>" in page and f"format=csv&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=https%3A//{CID}/p%2A" in page
-    await c.post(f"{API}/promote")
+    await classify(c)
+    assert (await c.post(f"{API}/promote")).status_code == 200
     assert len(await csv_rows(c, "curated", match=f"https://{CID}/p*")) == 8
     assert len(await csv_rows(c, "curated", match=f"https://{CID}/p9")) == 1
 
@@ -175,20 +192,20 @@ async def test_hand_typed_rule_takes_effect_over_accepted_ai_titles(crawler_clie
     c = crawler_client
     await setup(c)
     await c.post(f"{API}/suggest/metadata"); await wait_job(c, CID)
-    await c.post(f"{API}/ai/bulk", json={"decision": "accept", "field": "title"})
-    await c.post(f"{API}/ai/bulk", json={"decision": "reject"})
-    await c.post(f"{API}/promote")
+    await c.post(f"{API}/ai/bulk", json={"decision": "accept"})  # titles, divisions and types: nothing promotes blank
+    assert (await c.post(f"{API}/promote")).status_code == 200
     assert (await coll(c))["status"] == "curated"
     r = await c.post(f"{API}/patterns", json={"type": "title", "match": f"https://{CID}/p*", "value": "Hand: {title}"})
     assert r.status_code == 201 and r.json()["deltas"]["modified"] == 8
     k = await coll(c)
     assert k["status"] == "curating" and k["delta_count"] == 8
     d = (await c.get(f"{API}/delta?q=p2")).json()["items"][0]
-    assert d["title"] == "Hand: Page 2" and d["edited_by"] == "sme"
+    assert d["title"] == "Hand: Page 2" and d["edited_by"] == "mixed"  # SME title, AI division and type
     pats = (await c.get(f"{API}/patterns")).json()
     hand = next(p for p in pats if p["match"] == f"https://{CID}/p*")
     assert hand["matches"] == 8 and hand["in_effect"] == 8
-    assert all(p["in_effect"] == 0 for p in pats if p["source"] == "llm")
+    assert all(p["in_effect"] == 0 for p in pats if p["source"] == "llm" and p["type"] == "title")
+    assert all(p["in_effect"] == 1 for p in pats if p["source"] == "llm" and p["type"] != "title")  # untouched
     rules = (await c.get(f"/collections/{CID}/rules")).text
     assert rules.count(">superseded<") == 8 and f'?tab=delta&match=https%3A//{CID}/p%2A"' in rules
     # promote a selection of the re-opened rows straight from the queue
@@ -204,7 +221,8 @@ async def test_curated_toggle_is_idempotent_and_shows_the_pending_state(crawler_
     an exact include; include on a row nothing excludes just drops the exact exclude."""
     c = crawler_client
     await setup(c)
-    await c.post(f"{API}/promote")
+    await classify(c)
+    assert (await c.post(f"{API}/promote")).status_code == 200
     for _ in range(2):  # clicking twice must not toggle back
         assert (await c.post(f"{API}/urls", json={"url": url(2), "type": "exclude"})).json()["excluded"] == 1
     page = (await c.get(f"/collections/{CID}?tab=curated&q=p2")).text
@@ -212,17 +230,16 @@ async def test_curated_toggle_is_idempotent_and_shows_the_pending_state(crawler_
     assert (await coll(c))["delta_count"] == 0
     # back to included: the exact exclude goes, no include rule is needed; coming back in is a delta to promote
     assert (await c.post(f"{API}/urls", json={"url": url(2), "type": "include"})).json()["excluded"] == 0
-    assert (await c.get(f"{API}/patterns")).json() == [] and (await coll(c))["delta_count"] == 1
-    await c.post(f"{API}/promote")
+    assert await scope_rules(c) == [] and (await coll(c))["delta_count"] == 1
+    assert (await c.post(f"{API}/promote")).status_code == 200
     # a glob excludes p*; include on p3 must add an exact include (and repeat clicks keep it)
     await c.post(f"{API}/patterns", json={"type": "exclude", "match": f"https://{CID}/p*"})
     for _ in range(2):
         assert (await c.post(f"{API}/urls", json={"url": url(3), "type": "include"})).json()["excluded"] == 7
-    pats = (await c.get(f"{API}/patterns")).json()
-    assert [(p["type"], p["match"]) for p in pats] == [("exclude", f"https://{CID}/p*"), ("include", url(3))]
+    assert [(p["type"], p["match"]) for p in await scope_rules(c)] == [("exclude", f"https://{CID}/p*"), ("include", url(3))]
     # exclude p3 again: the exact include goes and the glob does the rest — no exact exclude is added
     assert (await c.post(f"{API}/urls", json={"url": url(3), "type": "exclude"})).json()["excluded"] == 8
-    assert [p["type"] for p in (await c.get(f"{API}/patterns")).json()] == ["exclude"]
+    assert [p["type"] for p in await scope_rules(c)] == ["exclude"]
     # the whole-queue promote sits on the delta table too (a title rule gives it something to promote)
     await c.post(f"{API}/patterns", json={"type": "title", "match": "*", "value": "T"})
     await c.post(f"{API}/urls", json={"url": url(3), "type": "include"})
