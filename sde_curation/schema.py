@@ -224,7 +224,14 @@ V5 = """
 ALTER TABLE delta_urls ADD COLUMN title_ai_before text;
 """
 
-MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5)]
+# V6: the collection_key / collection_name a collection is indexed under. Normally derived from the
+# name (the COSMOS rule) and pinned by the first index run; set by hand when the folder differs.
+V6 = """
+ALTER TABLE collections ADD COLUMN index_key text;
+ALTER TABLE collections ADD COLUMN index_name text;
+"""
+
+MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).

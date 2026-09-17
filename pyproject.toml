@@ -18,6 +18,7 @@ dependencies = [
     "sse-starlette>=2.1",
     "python-multipart>=0.0.9",
     "opensearch-py>=2.6",
+    "python-slugify>=8.0.4",  # same slug rule as COSMOS: config_folder = slugify(name, separator="_")
 ]
 
 [dependency-groups]

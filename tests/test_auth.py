@@ -126,16 +126,23 @@ async def test_password_change_invalidates_other_sessions(secured):
     assert (await c2.get("/api/collections")).status_code == 200
 
 
-async def test_curator_cannot_manage_users(secured):
+async def test_curator_cannot_delete_or_manage_users(secured):
     await add_user(secured, "cur", "curatorpass")
     await login(secured, "cur", "curatorpass")
     await secured.post("/api/collections", json={"seed_url": "https://x.org", "name": "x"})
-    assert (await secured.delete("/api/collections/x.org")).status_code == 405  # nobody can delete a collection
+    assert (await secured.delete("/api/collections/x.org")).status_code == 403  # admin only
+    assert (await secured.get("/api/collections/x.org")).status_code == 200  # still there
     assert (await secured.get("/users")).status_code == 403
     assert (await secured.post("/users", data={"username": "z", "password": "zzzzzzzzz"})).status_code == 403
     page = (await secured.get("/collections/x.org", headers={"Accept": "text/html"})).text
     assert "Delete collection" not in page and "/users" not in page
     assert (await secured.get("/account")).status_code == 200  # own account is always reachable
+
+    await login(secured, "admin", SECURED["app_password"])
+    page = (await secured.get("/collections/x.org", headers={"Accept": "text/html"})).text
+    assert "Delete collection" in page
+    assert (await secured.delete("/api/collections/x.org")).status_code == 204
+    assert (await secured.get("/api/collections/x.org")).status_code == 404
 
 
 async def test_admin_users_crud(secured):
