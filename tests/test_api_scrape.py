@@ -82,3 +82,22 @@ async def test_ingest_keeps_one_spelling_per_page(crawler_client):
     assert sorted(i["url"] for i in dump["items"]) == [
         "http://ex.org/only-http", "https://ex.org/a", "https://ex.org/faq", "https://ex.org/map", "https://ex.org/only-slash/",
     ]
+
+
+async def test_dashboard_row_polls_only_while_its_job_is_live(crawler_client):
+    """Regression: every row polled every 10s, so a dashboard of hundreds of collections tripped
+    the WAF rate limit (CloudFront 403 for everyone behind that IP). Idle rows ride on SSE alone."""
+    await crawler_client.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 40})
+    await crawler_client.post("/api/collections", json={"seed_url": "https://idle.org", "name": "Idle"})
+    home = (await crawler_client.get("/")).text
+    assert "every 10s" not in home.split('id="collections"')[1]
+
+    await crawler_client.post("/api/collections/ex.org/scrape")
+    # the refresh swaps the whole <tr>, so the trigger follows the job's state
+    row = (await crawler_client.get("/collections/ex.org/row")).text
+    assert '<tr id="row-' in row and 'hx-swap="outerHTML"' in row and "every 10s" in row
+    assert "every 10s" not in (await crawler_client.get("/collections/idle.org/row")).text
+
+    await wait_job(crawler_client, "ex.org")
+    assert "every 10s" not in (await crawler_client.get("/collections/ex.org/row")).text
+    assert "sseReopen from:body" in (await crawler_client.get("/rows")).text

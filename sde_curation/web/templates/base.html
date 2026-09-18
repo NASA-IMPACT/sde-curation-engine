@@ -109,8 +109,14 @@
     document.addEventListener('click', (e) => { const m = document.getElementById('menu'); if (m && m.open && !m.contains(e.target)) m.open = false; });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { const m = document.getElementById('menu'); if (m) m.open = false; } });
     // Connection indicator: green when the SSE stream is open.
-    document.body.addEventListener('htmx:sseOpen', () => document.getElementById('conn').classList.add('on'));
-    document.body.addEventListener('htmx:sseError', () => document.getElementById('conn').classList.remove('on'));
+    // A reconnect after a drop fires `sseReopen`: events sent meanwhile are gone, so lists that rely
+    // on them (the dashboard table) re-fetch once instead of polling all the time.
+    let sseDropped = false;
+    document.body.addEventListener('htmx:sseOpen', () => {
+      document.getElementById('conn').classList.add('on');
+      if (sseDropped) { sseDropped = false; htmx.trigger(document.body, 'sseReopen'); }
+    });
+    document.body.addEventListener('htmx:sseError', () => { sseDropped = true; document.getElementById('conn').classList.remove('on'); });
     // One place for server-side refusals (4xx/5xx). Aborted/replaced requests never alert, and neither
     // do background refreshes (an `every Ns` poll fires with no triggering event, an SSE refresh with
     // an sse:* one): the old content stays and the next refresh recovers, while an alert would freeze
