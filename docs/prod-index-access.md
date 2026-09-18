@@ -26,14 +26,16 @@ What the engine does in prod, and nothing else:
 |---|---|---|
 | check the index exists (never creates it) | `HEAD sde-web` | `aoss:DescribeIndex` |
 | read one collection's document ids/versions, safety checks, validation | `_search`, `_count` | `aoss:ReadDocument` |
-| add/update that collection's documents; hide removed ones (`public_visibility: false`) | `_bulk` (`index`, `update`) | `aoss:WriteDocument` |
+| add/update that collection's documents; delete the ones no longer curated | `_bulk` (`index`, `update`, `delete`) | `aoss:WriteDocument` |
 
-It never creates, deletes, or remaps indexes, and never hard-deletes documents. Every write is
+It never creates, deletes, or remaps indexes. It does delete documents: the ones of the collection
+being published that its SME removed from curation (document deletes are part of
+`aoss:WriteDocument`; no index-level delete permission is asked for). Every write and delete is
 scoped to a single `collection_key`. Before writing, the engine runs the same guards as the
 production indexer. It refuses to run if:
 - ids would collide or duplicate
 - the collection filter does not isolate one collection
-- more than 90% or 5,000 of a collection's documents would be hidden
+- more than 90% or 5,000 of a collection's documents would be deleted
 
 ---
 
@@ -171,9 +173,9 @@ Refusals happen before anything is written:
 | `index_not_found` | prod `sde-web` does not exist |
 | `id_scheme_collision` / `duplicate_business_ids` | prod has this collection under ids the engine would not mint, so updating them would duplicate them |
 | `scope_filter_ineffective` | the collection filter does not isolate the collection |
-| `deletion_threshold_exceeded` / `deletion_budget_exceeded` | more than `PUBLISH_DELETION_ABORT_RATIO` (90%) or `PUBLISH_DELETION_ABORT_MAX` (5000) of the collection's prod documents would be hidden |
+| `deletion_threshold_exceeded` / `deletion_budget_exceeded` | more than `PUBLISH_DELETION_ABORT_RATIO` (90%) or `PUBLISH_DELETION_ABORT_MAX` (5000) of the collection's prod documents would be deleted |
 
-Failures after writing started. Nothing is hidden in these cases:
+Failures after writing started. Nothing is deleted in these cases:
 
 | error | meaning |
 |---|---|

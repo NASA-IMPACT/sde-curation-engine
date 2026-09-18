@@ -3,7 +3,7 @@
 :root { --link:#0b5fff; }
 a { color:var(--link); }
 * { box-sizing: border-box; }
-body { margin:0; font: 14px/1.4 system-ui, sans-serif; color:var(--fg); background:var(--bg); }
+body { margin:0; font: .875rem/1.4 system-ui, sans-serif; color:var(--fg); background:var(--bg); }
 header { display:flex; align-items:center; gap:.6rem; padding:.6rem 1rem; border-bottom:1px solid var(--line); }
 .brand { font-weight:600; color:inherit; text-decoration:none; }
 main { padding:1rem; max-width:1200px; }
@@ -71,7 +71,7 @@ select.cell { font-size:.8rem; padding:.1rem .2rem; max-width:11rem; }
 button.mini.ok { color:#16a34a; } .suggestions { border:1px dashed #7c3aed; border-radius:6px; padding:.4rem .8rem; margin:1rem 0; }
 
 /* ── workbench ───────────────────────────────────────────────── */
-main { max-width: 1400px; }
+main { max-width: none; }
 .wb-head { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); margin: -1rem -1rem 0.8rem; padding: .6rem 1rem .5rem; display: grid; grid-template-columns: 1fr auto; grid-template-areas: "ident next"; gap: .3rem 1.5rem; align-items: center; }
 .wb-ident { grid-area: ident; display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
 .wb-next { grid-area: next; display: flex; align-items: center; gap: .5rem; justify-self: end; }
@@ -106,7 +106,7 @@ a.chip:hover { border-color: var(--accent); color: var(--fg); }
 .tbl-toolbar .page, .pager .page { padding: 0 .5rem; border: 1px solid var(--line); border-radius: 4px; text-decoration: none; color: var(--fg); }
 .tbl-toolbar .page.off, .pager .page.off { pointer-events: none; opacity: .35; }
 .tbl-wrap { overflow-x: auto; }
-table.urls { font-size: 13px; } table.urls th { position: sticky; top: 0; background: var(--bg); z-index: 1; }
+table.urls { font-size: .8125rem; } table.urls th { position: sticky; top: 0; background: var(--bg); z-index: 1; }
 table.urls td.url { max-width: 34rem; overflow-wrap: anywhere; } table.urls td.url a { color: var(--link); }
 table.urls tbody tr:nth-child(even) { background: color-mix(in srgb, var(--line) 30%, transparent); }
 table.urls tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
@@ -160,14 +160,60 @@ button.link { background: none; border: 0; color: inherit; text-decoration: unde
 .filters .cnt { margin-left: auto; flex-shrink: 0; color: var(--muted); font-variant-numeric: tabular-nums; font-size: .78rem; }
 .filters .f-opt:has(input:checked) { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .filters .f-opt:has(input:checked) .cnt { color: var(--fg); font-weight: 600; }
-@media (max-width: 860px) { .dash { grid-template-columns: 1fr; } .filters { position: static; } }
 /* collections table: keep pills, timestamps and the action button on one line; the last-job
-   error truncates instead of squeezing its neighbours (full text lives in the title tooltip). */
+   error (already cut to 90 chars, full text in the title tooltip) wraps inside its column. */
 #collections .status, #collections time, #collections td.actions { white-space: nowrap; }
 #collections td.actions { text-align: right; }
 #collections td.actions button.primary { padding: .3rem .6rem; font-size: .85rem; }
-#collections td.lastjob { width: 38%; max-width: 0; }
-#collections .err { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#collections td.lastjob { width: 30%; }
+/* pages span the whole window (main has no width cap); here the name column gets the room (names on one line where
+   they fit) and the last-job text shares it with the narrow pill, count and action columns. */
+#collections td:first-child { width: 34%; min-width: 14rem; }
+#collections td:first-child a { font-weight: 500; }
+#collections th, #collections td { padding: .55rem .8rem; }
+@media (max-width: 1500px) {
+  #collections th, #collections td { padding: .45rem .55rem; }
+  #collections thead th { white-space: normal; }
+}
+@media (max-width: 1000px) {
+  #collections td:first-child { min-width: 10rem; }
+  #collections time, #collections .lastjob .job { white-space: normal; }
+}
+#collections .err { display: block; overflow-wrap: anywhere; }
+
+/* ── adapting to the screen ─────────────────────────────────────
+   Everything is sized in rem, so big monitors scale the whole UI up a little instead of leaving
+   14px text adrift in empty space. Below 1200px the filter pane folds into a bar above the table
+   (the table needs the width more); below 820px each collection row becomes a card. */
+@media (min-width: 1600px) { html { font-size: clamp(16px, .3vw + 11.2px, 20px); } }
+.f-toggle { display: none; }
+section.card:has(> table) { overflow-x: auto; }
+@media (max-width: 1200px) {
+  .dash { grid-template-columns: minmax(0, 1fr); gap: .8rem; }
+  .filters { position: static; padding-bottom: .7rem; }
+  .filters .f-head { margin-bottom: 0; }
+  .f-toggle { display: inline-flex; }
+  .f-toggle::after { content: "Show \25BE"; } #filters.open .f-toggle::after { content: "Hide \25B4"; }
+  #filters:not(.open) fieldset { display: none; }
+  #filters.open { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0 2rem; }
+  #filters.open .f-head { grid-column: 1 / -1; margin-bottom: .6rem; }
+}
+@media (max-width: 820px) {
+  main { padding: .7rem; }
+  .wb-head { margin: -.7rem -.7rem .8rem; padding: .5rem .7rem; grid-template-columns: minmax(0, 1fr); grid-template-areas: "ident" "next"; }
+  .wb-next { justify-self: start; flex-wrap: wrap; }
+  .toolbar .inline > * { flex: 1 1 9rem; min-width: 0; }
+  #collections, #collections tbody { display: block; }
+  #collections thead { display: none; }
+  #collections tr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem .8rem; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: .7rem .8rem; margin-bottom: .7rem; }
+  #collections td, #collections td:first-child, #collections td.lastjob { display: block; width: auto; min-width: 0; padding: 0; border: 0; }
+  #collections td:first-child, #collections td.status-cell, #collections td.lastjob, #collections td[colspan] { grid-column: 1 / -1; }
+  #collections td:first-child a { font-size: 1rem; }
+  #collections td[title$=" URLs"]::before { content: attr(title); display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; }
+  #collections td:has(> time) { grid-column: 1 / span 2; color: var(--muted); font-size: .8rem; }
+  #collections td:has(> time)::before { content: "updated "; }
+  #collections td.actions { grid-column: 3; }
+}
 
 /* ── header hamburger menu ──────────────────────────────────── */
 .menu { margin-left: auto; position: relative; }
@@ -208,7 +254,7 @@ details.add-rule form { margin-top: .4rem; }
 .job.j-queued { color: #b45309; }
 
 /* ── /manual: the curator's handbook ─────────────────────────── */
-.manual { max-width: 1080px; margin: 0 auto; font-size: 15px; line-height: 1.55; }
+.manual { max-width: 67.5rem; margin: 0 auto; font-size: .9375rem; line-height: 1.55; }
 .manual .masthead { padding: 1rem 0 1.4rem; border-bottom: 1px solid var(--line); display: grid; gap: .5rem; }
 .manual .masthead h1 { font-size: 1.9rem; margin: 0; line-height: 1.15; }
 .manual .eyebrow { font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--link); font-weight: 600; }
