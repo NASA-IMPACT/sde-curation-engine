@@ -1,4 +1,4 @@
-"""Column sorting on the URL tables and the History ledger; the metadata review table under
+"""Column sorting on the dashboard, the URL tables and the History ledger; the metadata review table under
 Curate › Metadata with accept-all / per-row decisions."""
 
 import re
@@ -51,6 +51,43 @@ async def test_url_tables_sort_by_column(crawler_client):
     # the CSV follows the same order
     csv = (await c.get("/collections/ex.org/urls/curated?format=csv&sort=url&dir=desc")).text
     assert csv.splitlines()[1].startswith("https://ex.org/p9,")
+
+
+def collections_in_order(page: str) -> list[str]:
+    return re.findall(r'<td class="name"><a href="/collections/([^"]+)"', page)
+
+
+async def test_dashboard_sorts_by_column_and_numbers_rows(crawler_client):
+    c = crawler_client
+    for host, name, n in (("b.org", "Bee", 8), ("a.org", "ant", 3), ("c.org", "Cat", 5)):
+        await c.post("/api/collections", json={"seed_url": f"https://{host}", "name": name, "max_pages": n})
+    for host in ("b.org", "c.org"):  # a.org stays in the backlog with no job at all
+        await c.post(f"/api/collections/{host}/scrape")
+        await wait_job(c, host)
+
+    page = (await c.get("/rows")).text  # unsorted: newest first, every column offering a sort
+    assert collections_in_order(page) == ["c.org", "a.org", "b.org"]
+    assert page.count("⇅") == 7 and "aria-sort" not in page
+    assert page.count('<td class="sn"></td>') == 3  # numbered by a CSS counter, one cell per row
+
+    async def order(sort, direction):
+        return collections_in_order((await c.get("/rows", params={"sort": sort, "dir": direction})).text)
+
+    assert await order("name", "asc") == ["a.org", "b.org", "c.org"]  # case-insensitive
+    assert await order("name", "desc") == ["c.org", "b.org", "a.org"]
+    assert await order("dump", "asc") == ["a.org", "c.org", "b.org"]
+    assert await order("dump", "desc") == ["b.org", "c.org", "a.org"]
+    assert await order("status", "asc") == ["a.org", "c.org", "b.org"]  # pipeline order, ties newest first
+    assert (await order("job", "asc"))[-1] == "a.org" and (await order("job", "desc"))[-1] == "a.org"  # no job: last
+    assert (await order("updated", "desc"))[-1] == "a.org"
+    assert await order("bogus", "asc") == ["c.org", "a.org", "b.org"]  # an unknown key is ignored
+
+    # the sorted header shows its direction and flips on the next click; the sort rides in the
+    # filter form so filtering, SSE refreshes and a reload keep it
+    page = (await c.get("/", params={"sort": "dump", "dir": "desc", "q": ".org"})).text
+    assert collections_in_order(page) == ["b.org", "c.org", "a.org"]
+    assert 'aria-sort="descending"' in page and "dashSort('dump', 'asc')" in page
+    assert '<input type="hidden" name="sort" value="dump"><input type="hidden" name="dir" value="desc">' in page
 
 
 async def test_history_sorts_and_pages_by_offset(authed_client):

@@ -77,7 +77,7 @@ main { max-width: none; }
 .wb-next { grid-area: next; display: flex; align-items: center; gap: .5rem; justify-self: end; }
 .crumb { color: var(--muted); text-decoration: none; font-size: .85rem; } .crumb:hover { color: var(--link); }
 .wb-name { margin: 0; font-size: 1.25rem; display: flex; align-items: baseline; gap: .5rem; }
-.wb-id { font-size: .8rem; font-weight: 400; color: var(--muted); text-decoration: none; } .wb-id:hover { color: var(--link); }
+.wb-id { font-size: .8rem; font-weight: 400; color: var(--muted); text-decoration: none; overflow-wrap: anywhere; } .wb-id:hover { color: var(--link); }
 .badges { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
 .status { display: inline-flex; align-items: center; gap: .3rem; font-weight: 600; letter-spacing: .01em; }
 .s-backlog { background: var(--line); color: var(--muted); }
@@ -168,18 +168,30 @@ button.link { background: none; border: 0; color: inherit; text-decoration: unde
 #collections td.lastjob { width: 30%; }
 /* pages span the whole window (main has no width cap); here the name column gets the room (names on one line where
    they fit) and the last-job text shares it with the narrow pill, count and action columns. */
-#collections td:first-child { width: 34%; min-width: 14rem; }
-#collections td:first-child a { font-weight: 500; }
+#collections td.name { width: 34%; min-width: 14rem; }
+#collections td.name a { font-weight: 500; }
 #collections th, #collections td { padding: .55rem .8rem; }
+/* Serial number: the row's place in the current view. A CSS counter, because each row refreshes
+   on its own (SSE / polling) and cannot know where the sort and the filters put it. */
+#collections tbody { counter-reset: sn; }
+#collections tbody tr:not(.empty) { counter-increment: sn; }
+#collections td.sn { width: 1%; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#collections td.sn::before { content: counter(sn); }
+#collections th.sn { text-align: right; }
 @media (max-width: 1500px) {
   #collections th, #collections td { padding: .45rem .55rem; }
   #collections thead th { white-space: normal; }
 }
 @media (max-width: 1000px) {
-  #collections td:first-child { min-width: 10rem; }
+  #collections td.name { min-width: 10rem; }
   #collections time, #collections .lastjob .job { white-space: normal; }
 }
 #collections .err { display: block; overflow-wrap: anywhere; }
+/* The seed URL sits under the name in full — two collections on one host (two GitHub orgs, say)
+   are told apart by their path, so it wraps rather than being cut short. */
+#collections td.name a.seed { font-weight: 400; font-size: .8rem; color: var(--muted);
+  text-decoration: none; overflow-wrap: anywhere; }
+#collections td.name a.seed:hover { color: var(--link); }
 
 /* ── adapting to the screen ─────────────────────────────────────
    Everything is sized in rem, so big monitors scale the whole UI up a little instead of leaving
@@ -206,13 +218,15 @@ section.card:has(> table) { overflow-x: auto; }
   #collections, #collections tbody { display: block; }
   #collections thead { display: none; }
   #collections tr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem .8rem; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: .7rem .8rem; margin-bottom: .7rem; }
-  #collections td, #collections td:first-child, #collections td.lastjob { display: block; width: auto; min-width: 0; padding: 0; border: 0; }
-  #collections td:first-child, #collections td.status-cell, #collections td.lastjob, #collections td[colspan] { grid-column: 1 / -1; }
-  #collections td:first-child a { font-size: 1rem; }
+  #collections td, #collections td.name, #collections td.lastjob { display: block; width: auto; min-width: 0; padding: 0; border: 0; }
+  #collections td.name, #collections td.status-cell, #collections td.lastjob, #collections td[colspan] { grid-column: 1 / -1; }
+  #collections td.name a { font-size: 1rem; }
   #collections td[title$=" URLs"]::before { content: attr(title); display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; }
   #collections td:has(> time) { grid-column: 1 / span 2; color: var(--muted); font-size: .8rem; }
   #collections td:has(> time)::before { content: "updated "; }
   #collections td.actions { grid-column: 3; }
+  #collections td.sn { grid-column: 1 / -1; text-align: left; font-size: .75rem; }
+  #collections td.sn::before { content: "#" counter(sn); }
 }
 
 /* ── header hamburger menu ──────────────────────────────────── */
