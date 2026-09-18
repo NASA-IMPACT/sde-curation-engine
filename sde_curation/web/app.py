@@ -9,7 +9,7 @@ import re
 import secrets
 import time
 from collections import Counter
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -488,6 +488,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ── pages ──────────────────────────────────────────────────────────
 
+    STATUS_ORDER = {s: i for i, s in enumerate(Status)}
+    STAGE_ORDER = {s: i for i, s in enumerate(CurationStage)}
+    DASH_SORTS: dict[str, Callable[[dict], Any]] = {  # dashboard column -> sort key of a row context
+        "name": lambda r: r["c"].name.lower(),
+        "status": lambda r: (STATUS_ORDER[r["c"].status], STAGE_ORDER.get(r["c"].curation_stage, -1)),  # pipeline order
+        "dump": lambda r: r["c"].dump_count,
+        "delta": lambda r: r["c"].delta_count,
+        "curated": lambda r: r["c"].curated_count,
+        "job": lambda r: (r["job"].kind, r["job"].state),  # as the cell reads: "scrape · succeeded"
+        "updated": lambda r: r["c"].updated_at,
+    }
+
     async def dashboard_context(request: Request) -> dict:
         """Collections filtered by the left pane (?status=&division=&curator=&q=), plus
         unfiltered per-option counts so the pane shows the whole distribution."""
@@ -538,8 +550,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if NONE_CURATOR in counts["curator"]:
             curators.append(NONE_CURATOR)
         shown = [c for c in cols if keep(c)]
+        rows = [await row_context(request, c, runs[c.collection_id]) for c in shown]
+        # Column sort (?sort=&dir=). Unsorted is newest first, and stays the tie-break: sorted() is
+        # stable in both directions. Collections that never ran a job go last either way.
+        sort = qp.get("sort") if qp.get("sort") in DASH_SORTS else None
+        direction = "desc" if qp.get("dir") == "desc" else "asc"
+        if sort:
+            has_key = [r for r in rows if sort != "job" or r["job"]]
+            rows = sorted(has_key, key=DASH_SORTS[sort], reverse=direction == "desc") + [
+                r for r in rows if sort == "job" and not r["job"]
+            ]
         return {
-            "rows": [await row_context(request, c, runs[c.collection_id]) for c in shown],
+            "rows": rows, "sort": sort, "dir": direction if sort else None,
             "statuses": list(Status), "stages": list(CurationStage), "divisions": list(Division), "curators": curators,
             "counts": counts, "filters": f,
             "active": bool(f["q"] or f["status"] or f["stage"] or f["flag"] or f["division"] or f["curator"]),
@@ -990,8 +1012,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/collections", response_model=Collection, status_code=201)
     async def api_create(request: Request, body: CollectionCreate):
-        if await db(request).get_collection(body.collection_id):
-            raise HTTPException(409, f"collection {body.collection_id!r} already exists")
+        if existing := await db(request).get_collection(body.collection_id):
+            raise HTTPException(
+                409,
+                f"collection {body.collection_id!r} already exists: {existing.name} — {existing.seed_url}. "
+                "That seed is already curated; re-scrape it there, or delete that collection first.",
+            )
         c = Collection(**body.model_dump(), created_by=actor(request))
         await db(request).insert_collection(c)
         write_collection_yaml(settings.collections_dir, c, await db(request).status_history(c.collection_id))

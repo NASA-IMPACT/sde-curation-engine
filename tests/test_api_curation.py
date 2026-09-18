@@ -204,6 +204,20 @@ async def test_delete_removes_files_and_bad_step_param(crawler_client):
     assert not d.exists()
 
 
+async def test_two_collections_on_one_host_coexist(client):
+    """Regression: two GitHub orgs are two collections. The seed's path is part of the id, and the
+    dashboard row shows the whole seed URL so they can be told apart."""
+    for org in ("NASA-AMMOS", "NASA-Cryospheric-Sciences-Laboratory"):
+        r = await client.post(
+            "/api/collections", json={"seed_url": f"https://github.com/{org}/", "name": f"{org} GitHub"}
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["collection_id"] == f"github.com_{org.lower()}"
+    rows = (await client.get("/rows")).text
+    assert "https://github.com/NASA-AMMOS/" in rows
+    assert "https://github.com/NASA-Cryospheric-Sciences-Laboratory/" in rows
+
+
 async def test_dashboard_form_errors_render_banner(client):
     r = await client.post("/collections", data={"seed_url": "ftp://x", "name": "x"})
     assert r.status_code == 422 and "banner" in r.text and "http(s)" in r.text

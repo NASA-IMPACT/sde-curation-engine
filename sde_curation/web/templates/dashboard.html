@@ -36,6 +36,13 @@
     for (const k of [...qs.keys()]) if (!qs.get(k)) qs.delete(k);
     history.replaceState(null, '', qs.toString() ? '/?' + qs : '/');
   });
+  // A column header click: the sort lives in the filter form, which re-fetches the table with it.
+  function dashSort(key, dir) {
+    const f = document.getElementById('filters');
+    f.elements.sort.value = key; f.elements.dir.value = dir;
+    htmx.trigger(f, 'resort');
+    return false;
+  }
   // "/" jumps to the search bar (unless already typing somewhere).
   document.addEventListener('keydown', (e) => {
     if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;

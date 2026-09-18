@@ -1,5 +1,7 @@
 {% from "partials/job_progress.html" import job_progress %}
-  <td><a href="/collections/{{ c.collection_id }}">{{ c.name }}</a><br><small class="muted">{{ c.collection_id }}</small></td>
+  <td class="sn"></td>
+  <td class="name"><a href="/collections/{{ c.collection_id }}">{{ c.name }}</a><br>
+      <a class="seed" href="{{ c.seed_url }}" target="_blank" rel="noopener" title="open the seed URL">{{ c.seed_url }}</a></td>
   <td class="status-cell"><span class="status s-{{ c.status }}">{{ status_icon(c.status) }} {{ status_label(c.status) }}</span>
       {% if c.status == 'curating' and c.curation_stage %}<span class="chip stage" title="curation stage">{{ '① Exclusions' if c.curation_stage == 'exclusions' else '② Metadata' }}</span>{% endif %}
       {% if c.needs_recuration %}<span class="flag" title="needs re-curation: {{ c.recuration_reason or 'a re-crawl happened after a promote' }}">⚠</span>{% endif %}
