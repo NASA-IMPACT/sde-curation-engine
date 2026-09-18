@@ -17,7 +17,17 @@ from sde_curation.models import (
 def test_seed_normalised_and_id_derived():
     c = CollectionCreate(seed_url="www.aurorasaurus.org/path", name="Aurorasaurus")
     assert c.seed_url == "https://www.aurorasaurus.org/path"
-    assert c.collection_id == "aurorasaurus.org"
+    assert c.collection_id == "aurorasaurus.org_path"
+
+
+def test_seeds_sharing_a_host_get_distinct_ids():
+    a = CollectionCreate(seed_url="https://github.com/NASA-AMMOS/", name="NASA AMMOS GitHub")
+    b = CollectionCreate(
+        seed_url="https://github.com/NASA-Cryospheric-Sciences-Laboratory/",
+        name="NASA Cryospheric Sciences Laboratory GitHub",
+    )
+    assert a.collection_id == "github.com_nasa-ammos"
+    assert b.collection_id == "github.com_nasa-cryospheric-sciences-laboratory"
 
 
 @pytest.mark.parametrize("bad", ["", "ftp://x.org", "mailto:a@b", "https://"])
@@ -27,7 +37,9 @@ def test_bad_seed_rejected(bad):
 
 
 def test_collection_id_matches_crawler_rule():
+    """A root seed keeps the bare-host id the crawler derives."""
     assert collection_id_from_seed("https://science.nasa.gov/") == "science.nasa.gov"
+    assert collection_id_from_seed("https://www.science.nasa.gov") == "science.nasa.gov"
 
 
 @pytest.mark.parametrize("seed,stem", [

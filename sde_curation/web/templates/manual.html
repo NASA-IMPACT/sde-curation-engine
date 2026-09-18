@@ -84,7 +84,7 @@
     <p>The home page lists every collection with its status, the dump / delta / curated URL counts, its last job, and the one button for the next step. The filter pane narrows by status, the curating sub-stage, the flags (needs re-curation, needs re-indexing, prod not validated), division, and curator. Press <kbd>/</kbd> to jump to search. The jobs strip above the table shows everything running anywhere.</p>
     <figure><img src="{{ static_url('manual/01-dashboard.png') }}" alt="Dashboard with the filter pane, add-collection form, a jobs strip showing one running scrape, and six collections at different statuses, each with a next-step button">
     <figcaption><b>Dashboard.</b> Six collections at different stages, one of them scraping. The status badge on a curating collection also shows which sub-stage it is in. Each row ends in exactly one action.</figcaption></figure>
-    <p>To add a site, fill in the seed URL, a display name, the division, and a page cap, then press <b>Add collection</b>. The collection id is derived from the seed host.</p>
+    <p>To add a site, fill in the seed URL, a display name, the division, and a page cap, then press <b>Add collection</b>. The collection id is derived from the seed's host and path, so one host can carry several collections: <code>https://github.com/NASA-AMMOS/</code> is <code>github.com_nasa-ammos</code>, and a seed at a site's root is just the host. Each row shows the full seed URL under the name.</p>
   </li>
 
   <li id="s-scrape">

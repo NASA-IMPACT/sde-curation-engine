@@ -181,8 +181,14 @@ def apex_host(url: str) -> str:
 
 
 def collection_id_from_seed(seed: str) -> str:
-    """Same rule as sde_crawler.job.collection_id_from_seed so ids line up across repos."""
-    return _SLUG_RE.sub("_", apex_host(normalize_seed(seed))).strip("._") or "collection"
+    """Host plus the seed's path, so a host that carries several collections keeps one id per seed:
+    https://github.com/NASA-AMMOS/ -> github.com_nasa-ammos, not the bare github.com that every
+    other org on the host would also claim. A seed at the host root gives just the host — the same
+    id sde_crawler.job.collection_id_from_seed derives, which is all the engine ever had before.
+    Nothing outside the engine keys on this id: the crawler is handed crawl_file_stem(seed_url)."""
+    url = normalize_seed(seed)
+    raw = (apex_host(url) + urlsplit(url).path).lower()
+    return re.sub(r"_+", "_", _SLUG_RE.sub("_", raw)).strip("._") or "collection"
 
 
 def collection_key_from_name(name: str) -> str:
