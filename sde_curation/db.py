@@ -61,20 +61,35 @@ _CURATED_COLS = ("collection_id,url,scraped_title,title,division,document_type,e
 
 
 # ── column sorting ────────────────────────────────────────────────────
+# Base URLs first. Plain lexicographic order on the whole URL reads nothing like a site: it puts a
+# deep page above a shallower sibling branch (…/data/aerosol/access before …/data/ozone, because
+# "a" < "o"), and the seed only lands first because it happens to be the shortest prefix. Order by
+# host, then by how deep the path is (query string and a trailing slash never count), then
+# alphabetically — so https://x/data comes before https://x/data/ozone and before
+# https://x/images/gallery/aurora, and each branch is read from its base down.
+def url_order(col: str = "url") -> tuple[str, ...]:
+    path = f"rtrim(split_part({col}, '?', 1), '/')"
+    return (f"split_part({col}, '/', 3)", f"length({path}) - length(replace({path}, '/', ''))", col)
+
+
+def url_order_sql(col: str = "url") -> str:
+    return ", ".join(url_order(col))
+
+
 # Sortable columns per table, keyed by the name the UI sends (?sort=…). Each maps to one or more
 # SQL expressions; an unknown key falls back to the table's default order, so user input never
 # reaches the SQL. The default order is always appended as the tiebreak so paging stays stable.
 DUMP_SORTS: dict[str, tuple[str, ...]] = {
-    "url": ("d.url",), "scraped_title": ("d.scraped_title",), "content_type": ("d.content_type",),
+    "url": url_order("d.url"), "scraped_title": ("d.scraped_title",), "content_type": ("d.content_type",),
     "depth": ("d.depth",), "text_len": ("text_len",), "excluded": ("excluded",),
     "vs_curated": ("in_deltas", "in_curated"),
 }
 DELTA_SORTS: dict[str, tuple[str, ...]] = {
-    "kind": ("kind",), "url": ("url",), "excluded": ("excluded",), "title": ("COALESCE(title, scraped_title)",),
+    "kind": ("kind",), "url": url_order(), "excluded": ("excluded",), "title": ("COALESCE(title, scraped_title)",),
     "division": ("division",), "document_type": ("document_type",), "edited_by": ("edited_by",),
 }
 CURATED_SORTS: dict[str, tuple[str, ...]] = {
-    "url": ("url",), "excluded": ("excluded",), "title": ("COALESCE(title, scraped_title)",),
+    "url": url_order(), "excluded": ("excluded",), "title": ("COALESCE(title, scraped_title)",),
     "division": ("division",), "document_type": ("document_type",), "text_len": ("text_len",),
     "edited_by": ("edited_by",),
 }
@@ -104,14 +119,14 @@ AI_FIELDS = ("title", "division", "document_type")
 # (two pages with the same title but different types are told apart by the type). Both queries take
 # the collection id twice.
 _PROJECTED_TITLES = """
-SELECT url, delta, pending_ai, title, document_type,
+SELECT url, delta, pending_ai, shared_before, title, document_type,
        lower(regexp_replace(btrim(title), '\\s+', ' ', 'g')) || chr(31) || COALESCE(document_type, '') AS k FROM (
-  SELECT d.url, true AS delta, d.title_ai IS NOT NULL AS pending_ai,
+  SELECT d.url, true AS delta, d.title_ai IS NOT NULL AS pending_ai, d.title_ai_before AS shared_before,
          COALESCE(d.title_ai, d.title, d.scraped_title) AS title,
          COALESCE(d.document_type_ai, d.document_type) AS document_type
     FROM delta_urls d WHERE d.collection_id=%s AND d.kind!='deleted' AND NOT d.excluded
   UNION ALL
-  SELECT c.url, false, false, COALESCE(c.title, c.scraped_title), c.document_type
+  SELECT c.url, false, false, NULL::text, COALESCE(c.title, c.scraped_title), c.document_type
     FROM curated_urls c WHERE c.collection_id=%s AND NOT c.excluded
      AND NOT EXISTS (SELECT 1 FROM delta_urls x WHERE x.collection_id=c.collection_id AND x.url=c.url)
      AND NOT EXISTS (SELECT 1 FROM delta_urls x WHERE x.collection_id=c.collection_id AND x.renamed_from=c.url)
@@ -439,7 +454,7 @@ class Database:
                            COALESCE(x.edited_by, c.edited_by) AS edited_by
                     FROM dump_urls d
                     {joins}
-                    WHERE {w}{order_by(DUMP_SORTS, sort, desc, "d.url")} LIMIT %s OFFSET %s""",
+                    WHERE {w}{order_by(DUMP_SORTS, sort, desc, url_order_sql("d.url"))} LIMIT %s OFFSET %s""",
                 [*args, limit, offset],
             )
             return list(await cur.fetchall()), total
@@ -508,7 +523,7 @@ class Database:
             total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM curated_urls WHERE {w}", args))
             cur = await conn.execute(
                 f"SELECT {_CURATED_COLS}, length(full_text) AS text_len FROM curated_urls WHERE {w}"
-                f"{order_by(CURATED_SORTS, sort, desc, 'url')} LIMIT %s OFFSET %s", [*args, limit, offset]
+                f"{order_by(CURATED_SORTS, sort, desc, url_order_sql())} LIMIT %s OFFSET %s", [*args, limit, offset]
             )
             return [CuratedUrl(**r) for r in await cur.fetchall()], total
 
@@ -635,7 +650,7 @@ class Database:
         async with self._conn() as conn:
             total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM delta_urls WHERE {w}", args))
             cur = await conn.execute(
-                f"SELECT * FROM delta_urls WHERE {w}{order_by(DELTA_SORTS, sort, desc, 'kind, url')}"
+                f"SELECT * FROM delta_urls WHERE {w}{order_by(DELTA_SORTS, sort, desc, f'kind, {url_order_sql()}')}"
                 " LIMIT %s OFFSET %s",
                 [*args, limit, offset],
             )
@@ -1132,16 +1147,29 @@ class Database:
     async def list_delta_ai(
         self, collection_id: str, limit: int = 50, offset: int = 0, *,
         field: str | None = None, conf: str | None = None,
+        with_dups: bool = False, dups_only: bool = False,
     ) -> tuple[list[DeltaUrl], int]:
         """Pending, non-removed delta URLs that carry at least one AI suggestion (for `field`, of
         confidence `conf`, when given), by URL — the review table under Curate › Metadata — and how
-        many there are in all."""
-        cond, cargs = self._ai_filter(field, conf)
+        many there are in all.
+
+        `with_dups` also lists the rows another page of the collection will be indexed under the
+        same title + document type as: deciding a suggestion does not resolve a collision, so those
+        rows have to stay on the page the curator fixes them on until the titles differ.
+        `dups_only` narrows the table to them (the ⚠ badge links here)."""
+        dup = f"url IN (SELECT url FROM ({_DUPLICATE_TITLES}) g WHERE delta)"
+        if dups_only:
+            cond, cargs = dup, [collection_id] * 2
+        else:
+            cond, cargs = self._ai_filter(field, conf)
+            if with_dups:
+                cond, cargs = f"({cond} OR {dup})", [*cargs, *[collection_id] * 2]
         where, args = f"collection_id=%s AND kind!='deleted' AND {cond}", [collection_id, *cargs]
         async with self._conn() as conn:
             total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM delta_urls WHERE {where}", args))
             cur = await conn.execute(
-                f"SELECT * FROM delta_urls WHERE {where} ORDER BY url LIMIT %s OFFSET %s", [*args, limit, offset],
+                f"SELECT * FROM delta_urls WHERE {where} ORDER BY {url_order_sql()} LIMIT %s OFFSET %s",
+                [*args, limit, offset],
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
@@ -1248,6 +1276,29 @@ class Database:
             )
         return len(items)
 
+    async def title_keys(self, collection_id: str) -> dict[str, str]:
+        """Every included page of the collection as {url: the title + document type it would be
+        indexed under} (see _PROJECTED_TITLES). What a new title has to stay clear of: telling a
+        group apart within itself is not enough, because the title it picks can be one another group
+        — or a page that was never in a group at all — already has."""
+        async with self._conn() as conn:
+            cur = await conn.execute(f"SELECT url, k FROM ({_PROJECTED_TITLES}) p",
+                                     (collection_id, collection_id))
+            return {r["url"]: r["k"] for r in await cur.fetchall()}
+
+    async def text_sizes(self, collection_id: str, urls: list[str]) -> dict[str, int]:
+        """How long each of these delta URLs' page text is. Read before the text itself so a group
+        can be packed into calls by size without holding every page in memory at once."""
+        if not urls:
+            return {}
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT d.url, COALESCE(length(u.full_text), 0) AS n FROM delta_urls d"
+                " LEFT JOIN dump_urls u ON u.collection_id=d.collection_id AND u.url=d.url"
+                " WHERE d.collection_id=%s AND d.url = ANY(%s)", (collection_id, list(urls)),
+            )
+            return {r["url"]: r["n"] for r in await cur.fetchall()}
+
     async def docs_for_llm(self, collection_id: str, urls: list[str]) -> list[dict[str, Any]]:
         """{url, title, text, content_hash} of these delta URLs, with the full page text."""
         if not urls:
@@ -1275,7 +1326,9 @@ class Database:
 
     async def duplicate_title_groups(self, collection_id: str) -> list[dict[str, Any]]:
         """Every title + document type shared by more than one page:
-        {"title", "document_type", "members": [{url, delta, pending_ai}]}, members by URL."""
+        {"title", "document_type", "members": [{url, delta, pending_ai, before}]}, members by URL.
+        `before` is the title the row shared before an earlier regeneration, so a repeat run can ask
+        the model the same question again instead of building on its last answer."""
         async with self._conn() as conn:
             cur = await conn.execute(f"SELECT * FROM ({_DUPLICATE_TITLES}) g ORDER BY k, url",
                                      (collection_id, collection_id))
@@ -1283,7 +1336,8 @@ class Database:
         groups: dict[str, dict[str, Any]] = {}
         for r in rows:
             g = groups.setdefault(r["k"], {"title": r["title"], "document_type": r["document_type"], "members": []})
-            g["members"].append({"url": r["url"], "delta": r["delta"], "pending_ai": r["pending_ai"]})
+            g["members"].append({"url": r["url"], "delta": r["delta"], "pending_ai": r["pending_ai"],
+                                 "before": r["shared_before"]})
         return list(groups.values())
 
     async def duplicate_titles_for(self, collection_id: str, urls: list[str]) -> dict[str, dict[str, Any]]:

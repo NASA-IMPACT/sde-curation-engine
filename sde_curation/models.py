@@ -657,9 +657,22 @@ class MetadataSuggestionNoDivision(BaseModel):
     document_type_confidence: Confidence
 
 
-class TitleSuggestion(BaseModel):
-    """The model's answer for ONE page whose title other pages of its collection share: a title
-    that tells it apart (the shared title unchanged, or null, when nothing does)."""
+class DistinctTitle(BaseModel):
+    """One page's new title inside a group that would all be indexed under the same one."""
 
-    title: str | None = None
+    url: str
+    title: str
     title_confidence: Confidence
+
+
+class DistinctTitles(BaseModel):
+    """The model's answer for a GROUP of pages of one collection that would all be indexed under the
+    same title and document type: one title per page asked about, every one of them different from
+    the others and from the titles already settled in the group. There is no "leave it as it was":
+    two pages a search result cannot tell apart is never an acceptable answer, and the caller
+    disambiguates from the URLs whatever the model still leaves colliding."""
+
+    items: list[DistinctTitle]
+    # Pages whose content is the same page served at another URL. Retitling them is not the fix —
+    # one of the URLs should be excluded — so they are titled like the rest and flagged for the SME.
+    same_page_groups: list[list[str]] = []

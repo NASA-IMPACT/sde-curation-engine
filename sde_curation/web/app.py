@@ -283,10 +283,15 @@ def llm_prompts(settings: Settings, c: Collection | None = None) -> dict[str, di
         },
         "titles": {
             "system": TITLES_SYSTEM,
-            "user": ("Page:\n{\"collection\": name, \"collection_seed\": …, \"url\": …, \"scraped_title\": …,"
-                     " \"shared_title\": the title it shares, \"document_type\": the type it shares too, \"pages_sharing_it\": N, \"other_pages\": [{\"url\": …,"
-                     f" \"keeps_title\": true|false}}, … up to {TITLE_SIBLINGS}, its URL-order neighbours], \"text_chars\": N}}"
-                     "\n\nText:\n<the FULL page text, never cut>"),
+            "user": ("Group:\n{\"collection\": name, \"collection_seed\": …, \"shared_title\": the title they share,"
+                     " \"document_type\": the type they share too, \"pages_sharing_it\": N,"
+                     " \"pages_to_retitle\": how many are in this call, \"url_differs_at\": {url: [the parts of it the"
+                     " other URLs do not have], …}, \"settled_titles\": [{\"url\": …, \"title\": a title already taken},"
+                     f" … up to {TITLE_SIBLINGS}], \"previous_titles\": [answers that already failed]}}"
+                     "\n\nPage 1 of K:\n{\"url\": …, \"scraped_title\": …, \"text_chars\": N}\nText:\n"
+                     "<the FULL page text, never cut>\n\nPage 2 of K:\n…"
+                     f"\n\n— one call per duplicate group, every page of it together, split at"
+                     f" {settings.llm_title_group_chars:,} characters of text"),
         },
     }
 
@@ -760,6 +765,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             **lp, "set": set_, "rows": rows, "total": total, "pages": max(1, -(-total // lp["per"])),
             "effects": effects, "dup_titles": dup_titles, "incomplete": incomplete, "has_delta": has_delta,
+            "dup_href": f"/collections/{c.collection_id}?tab={set_}&dup=title",
             "human_fields": await d.human_set_fields(c.collection_id, urls) if set_ == "delta" else {},
             "divisions": list(Division),
             "doc_types": list(DocumentType), "kinds": ["new", "modified", "deleted"],
@@ -832,14 +838,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         suggestions = await d.list_pattern_suggestions(cid, "pending", limit=sugg_paging["limit"],
                                                        offset=sugg_paging["offset"])
         ai_counts = await d.delta_ai_counts(cid)
-        # the review table's filter: ?conf=high|medium|low and ?field=title|division|document_type
+        # the review table's filter: ?conf=high|medium|low and ?field=title|division|document_type;
+        # ?dup=title narrows it to the rows that share a title + document type (the ⚠ badge links
+        # here, so the collision is fixed without leaving the step). Those rows are listed whatever
+        # their suggestions are — accepting one does not make two pages tell apart — unless a
+        # confidence / field filter is on, which is a question about suggestions only.
         qp = request.query_params
-        ai_conf = qp.get("conf") if qp.get("conf") in ("high", "medium", "low") else None
-        ai_field = qp.get("field") if qp.get("field") in AI_FIELDS else None
-        _, ai_total = await d.list_delta_ai(cid, limit=0, field=ai_field, conf=ai_conf)
+        ai_dups_only = lp["dup"] == "title"
+        ai_conf = None if ai_dups_only or qp.get("conf") not in ("high", "medium", "low") else qp.get("conf")
+        ai_field = None if ai_dups_only or qp.get("field") not in AI_FIELDS else qp.get("field")
+        ai_args = {"field": ai_field, "conf": ai_conf, "dups_only": ai_dups_only,
+                   "with_dups": not (ai_conf or ai_field)}
+        _, ai_total = await d.list_delta_ai(cid, limit=0, **ai_args)
         ai_paging = paging("metadata", ai_total)
-        ai_rows, _ = await d.list_delta_ai(cid, limit=ai_paging["limit"], offset=ai_paging["offset"],
-                                           field=ai_field, conf=ai_conf)
+        ai_rows, _ = await d.list_delta_ai(cid, limit=ai_paging["limit"], offset=ai_paging["offset"], **ai_args)
         step = await step_context(request, c, Status.CURATING)
         candidates = await d.count_deltas_for_llm(cid, only_missing=False)  # included delta URLs
         # what the accept-all buttons would really apply, and what they hold back: a field an SME
@@ -858,7 +870,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "ai_counts": ai_counts, "ai_pending_total": ai_counts["title"] + ai_counts["division"] + ai_counts["document_type"],
             "ai_accept_counts": accept_counts, "ai_held": held, "ai_held_total": sum(held.values()),
             "ai_accept_total": sum(accept_counts.values()),
-            "ai_rows": ai_rows, "ai_conf": ai_conf, "ai_field": ai_field,
+            "ai_rows": ai_rows, "ai_conf": ai_conf, "ai_field": ai_field, "ai_dups_only": ai_dups_only,
+            # the ⚠ same-title badge stays on this step instead of jumping to the Delta URLs tab
+            "dup_href": f"/collections/{cid}?tab=curate{'&focus=metadata' if focus else ''}&dup=title#metadata",
             "ai_filtered": await d.count_ai_suggestions(cid, field=ai_field, conf=ai_conf) if (ai_conf or ai_field) else 0,
             "ai_filtered_accept": await d.count_ai_suggestions(cid, field=ai_field, conf=ai_conf, skip_human=True)
                                   if (ai_conf or ai_field) else 0,

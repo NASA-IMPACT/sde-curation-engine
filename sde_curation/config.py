@@ -119,9 +119,18 @@ class Settings(BaseSettings):
     # again at the end of the job, this long after the main pass, with a quarter of the workers.
     llm_retry_passes: int = Field(default=1, ge=0, le=5)
     llm_retry_delay_s: float = Field(default=30.0, ge=0)
-    # Suggest metadata always sends the FULL page text (no budget, no truncation, one model).
-    # Suggest patterns sends every crawled URL (+ title) in batches of this size, one call each.
+    # Suggest metadata always sends the FULL page text (no budget, no truncation, one model), one
+    # call per URL. Suggest patterns sends every crawled URL (+ title) in batches of this size.
     llm_pattern_batch_urls: int = Field(default=1000, ge=50, le=10_000)
+    # Regenerate duplicate titles is the one pass that calls per GROUP, not per page: the pages that
+    # share a title go to the model together so it can tell them apart from each other instead of
+    # guessing one at a time and colliding again. Their full texts go in uncut, so what bounds a
+    # call is characters, not pages — a group over the budget is split, and each later call is told
+    # the titles the earlier ones already used. 800k chars ≈ 200k tokens, a fifth of the window.
+    llm_title_group_chars: int = Field(default=800_000, ge=20_000)
+    # How many times the pass may re-ask a group it did not manage to tell apart before the URLs
+    # decide it (see tasks.disambiguate). 0 = ask once, then disambiguate.
+    llm_title_passes: int = Field(default=2, ge=0, le=5)
     # Off (default): Suggest metadata only flags pages whose AI title and document type another page
     # of the collection will also have; the SME sees the titles as generated and edits them, or sends
     # them back with "Regenerate duplicate titles" (one call each, full text, with the other URLs, for a new title
