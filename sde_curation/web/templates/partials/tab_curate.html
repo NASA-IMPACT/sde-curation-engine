@@ -46,7 +46,7 @@
   <div>
     {% if c.status in ('backlog',) or c.dump_count == 0 %}<b>Nothing to curate yet.</b> Scrape the site first (Overview › step 1) to get the dump URLs.
     {% elif c.status == 'scraped' %}<b>Dump ready.</b> Start curating to compute the delta URLs (dump vs. curated).
-    {% else %}<b>No delta URLs.</b> The curated URLs ({{ c.curated_count }}) are up to date with the dump. Add a rule below, edit a curated URL, or re-scrape to review again.{% endif %}
+    {% else %}<b>No delta URLs.</b> The curated URLs ({{ c.curated_rows }}, of which {{ c.curated_count }} reach the index) are up to date with the dump. Add a rule below, edit a curated URL, or re-scrape to review again.{% endif %}
   </div>
   <div class="inline">
     {% if c.status == 'scraped' and c.dump_count %}<button class="primary" hx-post="/api/collections/{{ cid }}/recompute?then={{ ('/collections/' ~ cid ~ '?tab=dump')|urlencode }}" hx-swap="none" {% if running %}disabled{% endif %}>Start curating</button>

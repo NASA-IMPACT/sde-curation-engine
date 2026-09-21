@@ -192,9 +192,9 @@ class JobManager:
                 updated = await self.db.set_status(
                     c.collection_id, Status.SCRAPED, note=note, force=True, actor=SYSTEM_ACTOR,
                 )
-                if c.curated_count:  # anything already promoted must be re-reviewed
+                if c.curated_rows:  # anything already promoted must be re-reviewed
                     reason = (f"{'loaded existing crawl' if reuse else 're-crawled'} on {crawled_at:%Y-%m-%d %H:%M}Z"
-                              f" ({n} documents) after {c.curated_count} URLs were promoted — Start curating"
+                              f" ({n} documents) after {c.curated_rows} URLs were promoted — Start curating"
                               " shows what changed")
                     await self.db.set_flag(c.collection_id, True, reason)
                     updated.needs_recuration, updated.recuration_reason = True, reason

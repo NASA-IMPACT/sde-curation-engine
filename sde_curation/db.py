@@ -308,8 +308,25 @@ class Database:
                 (needs_recuration, (reason or None) if needs_recuration else None, utcnow(), collection_id),
             )
 
+    @staticmethod
+    async def _recount_curated(conn, collection_id: str, *, changed: bool) -> int:
+        """Refresh the stored curated counters from the table and return the included count.
+        `curated_count` is the URLs that reach the index (excluded rows are listed but not counted),
+        `curated_rows` the whole set. `changed` also stamps `curated_changed_at` — what the
+        "needs re-indexing" chip compares the last index run against."""
+        cur = await conn.execute(
+            "UPDATE collections c SET curated_count=s.included, curated_rows=s.n, updated_at=%(now)s"
+            + (", curated_changed_at=%(now)s" if changed else "")
+            + " FROM (SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE NOT excluded) AS included"
+              " FROM curated_urls WHERE collection_id=%(cid)s) s"
+              " WHERE c.collection_id=%(cid)s RETURNING c.curated_count",
+            {"now": utcnow(), "cid": collection_id},
+        )
+        row = await cur.fetchone()
+        return (row["curated_count"] if isinstance(row, dict) else row[0]) if row else 0
+
     async def update_counts(self, collection_id: str, **counts: int) -> None:
-        allowed = {"dump_count", "delta_count", "curated_count"}
+        allowed = {"dump_count", "delta_count", "curated_count", "curated_rows"}
         bad = set(counts) - allowed
         if bad:
             raise ValueError(f"unknown counters {bad}")
@@ -719,14 +736,18 @@ class Database:
 
     async def set_curated_excluded(self, collection_id: str, items: list[tuple[str, bool]]) -> None:
         """Flag curated rows an exclude rule now keeps out, in place: exclusions are decided by the
-        rules, never queued as delta URLs (the next index run drops the rows)."""
+        rules, never queued as delta URLs (the next index run drops the rows). The row stays in the
+        Curated URLs list; it leaves `curated_count` and marks the curated set as changed, so the
+        count drops and the "needs re-indexing" chip goes up as soon as the rule is added."""
         if not items:
             return
-        async with self._conn() as conn, conn.cursor() as cur:
-            await cur.executemany(
-                "UPDATE curated_urls SET excluded=%s WHERE collection_id=%s AND url=%s",
-                [(excluded, collection_id, url) for url, excluded in items],
-            )
+        async with self._conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    "UPDATE curated_urls SET excluded=%s WHERE collection_id=%s AND url=%s",
+                    [(excluded, collection_id, url) for url, excluded in items],
+                )
+            await self._recount_curated(conn, collection_id, changed=True)
 
     async def count_excluded_by_rules(self, collection_id: str) -> int:
         """Dump URLs an exclude rule keeps out (no include overrides it) — they have no delta row."""
@@ -758,9 +779,12 @@ class Database:
 
     async def replace_curated(
         self, collection_id: str, rows: list[CuratedUrl], *, text_from_dump: bool = True,
-        text_urls: list[str] | None = None,
+        text_urls: list[str] | None = None, changed: bool = True,
     ) -> int:
-        """Bulk-replace the curated set in one transaction; returns row count. With `text_from_dump`
+        """Bulk-replace the curated set in one transaction; returns the included count (what
+        `curated_count` holds — excluded rows are written but not counted). `changed` stamps
+        `curated_changed_at`: a promote that moved nothing (the "mark curated" shortcut) leaves the
+        index as up to date as it was. With `text_from_dump`
         (a promote) every row that is in the dump takes the dump's current page text — copied inside
         PostgreSQL, so the text never travels through the app; `text_urls` limits that to the rows
         just promoted (a partial promote: a row still under review keeps the text its curated
@@ -803,11 +827,7 @@ class Database:
                     + ("" if text_urls is None else " AND c.url = ANY(%s)"),
                     (collection_id,) if text_urls is None else (collection_id, list(text_urls)),
                 )
-            await conn.execute(
-                "UPDATE collections SET curated_count=%s, updated_at=%s WHERE collection_id=%s",
-                (len(rows), utcnow(), collection_id),
-            )
-        return len(rows)
+            return await self._recount_curated(conn, collection_id, changed=changed)
 
     # ── index runs ─────────────────────────────────────────────────────
 

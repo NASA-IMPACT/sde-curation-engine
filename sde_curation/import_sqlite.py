@@ -76,6 +76,12 @@ BACKFILLS = (
     # collections already curating when stages were introduced start at the first stage
     "UPDATE collections SET curation_stage='exclusions' WHERE status='curating' AND curation_stage IS NULL",
     "UPDATE collections SET curation_stage='exclusions' WHERE curation_stage='scope'",
+    # SQLite's curated_count was the whole curated set; here it is the URLs that reach the index and
+    # curated_rows is the whole set (schema V7)
+    """UPDATE collections c SET
+         curated_rows = (SELECT COUNT(*) FROM curated_urls u WHERE u.collection_id = c.collection_id),
+         curated_count = (SELECT COUNT(*) FROM curated_urls u
+                          WHERE u.collection_id = c.collection_id AND NOT u.excluded)""",
 )
 
 

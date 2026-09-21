@@ -278,6 +278,15 @@ crawler found; table `dump_urls`, `dump_count`, `?set=dump`), **Delta URLs** (wh
 change; `delta_urls`, `delta_count`, `?set=delta`) and **Curated URLs** (the approved set;
 `curated_urls`, `curated_count`, `?set=curated`). "Pending" is reserved for undecided suggestions.
 
+**Curated counts.** The Curated URLs list holds every approved row, included *and* excluded.
+`curated_count` is the rows that reach the index (`NOT excluded`) — the number on the tab, the
+dashboard column and the API — and `curated_rows` is the whole set, which is what the checks that
+ask "has anything been promoted" read. An exclude rule applies in place, so `curated_count` drops
+the moment the rule is added; coming back in is a delta URL, so it rises again on promote.
+`curated_changed_at` stamps every change to the set (a promote that moved something, or an exclude
+applied in place); a test index run older than it is behind the curated set, which is the second
+way the **needs re-indexing** chip goes up (the first is a run that failed or did not validate).
+
 Effective value per URL = the newest matching pattern (highest id — the curator's latest decision,
 whether a per-URL edit, an accepted AI suggestion or a glob typed by hand) → the curated value →
 NULL. `include` always beats `exclude`, however old. Title values are templates (`{title}` =

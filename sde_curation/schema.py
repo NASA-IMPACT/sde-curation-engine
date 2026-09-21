@@ -231,7 +231,20 @@ ALTER TABLE collections ADD COLUMN index_key text;
 ALTER TABLE collections ADD COLUMN index_name text;
 """
 
-MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6)]
+# V7: `curated_count` becomes the number of curated URLs that reach the index (the included ones),
+# because that is the number the curator is told; `curated_rows` keeps the size of the whole set
+# (included + excluded — the Curated URLs list shows both) for the checks that ask "has anything
+# been promoted". `curated_changed_at` is when the curated set last changed: an index run started
+# before it is behind the curated set, which is what the "needs re-indexing" chip reads.
+V7 = """
+ALTER TABLE collections ADD COLUMN curated_rows integer NOT NULL DEFAULT 0;
+ALTER TABLE collections ADD COLUMN curated_changed_at timestamptz;
+UPDATE collections c SET
+  curated_rows = (SELECT COUNT(*) FROM curated_urls u WHERE u.collection_id = c.collection_id),
+  curated_count = (SELECT COUNT(*) FROM curated_urls u WHERE u.collection_id = c.collection_id AND NOT u.excluded);
+"""
+
+MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).

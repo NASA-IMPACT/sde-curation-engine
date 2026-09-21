@@ -43,11 +43,15 @@ STEP_PAGES = [f"/collections/{{c}}/step/{s.value}" for s in Status]
 async def invariants(client, cid):
     c = (await client.get(f"/api/collections/{cid}")).json()
     db = client.app.state.db
-    for table, col in (("dump_urls", "dump_count"), ("delta_urls", "delta_count"), ("curated_urls", "curated_count")):
+    for table, col in (("dump_urls", "dump_count"), ("delta_urls", "delta_count"), ("curated_urls", "curated_rows")):
         assert await db.fetchval(f"SELECT COUNT(*) FROM {table} WHERE collection_id=%s", (cid,)) == c[col], f"{col} drift"
+    # curated_count is the indexed subset: the curated rows an exclude rule does not keep out
+    assert await db.fetchval(
+        "SELECT COUNT(*) FROM curated_urls WHERE collection_id=%s AND NOT excluded", (cid,)
+    ) == c["curated_count"], "curated_count drift"
     st = c["status"]
     if st in ("curating", "curated", "config_generated", "live"):
-        assert c["dump_count"] > 0 or c["curated_count"] > 0, f"{st} with no data"
+        assert c["dump_count"] > 0 or c["curated_rows"] > 0, f"{st} with no data"
     if st == "curating":
         assert c["curation_stage"] in ("exclusions", "metadata"), "curating without a stage"
     else:

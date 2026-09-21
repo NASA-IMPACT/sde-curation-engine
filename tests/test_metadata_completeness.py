@@ -150,7 +150,11 @@ async def test_removals_and_excluded_rows_are_never_blocked(crawler_client):
     kinds = [d["kind"] for d in (await c.get(f"{API}/delta")).json()["items"]]
     assert kinds == ["deleted"]
     r = await c.post(f"{API}/promote")
-    assert r.status_code == 200 and r.json()["curated"] == 1
+    # page 2's tombstone is promoted away; page 1 stays as a curated row but the exclude rule keeps
+    # it out of the index, so "curated" (the indexed count) is 0 over one remaining row
+    assert r.status_code == 200 and r.json()["curated"] == 0
+    k = (await c.get(API)).json()
+    assert (k["curated_count"], k["curated_rows"]) == (0, 1)
 
 
 # ── review by confidence ─────────────────────────────────────────────────────

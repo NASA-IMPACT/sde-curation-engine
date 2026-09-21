@@ -158,7 +158,7 @@ class CurationService:
     def rows_set(c: Collection) -> str:
         """The URL set a rule's effect is visible in right now: the delta URLs while there is
         something to review, the curated URLs once promoted, the dump before curating starts."""
-        return "delta" if c.delta_count else "curated" if c.curated_count else "dump"
+        return "delta" if c.delta_count else "curated" if c.curated_rows else "dump"
 
     async def pattern_stats(self, c: Collection) -> list[dict]:
         """Every rule with `matches` = how many URLs of rows_set(c) it matches (the rows the Rules
@@ -193,7 +193,9 @@ class CurationService:
             await self.db.load_curated(c.collection_id), deltas,
             content_hashes=await self.db.dump_content_hashes(c.collection_id),
         )
-        n = await self.db.replace_curated(c.collection_id, curated)
+        # a promote with an empty queue is the "mark curated" shortcut: it moves nothing, so it
+        # leaves the index as up to date as it already was
+        n = await self.db.replace_curated(c.collection_id, curated, changed=bool(deltas))
         # the rules did not change: keep the rule→URL effects so the Curated table can still say why
         await self.db.replace_deltas(c.collection_id, [], [], keep_effects=True)
         await self.db.set_flag(c.collection_id, False)
@@ -210,7 +212,7 @@ class CurationService:
         approved with, nor a hash that would make its pending delta vanish on the next recompute.
         The rules did not change, so the rule→URL effects stay; only a promoted tombstone's go (its
         URL is in neither set any more). Status is the caller's (web _after_curation_change).
-        Returns (curated rows, the delta URLs left to review)."""
+        Returns (curated URLs that reach the index, the delta URLs left to review)."""
         async with self._lock_for(c.collection_id):
             wanted = set(urls)
             deltas = await self.db.load_deltas(c.collection_id)

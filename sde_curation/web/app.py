@@ -162,7 +162,7 @@ def status_invariant_problem(c: Collection, new: Status) -> str | None:
     if new in (Status.SCRAPED, Status.CURATING) and c.dump_count == 0:
         return f"cannot be '{new}': no crawl dump yet — scrape first"
     if new in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE):
-        if c.curated_count == 0:
+        if c.curated_rows == 0:
             return f"cannot be '{new}': nothing has been promoted to the curated set"
         if c.delta_count and c.status is not new:
             return f"cannot be '{new}': {c.delta_count} delta URLs are waiting — promote (or discard) them first"
@@ -448,6 +448,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return False
         return not (active and active.state in ("queued", "running") and active.kind in CHECKING[target])
 
+    def index_stale(c: Collection, run: IndexRun | None, active: JobRun | None) -> bool:
+        """The other half of "needs re-indexing": the curated set changed after the last test index
+        run started (a promote, or an exclude rule applied to curated rows in place), so what is in
+        the index is behind. Never before the first test run — there is nothing to re-index — and
+        never while a test index / validate job is on it, since that run carries the change."""
+        if not run or c.curated_changed_at is None:
+            return False
+        if active and active.state in ("queued", "running") and active.kind in CHECKING["test"]:
+            return False
+        return c.curated_changed_at > run.started_at
+
+    def test_chip(c: Collection, run: IndexRun | None, active: JobRun | None) -> bool:
+        """The "needs re-indexing" chip: the last test run did not pass, or it is behind the curated set."""
+        return unvalidated("test", run, active) or index_stale(c, run, active)
+
     async def with_validation(request: Request, c: Collection, job: JobRun | None = None,
                               runs: dict[str, IndexRun | None] | None = None) -> Collection:
         """`job`: the collection's latest job; `runs`: {target: latest run}, when the caller already has them."""
@@ -455,6 +470,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             runs = {t: await db(request).last_index_run(c.collection_id, t) for t in CHECKING}
         c._validated = run_passed(runs["test"])
         c._test_unvalidated = unvalidated("test", runs["test"], job)
+        c._index_stale = index_stale(c, runs["test"], job)
         c._prod_unvalidated = unvalidated("prod", runs["prod"], job)
         return c
 
@@ -513,7 +529,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         latest = {t: await db(request).latest_runs(t) for t in CHECKING}
         runs = {c.collection_id: {t: latest[t].get(c.collection_id) for t in CHECKING} for c in cols}
         active = {j.collection_id: j for j in await db(request).active_jobs()}
-        chips = {cid: {t: unvalidated(t, r[t], active.get(cid)) for t in CHECKING} for cid, r in runs.items()}
+        chips = {c.collection_id: {"test": test_chip(c, runs[c.collection_id]["test"], active.get(c.collection_id)),
+                                   "prod": unvalidated("prod", runs[c.collection_id]["prod"], active.get(c.collection_id))}
+                 for c in cols}
 
         def curator_of(c: Collection) -> str:
             return c.created_by or NONE_CURATOR
@@ -765,8 +783,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """A crawl that lost a large share of the curated set is more likely a bad crawl than a
         site that shrank; say so before the curator promotes the removals."""
         gone, ratio = dc.get("deleted", 0), settings.promote_removal_warn_ratio
-        if c.curated_count and gone >= 5 and gone >= ratio * c.curated_count:
-            return (f"{gone} of {c.curated_count} curated URLs are gone from this dump ({gone / c.curated_count:.0%})."
+        if c.curated_rows and gone >= 5 and gone >= ratio * c.curated_rows:
+            return (f"{gone} of {c.curated_rows} curated URLs are gone from this dump ({gone / c.curated_rows:.0%})."
                     " If the crawl was partial or failed part-way, re-scrape instead of promoting:"
                     " promoting removes them from the curated URLs and the next index run deletes them.")
         return None
@@ -956,7 +974,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             counts["content_changed"] = (await d.list_deltas(c.collection_id, content_changed=True, limit=1))[1]
             counts["renamed"] = (await d.list_deltas(c.collection_id, renamed=True, limit=1))[1]
         counts["excluded"] = await d.count_excluded_by_rules(c.collection_id)  # rules, not deltas
-        curated = await d.load_curated(c.collection_id) if c.curated_count else []
+        curated = await d.load_curated(c.collection_id) if c.curated_rows else []
         counts["kept"] = sum(1 for r in curated if r.crawl_failure)
         runs = await d.list_index_runs(c.collection_id, limit=5)
         failed = jobs[0] if jobs and jobs[0].state == "failed" else None
@@ -971,7 +989,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "last_prod_run": next((r for r in runs if r.target == "prod"), None),
             "validating_test": next((j for j in active if j.kind in ("index_test", "validate")), None),
             "validating_prod": next((j for j in active if j.kind in ("index_prod", "validate_prod")), None),
-            "exportable": await d.curated_export_count(c.collection_id) if c.curated_count else 0,
+            "exportable": await d.curated_export_count(c.collection_id) if c.curated_rows else 0,
             "delta_counts": counts,
             "pattern_count": len(await d.list_patterns(c.collection_id)),
             "curated_excluded": sum(1 for r in curated if r.excluded),
@@ -1199,7 +1217,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         `note`: what happened, for the status history (default: a recompute)."""
         n = len(ds.deltas)
         pre = c.status in (Status.BACKLOG, Status.SCRAPED)
-        if pre and n == 0 and c.curated_count:
+        if pre and n == 0 and c.curated_rows:
             # re-crawl identical to the curated set: nothing to review
             await db(request).set_flag(c.collection_id, False)
             c = await db(request).set_status(
@@ -1220,7 +1238,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 c.collection_id, Status.CURATED, force=True, actor=actor(request),
                 note=f"{k} curated URL{'s' if k != 1 else ''} excluded by rules: re-index to apply",
             )
-        elif n == 0 and c.status is Status.CURATING and c.curated_count:
+        elif n == 0 and c.status is Status.CURATING and c.curated_rows:
             # nothing left to review on an already-promoted set → it is curated
             c = await db(request).set_status(
                 c.collection_id, Status.CURATED, note=note or "recomputed: no delta URLs", force=True,

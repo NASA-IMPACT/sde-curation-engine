@@ -75,7 +75,7 @@
   </div>
 
 {% elif step == 'curated' %}
-  <dl class="meta"><dt>Curated</dt><dd>{{ c.curated_count }} URLs ({{ stats.curated_excluded }} excluded from indexing)</dd></dl>
+  <dl class="meta"><dt>Curated</dt><dd>{{ c.curated_count }} URLs indexed{% if stats.curated_excluded %} · <a href="/collections/{{ cid }}?tab=curated&excluded=true" title="excluded by rules: still listed under Curated URLs, kept out of the index">{{ stats.curated_excluded }} excluded</a>{% endif %}</dd></dl>
   <div class="inline">
     {% if info.state == 'todo' %}<span class="muted">Promote the deltas in step 3 first.</span>
     {% else %}

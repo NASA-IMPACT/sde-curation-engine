@@ -239,6 +239,7 @@ class Collection(BaseModel):
     _validated: bool = PrivateAttr(default=False)  # computed for the UI: latest test run validated
     _prod_unvalidated: bool = PrivateAttr(default=False)  # computed for the UI: see prod_not_validated
     _test_unvalidated: bool = PrivateAttr(default=False)  # computed for the UI: see needs_reindexing
+    _index_stale: bool = PrivateAttr(default=False)  # computed for the UI: see needs_reindexing
 
     collection_id: str
     name: str
@@ -265,7 +266,13 @@ class Collection(BaseModel):
     # counters kept on the row for a cheap dashboard
     dump_count: int = 0
     delta_count: int = 0
+    # The curated URLs that reach the index: excluded rows stay in the Curated URLs list but are
+    # not counted (an exclude rule takes effect at once, so this drops as soon as one is added).
     curated_count: int = 0
+    curated_rows: int = 0  # the whole curated set, included + excluded ("has anything been promoted")
+    # when the curated set last changed (a promote, or an exclude rule applied in place): an index
+    # run older than this is behind the curated set
+    curated_changed_at: datetime | None = None
 
     @property
     def collection_key(self) -> str:
@@ -286,9 +293,20 @@ class Collection(BaseModel):
 
     @property
     def needs_reindexing(self) -> bool:
-        """The latest test index run failed, never finished, or did not pass validation (and no test
-        index / validate job is on it now). Set by the web layer; cleared only by a test run that passes."""
-        return self._test_unvalidated
+        """Either the latest test index run failed, never finished or did not pass validation, or the
+        curated set changed after it started (a promote, or an exclude rule applied in place) so the
+        index is behind. Set by the web layer; cleared only by a test run that passes over the
+        current curated set. No test run yet = nothing to re-index."""
+        return self._test_unvalidated or self._index_stale
+
+    @property
+    def reindex_reason(self) -> str:
+        """What the chip's tooltip says — the two ways it goes up read differently."""
+        if self._index_stale and not self._test_unvalidated:
+            return ("The curated URLs changed after the last test index run (promoted rows, or an"
+                    " exclude rule applied in place) — Re-index to test to apply them")
+        return ("The latest test index run failed or did not pass validation — Re-index to test, or"
+                " Re-validate if the index only needed more time")
 
 
 class IndexKeyUpdate(BaseModel):

@@ -20,7 +20,10 @@ def collection_dir(root: Path, collection_id: str) -> Path:
 def write_collection_yaml(root: Path, c: Collection, history: Sequence[StatusHistory] = ()) -> Path:
     """collection.yaml = the collection record plus its status history with actors (provenance)."""
     path = collection_dir(root, c.collection_id) / "collection.yaml"
-    data = c.model_dump(mode="json", exclude={"dump_count", "delta_count", "curated_count"})
+    data = c.model_dump(
+        mode="json",
+        exclude={"dump_count", "delta_count", "curated_count", "curated_rows", "curated_changed_at"},
+    )
     data["history"] = [
         h.model_dump(mode="json", include={"at", "old_status", "new_status", "note", "actor"}) for h in history
     ]
