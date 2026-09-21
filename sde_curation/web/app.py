@@ -1001,7 +1001,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def collection_row(request: Request, collection_id: str):
         c = await must_get(request, collection_id)
         return templates.TemplateResponse(
-            request, "partials/row_cells.html", await row_context(request, c)
+            request, "partials/row.html", await row_context(request, c)
         )
 
     # ── API ────────────────────────────────────────────────────────────
