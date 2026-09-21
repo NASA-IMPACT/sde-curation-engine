@@ -33,7 +33,7 @@ async def test_duplicates_are_counted_as_the_pages_would_be_indexed(client):
     await make(client, {"/a": "Mission Data", "/b": "mission   data", "/c": "Other", "/d": "Solo"})
     # the SME types a title and a division for every page (promote below refuses blanks)
     await client.post(f"/api/collections/{CID}/patterns", json={"type": "title", "match": "*", "value": "{title}"})
-    await client.post(f"/api/collections/{CID}/patterns", json={"type": "division", "match": "*", "value": "General"})
+    await client.post(f"/api/collections/{CID}/patterns", json={"type": "division", "match": "*", "value": "Earth Science"})
     # case and runs of whitespace do not make two titles different
     assert await db.duplicate_title_counts(CID) == {"urls": 2, "titles": 1, "delta_urls": 2}
     # a rule that gives a third page the same title joins the group

@@ -10,7 +10,22 @@
     <dl class="meta">
       <dt>Seed</dt><dd><a href="{{ c.seed_url }}" target="_blank" rel="noopener">{{ c.seed_url }}</a></dd>
       <dt>Index key</dt><dd><code>{{ c.collection_key }}</code> <span class="muted">{{ c.collection_name }}</span>{% if not c.index_key %} <span class="muted small" title="The collection name, slugified — the same key COSMOS uses. Pinned by the first index run.">from the name</span>{% endif %}</dd>
-      <dt>Division</dt><dd>{{ c.division }}</dd>
+      {# The division can be changed at any time, to any of the six. One of the five real divisions
+         fills every URL no division rule decides and stops the AI being asked; General means "not
+         assigned yet", and the AI suggests one per page again. #}
+      {% set assigned = c.division and c.division != 'General' %}
+      <dt>Division</dt>
+      <dd><form hx-post="/api/collections/{{ c.collection_id }}/division" hx-ext="json-enc" hx-swap="none" class="inline"
+                hx-confirm="Change the division of this collection? It applies to every URL no division rule decides — including URLs already curated, which come back as delta URLs to promote. With a division assigned, Suggest metadata does not ask for one; General hands it back to the AI."
+                hx-vals='js:{division: document.getElementById("cdiv").value}'>
+            <select id="cdiv" name="division" {% if job and job.state == 'running' %}disabled{% endif %}
+                    title="one division for the whole collection, or General to have the AI suggest one per page">
+              {% for d in divisions %}<option {% if c.division == d %}selected{% endif %}>{{ d }}{% if d == 'General' %} — not assigned{% endif %}</option>{% endfor %}
+            </select>
+            <button class="secondary mini" {% if job and job.state == 'running' %}disabled{% endif %}>Save</button>
+          </form>
+          {% if assigned %}<br><span class="muted small">Assigned for the whole collection: the AI is not asked for a division, and a division rule overrides it where you need an exception.</span>
+          {% else %}<br><span class="muted small">Not assigned: Suggest metadata asks for a division per page and you review the answers. Nothing is promoted on General.</span>{% endif %}</dd>
       <dt>Connector</dt><dd>{{ c.connector }}</dd>
       <dt>Max pages</dt><dd>{{ c.max_pages }}</dd>
       <dt>Created</dt><dd>{{ c.created_at.strftime('%Y-%m-%d %H:%M') }}Z{% if c.created_by %} <span class="muted">by {{ c.created_by }}</span>{% endif %}</dd>

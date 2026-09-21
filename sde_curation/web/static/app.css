@@ -391,6 +391,13 @@ th.sorted a.sort { color: var(--fg); } th.sorted a.sort .arrow { opacity: 1; col
 .dup-title.was { font-weight: 500; }
 .was-title { color: var(--muted); overflow-wrap: anywhere; }
 
+/* a row whose division is still the General placeholder: promote refuses it */
+select.cell.unassigned { border-color: #dc2626; }
+
+/* a field one of the curator's own rules decides: the accept-all buttons pass it over */
+.held { font-size: .7rem; font-weight: 600; white-space: nowrap; padding: .05rem .4rem; border-radius: 3px; background: #e2e8f0; color: #334155; margin-left: .25rem; }
+@media (prefers-color-scheme: dark) { .held { background: #334155; color: #e2e8f0; } }
+
 /* Curate › Metadata: filter the review table by confidence / field */
 .ai-filter { flex-wrap: wrap; gap: .4rem; margin: .4rem 0; }
 .ai-filter .conf { padding: .05rem .45rem; border-radius: 999px; border: 1px solid var(--line); text-decoration: none; }

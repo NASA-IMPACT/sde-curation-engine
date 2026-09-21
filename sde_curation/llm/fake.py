@@ -18,6 +18,7 @@ from ..models import (
     Division,
     DocumentType,
     MetadataSuggestion,
+    MetadataSuggestionNoDivision,
     PatternSuggestion,
     PatternSuggestions,
     PatternType,
@@ -64,9 +65,10 @@ class FakeProvider:
                 raise LLMError(f"response did not match {schema.__name__}: {e}") from e
         if schema is PatternSuggestions:
             return self._patterns(json.loads(user.split("\n", 1)[1]))  # type: ignore[return-value]
-        if schema is MetadataSuggestion:
+        if schema in (MetadataSuggestion, MetadataSuggestionNoDivision):
             _, header, text = user.split("\n", 2)
-            return self._metadata(json.loads(header), text.split("\nText:\n", 1)[-1])  # type: ignore[return-value]
+            full = self._metadata(json.loads(header), text.split("\nText:\n", 1)[-1])
+            return full if schema is MetadataSuggestion else schema(**full.model_dump())  # type: ignore[return-value]
         if schema is TitleSuggestion:
             return self._title(json.loads(user.split("\n", 2)[1]))  # type: ignore[return-value]
         raise LLMError(f"fake provider has no handler for {schema.__name__}")
@@ -90,10 +92,14 @@ class FakeProvider:
                                          rationale="fake: the last URL of every batch is excluded"))
         return PatternSuggestions(suggestions=out)
 
+    # No keyword matched: the model still has to name a division, so the fake names one and marks it
+    # low confidence, the way the prompt tells a real model to. There is no "General" to fall back on.
+    _FALLBACK_DIV = Division.ASTROPHYSICS
+
     def _metadata(self, header: dict, text: str) -> MetadataSuggestion:
         """Confidence is deterministic: high when the keyword is in the URL or title, medium when
         only in the page text, low when the value is a fallback (the collection's division or
-        General, Documentation, a title made from the URL)."""
+        _FALLBACK_DIV, Documentation, a title made from the URL)."""
         strong = (header["url"] + " " + (header.get("scraped_title") or "")).lower()
         weak = text.lower()
 
@@ -106,7 +112,7 @@ class FakeProvider:
                     return v, Confidence.MEDIUM
             return default, Confidence.LOW
 
-        div, div_c = pick(_DIV, Division(header.get("collection_division") or Division.GENERAL))
+        div, div_c = pick(_DIV, Division(header.get("collection_division") or self._FALLBACK_DIV))
         dt, dt_c = pick(_DT, DocumentType.DOCUMENTATION)
         title = re.sub(r"\s+[-–|]\s+.*$", "", header.get("scraped_title") or "").strip()
         title_c = Confidence.HIGH if title else Confidence.LOW

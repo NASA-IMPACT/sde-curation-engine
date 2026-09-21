@@ -53,7 +53,7 @@ async def test_curation_actions_are_attributed(authed_crawler_client):
     page = (await a.get("/collections/ex.org?tab=patterns")).text
     assert ">alice<" in page
     # AI suggestion accept/reject
-    await c.app.state.db.set_delta_ai("ex.org", [{"url": "https://ex.org/p4", "division": "General"}])
+    await c.app.state.db.set_delta_ai("ex.org", [{"url": "https://ex.org/p4", "division": "Earth Science"}])
     r = await a.post("/api/collections/ex.org/ai/accept", json={"url": "https://ex.org/p4", "field": "division"})
     assert r.status_code == 200
     # promote → status row by alice; deltas recomputed rows by alice

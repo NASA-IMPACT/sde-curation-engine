@@ -20,7 +20,7 @@ ACTIONS = [
     ("POST", "/api/collections/{c}/scrape", None),
     ("POST", "/api/collections/{c}/recompute", None),
     ("POST", "/api/collections/{c}/patterns", {"type": "exclude", "match": "*/p3"}),
-    ("POST", "/api/collections/{c}/urls", {"url": "https://ex.org/p2", "type": "division", "value": "General"}),
+    ("POST", "/api/collections/{c}/urls", {"url": "https://ex.org/p2", "type": "division", "value": "Earth Science"}),
     ("POST", "/api/collections/{c}/urls", {"url": "https://ex.org/p2", "type": "exclude"}),
     ("POST", "/api/collections/{c}/promote", None),
     ("GET", "/api/collections/{c}/deltas?excluded=true", None),
@@ -207,8 +207,10 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     # the tab row carries the counts (the header has none)
     h = (await c.get("/collections/ex.org?tab=curated")).text
     assert re.search(r'Dump URLs <span class="count[^"]*">8</span>', h) and re.search(r'Curated URLs <span class="count[^"]*">7</span>', h)
-    # 3 typed rules + 21 from accepted AI suggestions (a title, division and type for each of the 7 included URLs)
-    assert re.search(r'Rules <span class="count[^"]*">24</span>', h) and ">Curate</a>" in h and "wb-chips" not in h
+    # 3 typed rules + 20 from accepted AI suggestions: a title, division and type for each of the 7
+    # included URLs, less p2's division — the typed `division */p2` rule decides it, so accept-all
+    # passed it over rather than overwrite it
+    assert re.search(r'Rules <span class="count[^"]*">23</span>', h) and ">Curate</a>" in h and "wb-chips" not in h
     assert (await c.get("/collections/ex.org/urls/nope")).status_code == 404
 
 

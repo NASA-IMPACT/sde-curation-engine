@@ -107,17 +107,24 @@ def test_v2_backfills_curated_text_from_the_dump(pg_url):
         conn.execute("CREATE TABLE schema_version (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())")
         conn.execute("INSERT INTO schema_version (version) VALUES (1)")
         conn.execute("INSERT INTO collections (collection_id,name,seed_url,division,connector,max_pages,status,created_at,updated_at)"
-                     " VALUES ('c','C','https://c','Earth Science','crawler2',10,'curated',now(),now())")
+                     " VALUES ('c','C','https://c','Earth Science','crawler2',10,'curated',now(),now()),"
+                     " ('g','G','https://g','General','crawler2',10,'backlog',now(),now())")
         conn.execute("INSERT INTO dump_urls (collection_id,url,full_text) VALUES ('c','https://c/a','body a')")
         conn.execute("INSERT INTO curated_urls (collection_id,url,excluded) VALUES"
                      " ('c','https://c/a',false), ('c','https://c/gone',false), ('c','https://c/out',true)")
         try:
-            assert migrate_sync(conn) == 7
+            assert migrate_sync(conn) == 8
             rows = dict(conn.execute("SELECT url, full_text FROM curated_urls ORDER BY url").fetchall())
             assert rows == {"https://c/a": "body a", "https://c/gone": None, "https://c/out": None}
             # V7 derives both curated counters from the table: the count is the included rows only
             assert conn.execute("SELECT curated_count, curated_rows, curated_changed_at FROM collections"
-                                ).fetchone() == (2, 3, None)
-            assert migrate_sync(conn) == 7
+                                " WHERE collection_id='c'").fetchone() == (2, 3, None)
+            # divisions are left exactly as they were: General is the "not assigned" placeholder,
+            # not something to migrate away from
+            assert dict(conn.execute("SELECT collection_id, division FROM collections").fetchall()) == {
+                "c": "Earth Science", "g": "General"}
+            # V8 adds the flag that records "the model was never asked for this row's division"
+            assert conn.execute("SELECT division_skipped FROM delta_urls").fetchall() == []
+            assert migrate_sync(conn) == 8
         finally:
             conn.execute("DROP SCHEMA mig CASCADE")

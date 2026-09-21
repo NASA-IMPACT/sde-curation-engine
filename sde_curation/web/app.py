@@ -43,7 +43,7 @@ from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
 from ..llm.base import LLMError, make_llm
 from ..llm.global_excludes import load_global_excludes
-from ..llm.tasks import METADATA_SYSTEM, PATTERN_SYSTEM, TITLE_SIBLINGS, TITLES_SYSTEM
+from ..llm.tasks import PATTERN_SYSTEM, TITLE_SIBLINGS, TITLES_SYSTEM, metadata_system
 from ..models import (
     ANONYMOUS_ACTOR,
     NOT_VISITED,
@@ -51,6 +51,7 @@ from ..models import (
     CollectionCreate,
     CurationStage,
     Division,
+    DivisionUpdate,
     DocumentType,
     EditedBy,
     IndexKeyUpdate,
@@ -62,6 +63,7 @@ from ..models import (
     RuleSource,
     Status,
     User,
+    division_assigned,
     utcnow,
 )
 from ..notify import Notifier
@@ -261,7 +263,10 @@ class UrlEdit(BaseModel):
         return self
 
 
-def llm_prompts(settings: Settings) -> dict[str, dict[str, str]]:
+def llm_prompts(settings: Settings, c: Collection | None = None) -> dict[str, dict[str, str]]:
+    """The prompts as the curator sees them under "Show the prompt". A collection whose division
+    the curator set is shown the metadata prompt that does not ask for one."""
+    ask_division = c is None or not division_assigned(c.division)
     return {
         "patterns": {
             "system": PATTERN_SYSTEM,
@@ -270,10 +275,10 @@ def llm_prompts(settings: Settings) -> dict[str, dict[str, str]]:
                      f" — up to {settings.llm_pattern_batch_urls} URLs per call, no page text"),
         },
         "metadata": {
-            "system": METADATA_SYSTEM,
-            "user": ("Document:\n{\"collection\": name, \"collection_seed\": …, \"collection_division\": only when not"
-                     " General, \"collection_document_type\": only when set, \"url\": …, \"scraped_title\": …,"
-                     " \"text_chars\": N}\n\nText:\n"
+            "system": metadata_system(ask_division),
+            "user": ("Document:\n{\"collection\": name, \"collection_seed\": …, \"collection_division\": only when the"
+                     " curator set one (then no division is asked for), \"collection_document_type\": only when set,"
+                     " \"url\": …, \"scraped_title\": …, \"text_chars\": N}\n\nText:\n"
                      f"<the FULL page text, never cut; every page goes to {settings.openai_model}>"),
         },
         "titles": {
@@ -755,6 +760,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             **lp, "set": set_, "rows": rows, "total": total, "pages": max(1, -(-total // lp["per"])),
             "effects": effects, "dup_titles": dup_titles, "incomplete": incomplete, "has_delta": has_delta,
+            "human_fields": await d.human_set_fields(c.collection_id, urls) if set_ == "delta" else {},
             "divisions": list(Division),
             "doc_types": list(DocumentType), "kinds": ["new", "modified", "deleted"],
             "edited_values": list(EditedBy), "source_label": SOURCE_LABEL,
@@ -836,6 +842,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                            field=ai_field, conf=ai_conf)
         step = await step_context(request, c, Status.CURATING)
         candidates = await d.count_deltas_for_llm(cid, only_missing=False)  # included delta URLs
+        # what the accept-all buttons would really apply, and what they hold back: a field an SME
+        # rule already decides is left for the row's own ✓ (see api_decide_ai_bulk)
+        accept_counts = {f: await d.count_ai_suggestions(cid, field=f, skip_human=True) for f in AI_FIELDS}
+        held = {f: ai_counts[f] - accept_counts[f] for f in AI_FIELDS}
         return {
             "stats": step["stats"],
             "focus": focus, "suggestions": suggestions, "suggestion_counts": suggestion_counts,
@@ -846,17 +856,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "classifiable": await d.count_deltas_for_llm(cid),
             "classifiable_all": await d.count_deltas_for_llm(cid, only_missing=False),
             "ai_counts": ai_counts, "ai_pending_total": ai_counts["title"] + ai_counts["division"] + ai_counts["document_type"],
+            "ai_accept_counts": accept_counts, "ai_held": held, "ai_held_total": sum(held.values()),
+            "ai_accept_total": sum(accept_counts.values()),
             "ai_rows": ai_rows, "ai_conf": ai_conf, "ai_field": ai_field,
             "ai_filtered": await d.count_ai_suggestions(cid, field=ai_field, conf=ai_conf) if (ai_conf or ai_field) else 0,
+            "ai_filtered_accept": await d.count_ai_suggestions(cid, field=ai_field, conf=ai_conf, skip_human=True)
+                                  if (ai_conf or ai_field) else 0,
             "incomplete": await d.incomplete_counts(cid),
             "effects": await d.effects_for(cid, [r.url for r in ai_rows]),
+            "human_fields": await d.human_set_fields(cid, [r.url for r in ai_rows]),
             "dup_counts": await d.duplicate_title_counts(cid),
             "dup_titles": await d.duplicate_titles_for(cid, [r.url for r in ai_rows]),
             "last_titles_job": await d.latest_job_of_kind(cid, "llm_titles"),
             "dedupe_titles": settings.llm_dedupe_titles,
             "llm_model": settings.openai_model if settings.llm_provider == "openai" else settings.llm_provider,
             "llm_workers": settings.llm_workers,
-            "prompts": llm_prompts(settings),
+            "prompts": llm_prompts(settings, c),
             "pattern_candidates": candidates,
             "pattern_calls": -(-candidates // settings.llm_pattern_batch_urls) if candidates else 0,
             "pattern_batch": settings.llm_pattern_batch_urls,
@@ -998,7 +1013,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             stats["existing_crawl"] = await existing_crawl(request, c)
         await with_validation(request, c, jobs[0] if jobs else None)
         return {"c": c, "job": jobs[0] if jobs else None, "step": step,
-                "steps": pipeline_steps(c), "stats": stats}
+                "steps": pipeline_steps(c), "stats": stats, "divisions": list(Division)}
 
     @app.get("/collections/{collection_id}/pipeline", response_class=HTMLResponse)
     async def collection_pipeline(request: Request, collection_id: str, step: str | None = None):
@@ -1463,6 +1478,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         emit_collection(request, c)
         return htmx_done(request, c)
 
+    @app.post("/api/collections/{collection_id}/division", response_model=None)
+    async def api_set_division(request: Request, collection_id: str, body: DivisionUpdate):
+        """Change the collection's division after it was created, to any of the five. It is then the
+        curator's decision for the whole collection: every URL that no division rule decides takes it
+        (a recompute applies it right away, so rows already curated become modified deltas and reach
+        the index on the next promote), and Suggest metadata stops asking the model for one. Putting
+        it back to General means "not assigned": the model is asked for a division per page again."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        if body.division == c.division:
+            return htmx_done(request, c)
+        old = c.division
+        await db(request).set_division(collection_id, body.division)
+        if division_assigned(body.division):
+            # a division suggestion left by a run from before the division was assigned: the division
+            # is the curator's now, so there is nothing to review and nothing accept-all could apply
+            await db(request).clear_delta_ai_field(collection_id, "division")
+        c = await must_get(request, collection_id)
+        if c.delta_count or c.curated_rows:  # apply it to the URLs the collection already has
+            ds = await curation(request).recompute(c)
+            await _after_curation_change(request, c, ds)
+            c = await must_get(request, collection_id)
+        write_collection_yaml(settings.collections_dir, c, await db(request).status_history(collection_id))
+        await audit(request, "collection.division", collection_id, f"{old} → {body.division}")
+        emit_collection(request, c)
+        return htmx_done(request, c)
+
     @app.get("/api/collections/{collection_id}/index_runs")
     async def api_index_runs(request: Request, collection_id: str):
         await must_get(request, collection_id)
@@ -1607,16 +1649,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/collections/{collection_id}/ai/bulk")
     async def api_decide_ai_bulk(request: Request, collection_id: str, body: AiBulk):
         """Accept AI suggestions as exact-URL rules (one recompute), or drop them: every field or
-        one `field`, every delta URL or one `url`."""
+        one `field`, every delta URL or one `url`.
+
+        An accept over many rows (no `url`) passes over the fields an SME rule already decides:
+        accepting would write a newer exact-URL rule and silently undo a rule a person added after
+        the metadata was generated. Those suggestions stay in the review table, where the row's own
+        ✓ accepts them — that button is never disabled, so the curator can still take the AI's
+        answer for a row they had ruled on. A reject decides exactly what it says, held back or not."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         d = db(request)
         fields = [body.field] if body.field else list(AI_FIELDS)
-        per_field = {f: await d.deltas_with_ai(collection_id, f, url=body.url, conf=body.conf) for f in fields}
+        # accept-all (no url) skips what an SME rule decides; a named row, and any reject, does not
+        skip_human = body.decision == "accept" and body.url is None
+        per_field = {f: await d.deltas_with_ai(collection_id, f, url=body.url, conf=body.conf,
+                                               skip_human=skip_human) for f in fields}
         n = sum(len(v) for v in per_field.values())
         if not n:
             what = (f"{body.conf}-confidence " if body.conf else "") + (f"AI {body.field} suggestions" if body.field else "AI suggestions")
-            raise HTTPException(409, f"no {what} to {body.decision}" + (f" on {body.url}" if body.url else ""))
+            held = skip_human and await d.count_ai_suggestions(collection_id, field=body.field, conf=body.conf)
+            raise HTTPException(409, f"no {what} to {body.decision}" + (f" on {body.url}" if body.url else "")
+                                + (f": all {held} left are on fields your own rules decide — accept those row by row"
+                                   if held else ""))
         if body.decision == "accept":
             ds = await curation(request).replace_exact_patterns(
                 c, [PatternCreate(type=PatternType(f), match=url, value=str(v))
@@ -1625,8 +1679,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             await _after_curation_change(request, c, ds)
         for f, rows in per_field.items():
-            if rows:
-                await d.clear_delta_ai_field(collection_id, f, url=body.url, conf=body.conf)
+            if rows:  # only the rows just decided: the ones passed over keep their suggestion
+                await d.clear_delta_ai_field(collection_id, f, url=body.url, conf=body.conf,
+                                             urls=[u for u, _ in rows] if skip_human else None)
         detail = " · ".join(f"{f} × {len(rows)}" for f, rows in per_field.items() if rows)
         await audit(request, f"ai.bulk_{body.decision}", collection_id, detail + (f" ({body.url})" if body.url else "")
                     + (f" [{body.conf} confidence]" if body.conf else ""))

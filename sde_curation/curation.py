@@ -8,7 +8,16 @@ from .db import Database
 from .engine.diff import DeltaSet, promote, recompute
 from .engine.patterns import is_exact, match_counts, resolve_all
 from .engine.urls import canonical_key
-from .models import Collection, DeltaKind, Pattern, PatternCreate, PatternType, RuleSource, Status
+from .models import (
+    Collection,
+    DeltaKind,
+    Pattern,
+    PatternCreate,
+    PatternType,
+    RuleSource,
+    Status,
+    division_assigned,
+)
 
 
 class IncompleteMetadata(Exception):
@@ -17,9 +26,12 @@ class IncompleteMetadata(Exception):
 
     def __init__(self, counts: dict[str, int]):
         self.counts = counts
+        general = counts.get("general", 0)
         missing = ", ".join(f"{counts[f]} without a {label}" for f, label in
                             (("title", "title"), ("division", "division"), ("document_type", "document type"))
                             if counts[f])
+        if general:  # the same rows as `division`, but they read as set until you look
+            missing += f" (of those, {general} still on the General placeholder)"
         n = counts["urls"]
         super().__init__(f"{n} delta URL{'s' if n != 1 else ''} cannot be promoted yet ({missing}):"
                          " accept the AI suggestions or set the values by hand first")
@@ -54,6 +66,7 @@ class CurationService:
             previous=previous,
             failures=failures,
             capped=c.last_crawl_capped,
+            division=c.division if division_assigned(c.division) else None,
         )
         await self.db.replace_deltas(c.collection_id, ds.deltas, ds.effects)
         if ds.curated_edited_by:
@@ -143,7 +156,8 @@ class CurationService:
                 await self.db.delete_pattern(c.collection_id, p.id)  # type: ignore[arg-type]
             rest = [p for p in patterns if p not in drop]
             if not any(p.type is wanted for p in mine):
-                r = resolve_all([url], rest, base={}, scraped_titles={}, collection_name=c.name)[url]
+                r = resolve_all([url], rest, base={}, scraped_titles={}, collection_name=c.name,
+                                division_default=c.division if division_assigned(c.division) else None)[url]
                 if r.excluded != excluded:
                     await self.db.insert_pattern(Pattern(collection_id=c.collection_id, type=wanted, match=url,
                                                          created_by=actor, source=RuleSource.SME))

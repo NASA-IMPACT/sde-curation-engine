@@ -23,6 +23,7 @@ from .models import (
     CuratedUrl,
     CurationStage,
     DeltaUrl,
+    Division,
     DumpFailure,
     DumpUrl,
     IndexRun,
@@ -118,8 +119,16 @@ SELECT url, delta, pending_ai, title, document_type,
 # A delta URL that promote would write into the curated set without a title, a division or a
 # document type (its effective values: rules or the curated row, never a pending suggestion).
 # Removals and excluded rows carry no metadata to the index, so they never count.
+# `division='General'` counts as no division: General is the placeholder a collection carries until
+# a curator assigns one (models.Division.GENERAL), so a row still on it has no division decided and
+# must not reach the index.
+def _no_division(col: str = "division") -> str:
+    return f"({col} IS NULL OR {col} = 'General')"
+
+
+_NO_DIVISION = _no_division()
 _INCOMPLETE = ("kind!='deleted' AND NOT excluded"
-               " AND (btrim(COALESCE(title, ''))='' OR division IS NULL OR document_type IS NULL)")
+               f" AND (btrim(COALESCE(title, ''))='' OR {_NO_DIVISION} OR document_type IS NULL)")
 
 _DUPLICATE_TITLES = (f"SELECT * FROM (SELECT t.*, COUNT(*) OVER (PARTITION BY k) AS n FROM ({_PROJECTED_TITLES}) t) w"
                      " WHERE n > 1")
@@ -298,6 +307,15 @@ class Database:
             await conn.execute(
                 "UPDATE collections SET index_key=%s, index_name=%s, updated_at=%s WHERE collection_id=%s",
                 (index_key, index_name, utcnow(), collection_id),
+            )
+
+    async def set_division(self, collection_id: str, division: Division) -> None:
+        """The curator's division for the whole collection (General = not assigned, so the AI is
+        asked per page). The next recompute applies it to every URL no division rule decides."""
+        async with self._conn() as conn:
+            await conn.execute(
+                "UPDATE collections SET division=%s, updated_at=%s WHERE collection_id=%s",
+                (division.value, utcnow(), collection_id),
             )
 
     async def set_flag(self, collection_id: str, needs_recuration: bool, reason: str | None = None) -> None:
@@ -636,7 +654,7 @@ class Database:
                     "COPY delta_urls (collection_id,url,kind,renamed_from,crawl_failure,scraped_title,title,"
                     "division,document_type,excluded,content_changed,edited_by,title_ai,division_ai,"
                     "document_type_ai,title_ai_conf,division_ai_conf,document_type_ai_conf,ai_model,"
-                    "ai_content_hash,ai_error,ai_failures,title_ai_before) FROM STDIN"
+                    "ai_content_hash,ai_error,ai_failures,title_ai_before,division_skipped) FROM STDIN"
                 ) as copy:
                     for d in deltas:
                         await copy.write_row((
@@ -644,7 +662,7 @@ class Database:
                             d.title, d.division, d.document_type, d.excluded, d.content_changed, d.edited_by,
                             d.title_ai, d.division_ai, d.document_type_ai, d.title_ai_conf, d.division_ai_conf,
                             d.document_type_ai_conf, d.ai_model, d.ai_content_hash, d.ai_error, d.ai_failures,
-                            d.title_ai_before,
+                            d.title_ai_before, d.division_skipped,
                         ))
                 if not keep_effects:
                     await cur.execute("DELETE FROM pattern_effects WHERE collection_id=%s", (collection_id,))
@@ -695,11 +713,12 @@ class Database:
             await cur.executemany(
                 """UPDATE delta_urls SET title_ai=%s, division_ai=%s, document_type_ai=%s,
                    title_ai_conf=%s, division_ai_conf=%s, document_type_ai_conf=%s,
-                   ai_model=%s, ai_content_hash=%s, ai_error=NULL, ai_failures=0, title_ai_before=NULL
+                   ai_model=%s, ai_content_hash=%s, ai_error=NULL, ai_failures=0, title_ai_before=NULL,
+                   division_skipped=%s
                    WHERE collection_id=%s AND url=%s""",
                 [(i.get("title"), i.get("division"), i.get("document_type"),
                   i.get("title_conf"), i.get("division_conf"), i.get("document_type_conf"),
-                  i.get("model"), i.get("content_hash"),
+                  i.get("model"), i.get("content_hash"), bool(i.get("division_skipped")),
                   collection_id, i["url"]) for i in items],
             )
         return len(items)
@@ -1008,6 +1027,9 @@ class Database:
                     " OR (d.title_ai IS NULL AND d.title_ai_conf IS NOT NULL AND d.title IS NULL)"
                     " OR (d.division_ai IS NULL AND d.division_ai_conf IS NOT NULL AND d.division IS NULL)"
                     " OR (d.document_type_ai IS NULL AND d.document_type_ai_conf IS NOT NULL AND d.document_type IS NULL)"
+                    # the collection had a division assigned when the row was classified, so no
+                    # division was asked for; it is back to the placeholder and nothing fills the field
+                    f" OR (d.division_skipped AND {_no_division('d.division')})"
                     " OR (d.content_changed AND (d.ai_content_hash IS NULL OR d.ai_content_hash != u.content_hash)))")
 
     async def pending_urls_for_patterns(self, collection_id: str) -> list[tuple[str, str | None]]:
@@ -1050,11 +1072,23 @@ class Database:
     async def deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> list[dict[str, Any]]:
         return [r async for r in self.iter_deltas_for_llm(collection_id, only_missing=only_missing)]
 
+    # A field on a URL whose winning rule a person wrote: a glob or per-URL rule the SME typed, or
+    # an AI suggestion they edited before accepting. Such a field is left out of the accept-all
+    # buttons — see `deltas_with_ai(skip_human=True)`.
+    _HUMAN_RULE = ("EXISTS (SELECT 1 FROM pattern_effects e JOIN patterns p ON p.id=e.pattern_id"
+                   " WHERE e.collection_id=delta_urls.collection_id AND e.url=delta_urls.url"
+                   " AND e.field=%s AND p.source IN ('sme','llm_edited'))")
+
     async def deltas_with_ai(
         self, collection_id: str, field: str, url: str | None = None, conf: str | None = None,
+        *, skip_human: bool = False,
     ) -> list[tuple[str, str]]:
         """(url, suggested value) for every pending, non-removed URL with an AI suggestion for `field`
-        (just that one row when `url` is given; only suggestions of that confidence when `conf` is)."""
+        (just that one row when `url` is given; only suggestions of that confidence when `conf` is).
+
+        `skip_human`: leave out the rows where a rule the SME wrote already decides `field`. Accept-all
+        passes it so a bulk accept never overwrites a rule a person added after the metadata was
+        generated — those rows stay in the review table and are accepted one at a time if wanted."""
         assert field in ("title", "division", "document_type")
         sql = (f"SELECT url, {field}_ai AS v FROM delta_urls WHERE collection_id=%s AND kind!='deleted'"
                f" AND {field}_ai IS NOT NULL")
@@ -1063,9 +1097,27 @@ class Database:
             sql += " AND url=%s"; args.append(url)
         if conf is not None:
             sql += f" AND {field}_ai_conf=%s"; args.append(conf)
+        if skip_human:
+            sql += f" AND NOT {self._HUMAN_RULE}"; args.append(field)
         async with self._conn() as conn:
             cur = await conn.execute(sql + " ORDER BY url", args)
             return [(r["url"], r["v"]) for r in await cur.fetchall()]
+
+    async def human_set_fields(self, collection_id: str, urls: list[str]) -> dict[str, set[str]]:
+        """{url: {fields whose winning rule a person wrote}} — the rows the accept-all buttons pass
+        over, marked as such in the review table."""
+        if not urls:
+            return {}
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT e.url, e.field FROM pattern_effects e JOIN patterns p ON p.id=e.pattern_id"
+                " WHERE e.collection_id=%s AND e.url = ANY(%s) AND p.source IN ('sme','llm_edited')",
+                (collection_id, list(urls)),
+            )
+            out: dict[str, set[str]] = {}
+            for r in await cur.fetchall():
+                out.setdefault(r["url"], set()).add(r["field"])
+            return out
 
     @staticmethod
     def _ai_filter(field: str | None, conf: str | None) -> tuple[str, list[Any]]:
@@ -1094,14 +1146,17 @@ class Database:
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
     async def count_ai_suggestions(self, collection_id: str, *, field: str | None = None,
-                                   conf: str | None = None) -> int:
+                                   conf: str | None = None, skip_human: bool = False) -> int:
         """Pending field-level AI suggestions for `field` (every field when None) of confidence `conf`
-        (any when None): what an accept / reject of the filtered review decides."""
+        (any when None): what an accept / reject of the filtered review decides. `skip_human` counts
+        only the ones accept-all would actually apply (see `deltas_with_ai`)."""
         fields = [field] if field in AI_FIELDS else list(AI_FIELDS)
         parts, args = [], []
         for f in fields:
-            parts.append(f"COUNT(*) FILTER (WHERE {f}_ai IS NOT NULL" + (f" AND {f}_ai_conf=%s)" if conf else ")"))
+            cond = f"{f}_ai IS NOT NULL" + (f" AND {f}_ai_conf=%s" if conf else "")
+            parts.append(f"COUNT(*) FILTER (WHERE {cond}" + (f" AND NOT {self._HUMAN_RULE})" if skip_human else ")"))
             args += [conf] if conf else []
+            args += [f] if skip_human else []
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
                 f"SELECT {' + '.join(parts)} FROM delta_urls WHERE collection_id=%s AND kind!='deleted'",
@@ -1131,7 +1186,10 @@ class Database:
 
     async def clear_delta_ai_field(
         self, collection_id: str, field: str, url: str | None = None, conf: str | None = None,
+        urls: list[str] | None = None,
     ) -> int:
+        """Drop the pending suggestion for `field`. `urls`: only these rows — an accept clears
+        exactly the rows it applied, so the ones it passed over stay in the review table."""
         assert field in ("title", "division", "document_type")
         extra = ", title_ai_before=NULL" if field == "title" else ""
         sql = (f"UPDATE delta_urls SET {field}_ai=NULL, {field}_ai_conf=NULL{extra}"
@@ -1141,6 +1199,8 @@ class Database:
             sql += " AND url=%s"; args.append(url)
         if conf is not None:
             sql += f" AND {field}_ai_conf=%s"; args.append(conf)
+        if urls is not None:
+            sql += " AND url = ANY(%s)"; args.append(list(urls))
         async with self._conn() as conn:
             cur = await conn.execute(sql, args)
             return cur.rowcount
@@ -1156,18 +1216,21 @@ class Database:
 
     async def incomplete_counts(self, collection_id: str, urls: list[str] | None = None) -> dict[str, int]:
         """Delta URLs promote would refuse (see _INCOMPLETE): how many, and how many lack each field.
-        `urls`: only these rows (a promote of a selection)."""
+        `general` is the subset of `division` still carrying the retired "General" placeholder — the
+        same problem, but it reads differently to the curator. `urls`: only these rows (a promote of
+        a selection)."""
         where, args = f"collection_id=%s AND {_INCOMPLETE}", [collection_id]
         if urls is not None:
             where += " AND url = ANY(%s)"; args.append(list(urls))
         async with self._conn() as conn:
             cur = await conn.execute(
                 "SELECT COUNT(*) AS urls, COUNT(*) FILTER (WHERE btrim(COALESCE(title, ''))='') AS title,"
-                " COUNT(*) FILTER (WHERE division IS NULL) AS division,"
+                f" COUNT(*) FILTER (WHERE {_NO_DIVISION}) AS division,"
+                " COUNT(*) FILTER (WHERE division = 'General') AS general,"
                 f" COUNT(*) FILTER (WHERE document_type IS NULL) AS document_type FROM delta_urls WHERE {where}", args,
             )
             r = await cur.fetchone()
-        return {k: r[k] or 0 for k in ("urls", "title", "division", "document_type")}
+        return {k: r[k] or 0 for k in ("urls", "title", "division", "general", "document_type")}
 
     async def set_delta_ai_titles(self, collection_id: str, items: list[dict[str, Any]]) -> int:
         """Replace just the AI title suggestion (value, confidence, model) of these rows: the other

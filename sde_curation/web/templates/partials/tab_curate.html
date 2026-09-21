@@ -147,9 +147,11 @@
   {% set gate = (not curating) or stage == 'exclusions' or suggestion_counts.total %}
   <div class="next"><div class="next-inner">
     <div>
-      <b>✨ Suggest metadata</b> — asks {{ llm_model }} for a title, division and document type
+      {% set assigned = c.division and c.division != 'General' %}
+      <b>✨ Suggest metadata</b> — asks {{ llm_model }} for a title{% if not assigned %}, division{% endif %} and document type
       for each of the <b>{{ classifiable }}</b> included delta URL{{ 's' if classifiable != 1 }} not yet classified (or whose text changed since):
       one call per URL with the <b>full page text</b> (never cut), {{ llm_workers }} in parallel. Each answer carries a confidence per field. Nothing is applied until you accept.
+      {% if assigned %}<br><small class="muted">The division is yours — <b>{{ c.division }}</b>, assigned for the whole collection — so it is not asked for and never turns up as a suggestion: every URL has it already, and a division rule still overrides it where you want an exception. <a href="/collections/{{ cid }}?tab=overview">Change it under Overview › Details</a>.</small>{% endif %}
       <details class="prompt"><summary class="muted small">Show the prompt</summary><pre class="prompt">{{ prompts.metadata.system }}
 
 — user message —
@@ -193,12 +195,14 @@
       <b><a href="/collections/{{ cid }}?tab=delta&ai=pending" title="the same rows under Delta URLs">{{ ai_pending_total }} AI suggestion{{ 's' if ai_pending_total != 1 }} to review</a></b>
       {% for f, label in [('title','titles'), ('division','divisions'), ('document_type','doc types')] if ai_counts[f] %}
       <span class="nowrap"><a class="ptype {{ f }}" href="/collections/{{ cid }}?tab=delta&ai={{ f }}" title="the delta URLs with a pending {{ f|replace('_', ' ') }} suggestion">{{ label }} {{ ai_counts[f] }}</a>
-        <button class="mini ok" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "accept", "field": f}|tojson }}' hx-swap="none"
-                hx-confirm="Apply all {{ ai_counts[f] }} AI {{ label }} as exact-URL rules?">✓ accept all</button><button class="mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "field": f}|tojson }}' hx-swap="none"
+        <button class="mini ok" {% if running or not ai_accept_counts[f] %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "accept", "field": f}|tojson }}' hx-swap="none"
+                title="{% if ai_held[f] %}{{ ai_held[f] }} of them are on rows your own rules decide and are left for you to accept row by row{% else %}apply every pending AI {{ label }}{% endif %}"
+                hx-confirm="Apply {{ ai_accept_counts[f] }} AI {{ label }} as exact-URL rules?{% if ai_held[f] %} The other {{ ai_held[f] }} stay as they are: your own rules set those fields, so accept them on the row if you want the AI's answer instead.{% endif %}">✓ accept all{% if ai_held[f] %} ({{ ai_accept_counts[f] }}){% endif %}</button><button class="mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "field": f}|tojson }}' hx-swap="none"
                 hx-confirm="Discard all {{ ai_counts[f] }} AI {{ label }}?">✕</button></span>
       {% endfor %}
       <span class="grow"></span>
-      <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{"decision": "accept"}' hx-swap="none" hx-confirm="Accept all {{ ai_pending_total }} AI suggestions — every title, division and doc type — as exact-URL rules? Each is the newest rule for its URL, so it overrides any earlier rule there, including a glob you typed.">Accept all ({{ ai_pending_total }})</button>
+      {% if ai_held_total %}<span class="muted small" title="a field one of your own rules already sets: the accept-all buttons leave it alone, the ✓ on its row still accepts it">{{ ai_held_total }} on your own rules</span>{% endif %}
+      <button class="secondary mini" {% if running or not ai_accept_total %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{"decision": "accept"}' hx-swap="none" hx-confirm="Accept {{ ai_accept_total }} AI suggestions — titles, divisions and doc types — as exact-URL rules? Each is the newest rule for its URL, so it overrides any earlier rule there, including a glob you typed.{% if ai_held_total %} The {{ ai_held_total }} on fields your own rules decide are left alone — accept those row by row.{% endif %}">Accept all ({{ ai_accept_total }})</button>
       <button class="secondary mini" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{"decision": "reject"}' hx-swap="none" hx-confirm="Discard all {{ ai_pending_total }} AI suggestions?">Reject all</button>
       <a class="small" href="/collections/{{ cid }}?tab=delta&ai={{ ai_conf or ai_field or 'pending' }}" title="the same rows under Delta URLs, with filters, sorting and paging">Review under Delta URLs ↗</a>
     </div>
@@ -217,8 +221,8 @@
       {% if ai_conf or ai_field %}
       <span class="muted small">{{ ai_paging.total }} URL{{ 's' if ai_paging.total != 1 }} · {{ ai_filtered }} {{ ai_conf ~ '-confidence ' if ai_conf }}{{ {'title': 'title', 'division': 'division', 'document_type': 'doc type'}[ai_field] ~ ' ' if ai_field }}suggestion{{ 's' if ai_filtered != 1 }}</span>
       {% if ai_filtered %}{% set fvals = {"decision": "accept", "conf": ai_conf, "field": ai_field} %}
-      <button class="mini ok" type="button" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ fvals|tojson }}' hx-swap="none"
-              hx-confirm="Accept these {{ ai_filtered }} suggestions as exact-URL rules? Other suggestions on the same rows stay undecided.">✓ accept these {{ ai_filtered }}</button><button class="mini" type="button" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "conf": ai_conf, "field": ai_field}|tojson }}' hx-swap="none"
+      <button class="mini ok" type="button" {% if running or not ai_filtered_accept %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ fvals|tojson }}' hx-swap="none"
+              hx-confirm="Accept {{ ai_filtered_accept }} of these suggestions as exact-URL rules? Other suggestions on the same rows stay undecided.{% if ai_filtered - ai_filtered_accept %} The other {{ ai_filtered - ai_filtered_accept }} are on fields your own rules decide and are left alone — accept those row by row.{% endif %}">✓ accept these {{ ai_filtered_accept }}</button><button class="mini" type="button" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "conf": ai_conf, "field": ai_field}|tojson }}' hx-swap="none"
               hx-confirm="Dismiss these {{ ai_filtered }} suggestions? The fields stay blank until set by hand, and promote refuses blank fields.">✕ reject these</button>{% endif %}
       <a class="small" href="{{ fbase }}#metadata">clear filter</a>
       {% endif %}
@@ -264,6 +268,7 @@
   {% if dup_counts.urls and curating %}<div class="banner warn">⚠ {{ dup_counts.urls }} URL{{ 's' if dup_counts.urls != 1 }} would be indexed under the same title and document type as another page ({{ dup_counts.titles }} shared combination{{ 's' if dup_counts.titles != 1 }}). <a href="#metadata">Regenerate duplicate titles in step 2</a> or <a href="/collections/{{ cid }}?tab=delta&dup=title">review them</a> before promoting.</div>{% endif %}
   {% if incomplete.urls and curating %}<div class="banner err">⛔ {{ incomplete.urls }} delta URL{{ 's' if incomplete.urls != 1 }} cannot be promoted yet:
     {% for f, label in [('title', 'title'), ('division', 'division'), ('document_type', 'document type')] if incomplete[f] %}{{ ' · ' if not loop.first }}{{ incomplete[f] }} without a {{ label }}{% endfor %}.
+    {% if incomplete.general %}<b>{{ incomplete.general }}</b> of them are still on <b>General</b>, which is a placeholder, not a division — give {{ 'it' if incomplete.general == 1 else 'them' }} one of the five.{% endif %}
     Nothing reaches the curated URLs with a blank title, division or document type: accept the AI suggestions in step 2 or set the values by hand. <a href="/collections/{{ cid }}?tab=delta&missing=true">Show them ↗</a></div>{% endif %}
   {% if ai_pending_total and curating %}<div class="banner info">⚠ {{ ai_pending_total }} AI suggestion{{ 's are' if ai_pending_total != 1 else ' is' }} still undecided — promoting discards them. Accept or reject them in step 2 first.</div>{% endif %}
   <div class="inline">

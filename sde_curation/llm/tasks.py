@@ -12,11 +12,12 @@ from ..config import Settings
 from ..engine.patterns import glob_to_regex
 from ..models import (
     Collection,
-    Division,
     MetadataSuggestion,
+    MetadataSuggestionNoDivision,
     PatternSuggestion,
     PatternSuggestions,
     TitleSuggestion,
+    division_assigned,
 )
 from .base import Completion, LLMError, LLMProvider
 
@@ -56,9 +57,10 @@ DIVISION_DEFINITIONS = """- Astrophysics: the universe beyond the solar system �
   space weather, magnetospheres, the ionosphere and aurora (e.g. SDO, Parker Solar Probe).
 - Planetary Science: planets, moons, asteroids, comets and meteorites of the solar system,
   planetary defense and astrobiology (e.g. Mars rovers, Cassini, the Planetary Data System).
-- General: content that spans several divisions or belongs to none (agency-wide science policy,
-  cross-division education). Not a fallback for a page whose division is unclear: give the most
-  likely division with low confidence instead."""
+There is no "general", "other" or "unclear" division: every page belongs to one of the five. A page
+that spans several — agency-wide science policy, cross-division education — takes the division it
+serves most, and a page whose division you cannot tell takes the most likely one with low
+confidence, which a reviewer checks."""
 
 PATTERN_SYSTEM = f"""You help curate web crawls for NASA's Science Discovery Engine (SDE), a search engine over
 NASA science content used by scientists, educators and the public. You are given one batch of
@@ -121,7 +123,7 @@ TITLE_RULES = """- Descriptive and self-contained, typically 4–12 words: the p
   page writes them.
 - Do not copy the site-wide scraped title; no slogans, "Welcome to" or "Home Page"."""
 
-METADATA_SYSTEM = f"""You classify one crawled web page at a time for NASA's Science Discovery Engine (SDE), a
+_METADATA_INTRO = f"""You classify one crawled web page at a time for NASA's Science Discovery Engine (SDE), a
 search engine over NASA science content. You receive the collection (the website the page was
 crawled from), the page URL, its scraped title and its full text (possibly long). The scraped
 title is often the same site-wide string on every page, and the text usually starts with the
@@ -134,16 +136,26 @@ title — a free-form title for this page as it should read in a search result, 
 who has not seen the site.
 {TITLE_RULES}
 - Never empty: a page with little content of its own still gets the best title its URL, scraped
-  title and text support, with low confidence.
+  title and text support, with low confidence."""
 
+_METADATA_DIVISION = f"""
 division — the NASA Science Mission Directorate division, one of:
 {DIVISION_DEFINITIONS}
 Judge from the page's subject read in the context of the whole collection: the pages of one site
 nearly always share a division, so a help page, data-format guide or proposer page on a planetary
-data archive is Planetary Science, not General. When `collection_division` is given, a subject-
-matter expert set it for the whole collection: use it unless the page is clearly about another
-division.
+data archive is Planetary Science like the rest of the archive.
+"""
 
+# What replaces the division section when the curator gave the collection a division: it is theirs,
+# it is already on every page, and no division is asked for (the schema has no division field).
+_METADATA_DIVISION_FIXED = """
+division — not asked for. A subject-matter expert set `collection_division` for the whole
+collection and it is already applied to this page; do not classify or comment on it. Read it as
+context for the two fields below: the pages of one site nearly always belong to that division, so
+judge the page as part of it.
+"""
+
+_METADATA_TYPE_AND_CONFIDENCE = f"""
 document_type — exactly one of the five SDE document types, for every page; never null, because
 the SDE cannot index a page without one:
 {DOCUMENT_TYPE_DEFINITIONS}
@@ -168,13 +180,24 @@ close types:
 When `collection_document_type` is given, an expert set it as the collection's usual type: use it
 when the page fits it, but a page that clearly fits another type gets that type.
 
-Confidence, one per field:
+Confidence, one per field you answer:
 - high: stated in the page text or title, or follows directly from the rules above (a dataset
-  landing page is Data; a page of a site devoted to one division has that division).
+  landing page is Data; a user guide is Documentation).
 - medium: a reasonable inference where another answer is also defensible.
 - low: a guess. No field is ever null or empty: when unsure, give the most likely value with low
   confidence — a reviewer checks every low-confidence answer.
 Never invent facts that are not in the input."""
+
+
+def metadata_system(ask_division: bool = True) -> str:
+    """The Suggest metadata prompt. `ask_division` is False when the curator gave the collection a
+    division: the division section becomes "already decided, here for context" and the answer
+    schema drops the field, so the model neither spends tokens on it nor contradicts the SME."""
+    middle = _METADATA_DIVISION if ask_division else _METADATA_DIVISION_FIXED
+    return _METADATA_INTRO + "\n" + middle + _METADATA_TYPE_AND_CONFIDENCE
+
+
+METADATA_SYSTEM = metadata_system()
 
 TITLES_SYSTEM = f"""You write search-result titles for NASA's Science Discovery Engine (SDE), a search engine over
 NASA science content. Several pages of one collection (the website they were crawled from) ended
@@ -288,26 +311,37 @@ async def suggest_metadata_one(
 ) -> dict[str, Any]:
     """One call for one document {url, title, text, content_hash}. Returns the row for
     `Database.set_delta_ai` plus the token usage. The collection's name and SME-set defaults go
-    with the page so answers agree across the collection."""
+    with the page so answers agree across the collection.
+
+    A collection whose curator set a division is asked for the title and document type only: the
+    division goes along as context (`collection_division`), the answer has no division field, and
+    the returned row carries none — so no division suggestion ever turns up for review."""
     text = doc.get("text") or ""  # the whole page, never cut: an accurate title needs all of it
+    # the curator's division, or None while the collection is still on the General placeholder
+    division = collection.division if collection is not None and division_assigned(collection.division) else None
     header: dict[str, Any] = {}
     if collection is not None:
         header["collection"] = collection.name
         header["collection_seed"] = collection.seed_url
-        if collection.division != Division.GENERAL:  # General is the untouched default
-            header["collection_division"] = collection.division.value
+        if division is not None:  # the curator's, for the whole collection: context, not a question
+            header["collection_division"] = division.value
         if collection.document_type is not None:
             header["collection_document_type"] = collection.document_type.value
     header |= {"url": doc["url"], "scraped_title": doc.get("title"), "text_chars": len(text)}
     user = "Document:\n" + json.dumps(header, ensure_ascii=False) + "\n\nText:\n" + text
-    done = await llm.complete(system=METADATA_SYSTEM, user=user, schema=MetadataSuggestion)
+    schema = MetadataSuggestion if division is None else MetadataSuggestionNoDivision
+    done = await llm.complete(system=metadata_system(division is None), user=user, schema=schema)
     r = done.parsed
     if not r.title.strip():  # recorded on the row as a failure; the next Suggest metadata asks again
         raise LLMError("the model returned an empty title")
     return {
         "url": doc["url"],
         "title": (r.title or "").strip() or None, "title_conf": r.title_confidence,
-        "division": r.division, "division_conf": r.division_confidence,
+        # absent when the curator set the division: set_delta_ai then writes NULL, clearing any
+        # division suggestion an earlier run (before the division was set) had left on the row, and
+        # records `division_skipped` so the row can be asked for a division alone if it is cleared
+        **({"division": r.division, "division_conf": r.division_confidence} if division is None
+           else {"division_skipped": True}),
         "document_type": r.document_type, "document_type_conf": r.document_type_confidence,
         "model": done.model, "content_hash": doc.get("content_hash"),
         "tokens_in": done.tokens_in, "tokens_out": done.tokens_out, "tokens_cached": done.tokens_cached,
