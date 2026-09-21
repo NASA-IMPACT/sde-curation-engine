@@ -6,7 +6,7 @@
                                    ('curate', 'Curate', none, '', 'Exclusions, metadata, promote'),
                                    ('rules', 'Rules', stats.pattern_count if stats else 0, '', 'Every rule in force for this collection'),
                                    ('delta', 'Delta URLs', c.delta_count, 'warn', 'What will change in the curated URLs when you promote'),
-                                   ('curated', 'Curated URLs', c.curated_count, 'ok', 'The approved set; included rows are exported to the index'),
+                                   ('curated', 'Curated URLs', c.curated_count, 'ok', 'The approved set. The count is the rows that reach the index; excluded rows stay in the list but are not counted' ~ ((' (' ~ (c.curated_rows - c.curated_count) ~ ' excluded)') if c.curated_rows > c.curated_count else '')),
                                    ('activity', 'Activity', none, '', 'Jobs, status history and audit trail')] %}
   <a role="tab" aria-selected="{{ 'true' if tab == t else 'false' }}" class="tab {% if tab == t %}active{% endif %}" title="{{ hint }}"
      href="/collections/{{ cid }}?step={{ selected }}&tab={{ t }}">{{ label }}{% if n is not none %} <span class="count {{ cls }} {% if not n %}zero{% endif %}">{{ n }}</span>{% endif %}</a>

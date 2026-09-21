@@ -96,7 +96,7 @@ async def test_promote_refuses_blank_metadata_and_says_where(crawler_client):
     c = crawler_client
     db = c.app.state.db
     await setup(c)
-    assert await db.incomplete_counts(CID) == {"urls": 8, "title": 8, "division": 8, "document_type": 8}
+    assert await db.incomplete_counts(CID) == {"urls": 8, "title": 8, "division": 8, "general": 0, "document_type": 8}
     r = await c.post(f"{API}/promote")
     assert r.status_code == 409
     assert r.json()["detail"] == ("8 delta URLs cannot be promoted yet (8 without a title, 8 without a division,"
@@ -117,7 +117,7 @@ async def test_promote_refuses_blank_metadata_and_says_where(crawler_client):
         await c.post(f"{API}/ai/bulk", json={"decision": "accept", "field": field})
     await c.post(f"{API}/ai/reject", json={"url": url(2), "field": "division"})
     await c.post(f"{API}/ai/bulk", json={"decision": "accept", "field": "division"})
-    assert await db.incomplete_counts(CID) == {"urls": 1, "title": 0, "division": 1, "document_type": 0}
+    assert await db.incomplete_counts(CID) == {"urls": 1, "title": 0, "division": 1, "general": 0, "document_type": 0}
     assert [r.url for r in (await db.list_deltas(CID, incomplete=True))[0]] == [url(2)]
     page = (await c.get(f"/collections/{CID}?tab=delta&missing=true")).text
     assert url(2) in page and url(3) not in page
@@ -146,11 +146,15 @@ async def test_removals_and_excluded_rows_are_never_blocked(crawler_client):
     await db.replace_curated(CID, [CuratedUrl(collection_id=CID, url=url(i), scraped_title=f"Page {i}") for i in (1, 2)])
     await db.replace_dump(CID, [DumpUrl(collection_id=CID, url=url(1), scraped_title="Page 1 (new)", full_text="x")])
     await c.post(f"{API}/patterns", json={"type": "exclude", "match": url(1)})
-    assert await db.incomplete_counts(CID) == {"urls": 0, "title": 0, "division": 0, "document_type": 0}
+    assert await db.incomplete_counts(CID) == {"urls": 0, "title": 0, "division": 0, "general": 0, "document_type": 0}
     kinds = [d["kind"] for d in (await c.get(f"{API}/delta")).json()["items"]]
     assert kinds == ["deleted"]
     r = await c.post(f"{API}/promote")
-    assert r.status_code == 200 and r.json()["curated"] == 1
+    # page 2's tombstone is promoted away; page 1 stays as a curated row but the exclude rule keeps
+    # it out of the index, so "curated" (the indexed count) is 0 over one remaining row
+    assert r.status_code == 200 and r.json()["curated"] == 0
+    k = (await c.get(API)).json()
+    assert (k["curated_count"], k["curated_rows"]) == (0, 1)
 
 
 # ── review by confidence ─────────────────────────────────────────────────────
@@ -187,7 +191,7 @@ async def test_metadata_review_filters_by_confidence_and_field(crawler_client):
     assert r.status_code == 200 and r.json()["decided"] == 2
     d2, d4 = await delta(c, 2), await delta(c, 4)
     assert d2["division"] == "Heliophysics" and d2["division_ai"] is None and d2["title_ai"] and d2["document_type_ai"]
-    assert d4["division"] is None and d4["division_ai"] == "General"
+    assert d4["division"] is None and d4["division_ai"] == "Astrophysics"
     # reject the low ones of every field: the high titles are untouched
     r = await c.post(f"{API}/ai/bulk", json={"decision": "reject", "conf": "low"})
     assert r.status_code == 200 and r.json()["decided"] == 14

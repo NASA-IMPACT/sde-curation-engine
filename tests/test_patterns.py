@@ -84,13 +84,13 @@ def test_title_template_substitution():
 def test_unapply_fallbacks_next_newest_then_curated_then_null():
     base = {"https://x.org/data/a": {"division": "Planetary Science"}}
     both = [
-        P(1, PatternType.DIVISION, "https://x.org/*", "General"),
+        P(1, PatternType.DIVISION, "https://x.org/*", "Earth Science"),
         P(2, PatternType.DIVISION, "https://x.org/data/a", "Heliophysics"),
     ]
     # case: the newest applies
     assert resolve(both, base)["https://x.org/data/a"].division == "Heliophysics"
     # delete the newest → the next newest
-    assert resolve(both[:1], base)["https://x.org/data/a"].division == "General"
+    assert resolve(both[:1], base)["https://x.org/data/a"].division == "Earth Science"
     # delete all → curated value
     assert resolve([], base)["https://x.org/data/a"].division == "Planetary Science"
     # no curated value either → NULL
@@ -117,11 +117,11 @@ def test_exact_patterns_scale_to_one_per_url():
     urls = [f"https://ex.org/p/{i}" for i in range(100_000)]
     pats = [Pattern(id=i + 1, collection_id="x", type=PatternType.DIVISION, match=urls[i], value="Heliophysics")
             for i in range(50_000)]
-    pats.append(Pattern(id=0, collection_id="x", type=PatternType.DIVISION, match="*", value="General"))  # older
+    pats.append(Pattern(id=0, collection_id="x", type=PatternType.DIVISION, match="*", value="Earth Science"))  # older
     pats.append(Pattern(id=99_998, collection_id="x", type=PatternType.TITLE, match="https://ex.org/p/7", value="Seven"))
     t0 = time.perf_counter()
     r = resolve_all(urls, pats, base={}, scraped_titles={}, collection_name="X")
     assert time.perf_counter() - t0 < 5
     assert r[urls[0]].division == "Heliophysics" and r[urls[0]].effects["division"] == 1
-    assert r[urls[60_000]].division == "General"
+    assert r[urls[60_000]].division == "Earth Science"
     assert r["https://ex.org/p/7"].title == "Seven" and r["https://ex.org/p/7"].division == "Heliophysics"

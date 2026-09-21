@@ -62,16 +62,27 @@ async def test_ai_bulk_accept_and_reject(crawler_client):
     with_title = [d for d in items if d["title_ai"]]
     with_doc = [d for d in items if d["document_type_ai"]]
     assert len(with_title) == 8 and with_doc
-    # one URL already has a hand-set exact title: bulk accept replaces it, not duplicates it
+    # one URL has a title the SME set by hand after the metadata was generated: accept all leaves
+    # that row alone (it would overwrite the rule), and says so; the row keeps its suggestion
     await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p2", "type": "title", "value": "Manual"})
     r = await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "accept", "field": "title"})
-    assert r.status_code == 200 and r.json()["decided"] == 8
-    items = (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]
-    assert all(d["title_ai"] is None for d in items)
-    assert all(d["title"] == d["scraped_title"] for d in items if d["kind"] != "deleted")  # fake AI titles = scraped titles
+    assert r.status_code == 200 and r.json()["decided"] == 7
+    items = {d["url"]: d for d in (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]}
+    assert items["https://ex.org/p2"]["title_ai"] and items["https://ex.org/p2"]["title"] == "Manual"
+    assert all(d["title_ai"] is None for u, d in items.items() if u != "https://ex.org/p2")
+    assert all(d["title"] == d["scraped_title"] for u, d in items.items()
+               if d["kind"] != "deleted" and u != "https://ex.org/p2")  # fake AI titles = scraped titles
     pats = (await c.get("/api/collections/ex.org/patterns")).json()
     titles = [p for p in pats if p["type"] == "title"]
     assert len(titles) == 8 and all(p["created_by"] == "anonymous" for p in titles)
+    assert [p["source"] for p in titles if p["match"] == "https://ex.org/p2"] == ["sme"]  # the rule stands
+    # the row's own ✓ is never disabled: it still takes the AI's answer for that row
+    r = await c.post("/api/collections/ex.org/ai/bulk",
+                     json={"decision": "accept", "url": "https://ex.org/p2", "field": "title"})
+    assert r.status_code == 200
+    items = {d["url"]: d for d in (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]}
+    assert items["https://ex.org/p2"]["title_ai"] is None
+    assert items["https://ex.org/p2"]["title"] == items["https://ex.org/p2"]["scraped_title"]
     # doc types: reject all → cleared, nothing applied
     r = await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "reject", "field": "document_type"})
     assert r.status_code == 200 and r.json()["decided"] == len(with_doc)
@@ -84,6 +95,43 @@ async def test_ai_bulk_accept_and_reject(crawler_client):
     assert r.status_code == 200 and r.json()["decided"] == 8
     # the workspace shows the bulk bar only while something is pending
     assert "accept all" not in (await c.get("/collections/ex.org?tab=curate")).text
+
+
+async def test_sme_rules_added_after_metadata_are_kept_out_of_accept_all(crawler_client):
+    """A glob rule the SME writes once the suggestions are in is applied at once, and the rows it
+    decides drop out of the accept-all buttons — accepting them in bulk would write a newer
+    exact-URL rule over the rule just typed. Each row's own ✓ still accepts, and says so."""
+    c = crawler_client
+    await setup(c)
+    await c.post("/api/collections/ex.org/suggest/metadata"); await wait_job(c, "ex.org")
+    r = await c.post("/api/collections/ex.org/patterns",
+                     json={"type": "division", "match": "*/p1", "value": "Earth Science"})
+    assert r.status_code == 201
+    items = {d["url"]: d for d in (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]}
+    assert items["https://ex.org/p1"]["division"] == "Earth Science"  # the rule is applied
+    assert items["https://ex.org/p1"]["division_ai"]  # …and the suggestion is still there to review
+
+    page = (await c.get("/collections/ex.org?tab=curate")).text
+    assert "not in Accept all" in page and "1 on your own rules" in page
+    assert 'hx-confirm="Apply 7 AI divisions' in page  # 8 pending, 1 held back
+
+    r = await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "accept", "field": "division"})
+    assert r.status_code == 200 and r.json()["decided"] == 7
+    items = {d["url"]: d for d in (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]}
+    assert items["https://ex.org/p1"]["division_ai"] and items["https://ex.org/p1"]["division"] == "Earth Science"
+    assert all(d["division_ai"] is None for u, d in items.items() if u != "https://ex.org/p1")
+    # accept-all has nothing left to do and explains why; the row's own ✓ still works
+    r = await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "accept", "field": "division"})
+    assert r.status_code == 409 and "your own rules decide" in r.text
+    r = await c.post("/api/collections/ex.org/ai/accept", json={"url": "https://ex.org/p1", "field": "division"})
+    assert r.status_code == 200
+    items = {d["url"]: d for d in (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]}
+    assert items["https://ex.org/p1"]["division_ai"] is None
+    # a reject decides exactly what it says, held back or not
+    await c.post("/api/collections/ex.org/patterns",
+                 json={"type": "title", "match": "*/p*", "value": "Everything"})
+    r = await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "reject", "field": "title"})
+    assert r.status_code == 200 and r.json()["decided"] == 8
 
 
 async def test_curate_workspace_counts_and_gate(crawler_client):

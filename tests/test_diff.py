@@ -38,8 +38,8 @@ def test_pattern_change_on_curated_row_creates_modified_delta_and_effects():
     d = dump(("https://x/a", "A"))
     c = cur({"url": "https://x/a", "scraped_title": "A"})
     assert rc(d, c).deltas == []
-    ds = rc(d, c, [Pattern(id=8, collection_id="x", type=PatternType.DIVISION, match="*", value="General")])
-    assert ds.deltas[0].division == "General" and ds.effects == [(8, "https://x/a", "division")]
+    ds = rc(d, c, [Pattern(id=8, collection_id="x", type=PatternType.DIVISION, match="*", value="Earth Science")])
+    assert ds.deltas[0].division == "Earth Science" and ds.effects == [(8, "https://x/a", "division")]
 
 
 def test_excludes_are_decided_by_rules_not_deltas():
@@ -97,7 +97,7 @@ def test_100k_urls_under_5s():
     n = 100_000
     d = [DumpUrl(collection_id="x", url=f"https://x.org/s{i % 50}/p{i}", scraped_title=f"T{i}") for i in range(n)]
     c = [CuratedUrl(collection_id="x", url=f"https://x.org/s{i % 50}/p{i}", scraped_title=f"T{i}") for i in range(0, n, 2)]
-    pats = [Pattern(id=i, collection_id="x", type=PatternType.DIVISION, match=f"https://x.org/s{i}/*", value="General") for i in range(20)]
+    pats = [Pattern(id=i, collection_id="x", type=PatternType.DIVISION, match=f"https://x.org/s{i}/*", value="Earth Science") for i in range(20)]
     pats += [Pattern(id=99, collection_id="x", type=PatternType.EXCLUDE, match="*/p1*"),
              Pattern(id=100, collection_id="x", type=PatternType.TITLE, match="*", value="{title} | X")]
     t0 = time.perf_counter()

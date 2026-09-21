@@ -40,6 +40,7 @@ from ..models import (
     DeltaUrl,
     DumpUrl,
     Pattern,
+    RuleSource,
     edited_by_of,
     failure_means_gone,
 )
@@ -48,7 +49,8 @@ from .urls import canonical_key, url_rank
 
 # AI suggestions (and their provenance) survive a recompute: copied from the previous delta row.
 _AI_FIELDS = ("title_ai", "division_ai", "document_type_ai", "title_ai_conf", "division_ai_conf",
-              "document_type_ai_conf", "ai_model", "ai_content_hash", "ai_error", "ai_failures", "title_ai_before")
+              "document_type_ai_conf", "ai_model", "ai_content_hash", "ai_error", "ai_failures", "title_ai_before",
+              "division_skipped")
 
 
 @dataclass
@@ -114,9 +116,12 @@ def recompute(
     previous: list[DeltaUrl] | None = None,
     failures: dict[str, str] | None = None,
     capped: bool = False,
+    division: str | None = None,
 ) -> DeltaSet:
     """`failures`: url -> crawler reason for every URL the crawl tried and could not fetch;
-    `capped`: the crawl stopped at its page cap (unmet curated URLs are kept, not removed)."""
+    `capped`: the crawl stopped at its page cap (unmet curated URLs are kept, not removed);
+    `division`: the division the curator set for the whole collection, which fills every URL no
+    division rule decides (None = left to the AI, one suggestion per page)."""
     dump_by = {d.url: d for d in dump}
     cur_by = {c.url: c for c in curated}
     prev_by = {p.url: p for p in previous or []}
@@ -135,6 +140,7 @@ def recompute(
         base=base,
         scraped_titles={u: d.scraped_title for u, d in dump_by.items()},
         collection_name=collection_name,
+        division_default=division,
     )
 
     deltas: list[DeltaUrl] = []
@@ -150,7 +156,10 @@ def recompute(
         c = cur_by[cu] if cu else None
         for fld, pid in r.effects.items():
             effects.append((pid, u, fld))
-        edited_by = edited_by_of([source_of[pid] for pid in r.effects.values() if pid in source_of])
+        sources = [source_of[pid] for pid in r.effects.values() if pid in source_of]
+        if division and "division" not in r.effects:
+            sources.append(RuleSource.SME)  # the division is the curator's, set on the collection
+        edited_by = edited_by_of(sources)
         if r.excluded:  # the rule decides it: no delta to review or promote
             n_excluded += 1
             if c is not None:

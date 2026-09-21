@@ -13,7 +13,10 @@ Semantics (from COSMOS README_PATTERN_* specs, as distilled in docs/plan.md):
   * exclude/include are NOT ranked by age: an include is an explicit exception and keeps winning
     however old it is, so a later exclude glob cannot silently undo a batch of force-includes.
   * title values are templates: {url} {title} {collection}; xpath:// is not supported here
-  * effective value = winning pattern value, else the curated value, else NULL
+  * effective value = winning pattern value, else the curated value, else NULL — except division,
+    where a collection-wide division set by the curator (`division_default`) sits between the two:
+    no rule decides it, so a per-URL rule or a glob still wins, but it outranks what the row was
+    promoted with, so changing the collection's division reaches rows that are already curated.
 Because resolution is a pure function of (urls, patterns, curated), "unapply" is simply a
 recompute after the pattern is gone — the next newest pattern, then curated, then NULL.
 """
@@ -100,8 +103,11 @@ def resolve_all(
     base: dict[str, dict[str, Any]],
     scraped_titles: dict[str, str | None],
     collection_name: str,
+    division_default: str | None = None,
 ) -> dict[str, Resolved]:
-    """Resolve every URL. `base` = curated values per url (title/division/document_type)."""
+    """Resolve every URL. `base` = curated values per url (title/division/document_type).
+    `division_default` = the division the curator set for the whole collection (None = the AI
+    decides per page): used wherever no division rule matches, in place of the curated value."""
     compiled = compile_patterns(patterns, urls)
 
     # url -> the (first) rule that excludes / includes it; the include wins for the effect
@@ -144,7 +150,7 @@ def resolve_all(
             # exact vs glob: the newer of the two wins as well
             winner = e if e is not None and (g is None or (e.pattern.id or 0) >= (g.pattern.id or 0)) else g
             if winner is None:
-                value = b.get(t)
+                value = division_default if t is PatternType.DIVISION and division_default else b.get(t)
             else:
                 value = winner.pattern.value
                 if t is PatternType.TITLE:

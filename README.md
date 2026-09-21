@@ -39,7 +39,7 @@ Changing a dependency: edit `pyproject.toml`, `uv lock`, `make requirements`, co
 (CI fails if the exports are stale). Never edit `requirements*.txt` by hand.
 
 ## Using it
-1. **Dashboard** (`/`): add a collection (seed URL, name, division, max pages). Each row shows
+1. **Dashboard** (`/`): add a collection (seed URL, name, division — `General` until you assign one — max pages). Each row shows
    status, counts (dump URLs / delta URLs / curated URLs), last job, and **one button — the next step**.
 2. **Collection workbench** (`/collections/{id}`) — one page, a sticky header, the pipeline stepper always on top, and under steps Curating / Curated seven tabs (Overview · Dump URLs · Curate · Rules · Delta URLs · Curated URLs · Activity; Start curating lands on Dump URLs):
    - **Header**: name, seed link, status badge (icon + label), ⚠ *needs re-curation* / *needs re-indexing* / *prod not validated*, running-job
@@ -119,6 +119,32 @@ appear without a manual reload:
   the suggestions the filter names, on every page. With *any field* a row is listed when any of its
   title / division / type suggestions has that confidence; picking a field narrows it to that one.
   A listed row still shows all its suggestions, and its **✓ row** accepts all of them, filter or not.
+- **`General` is a placeholder, not a division** — it is what a collection carries until a curator
+  assigns one, and it is available everywhere a division can be set (the add-collection form, the
+  collection's division, a `division` rule, a per-URL cell). The single guard is at the other end:
+  **promote refuses a delta URL whose effective division is General**, exactly as it refuses a blank
+  one, so nothing unclassified reaches the curated set or the index. Such a row is marked *not
+  promotable* in its cell, counts under "without a division" (with its own sub-count), and is listed
+  by `?missing=true`. The model's answer schema is the one place General is absent: suggesting it
+  could only ever produce a row that cannot be promoted.
+- **A division the curator assigned is not a question for the model** — leave a collection on
+  General and the model answers a division per page, as above. Assign one (at creation, or later
+  under Overview › Details → `POST …/division`) and it becomes the value of every URL no division
+  rule decides — including rows already curated, which become modified deltas so the change reaches
+  the index on the next promote. Suggest metadata then asks for the title and document type only:
+  the division rides along as context (`collection_division`), the answer schema has no division
+  field, and no division suggestion reaches the review table — assigning one also drops the
+  suggestions an earlier run left, so nothing can be accepted over it. A `division` rule still
+  overrides it on the URLs it matches. Putting the collection **back to General** hands the division
+  to the model again: rows classified while it was assigned are marked `division_skipped`, so they
+  owe a division nobody was asked for and the next **Suggest metadata** picks up exactly those — not
+  a full re-classification of every field of every page.
+- **Accept all never overwrites a rule you wrote** — a field whose winning rule is yours (`sme`, or
+  an AI suggestion you edited before accepting) drops out of the accept-all buttons: accepting in
+  bulk would write a newer exact-URL rule straight over the rule you just typed. The buttons say how
+  many they hold back, the cells are marked *your rule · not in Accept all*, and the row's own **✓**
+  is never disabled — it still takes the AI's answer for a row you had ruled on. **✕ reject** decides
+  exactly what it says, held back or not.
 - **No blank metadata in the curated set** — Promote (all, or a selection) is refused with a 409
   while any delta URL it would write has no title, division or document type as an effective value
   (a pending suggestion is not a value until accepted; removals and excluded rows never count). The
@@ -278,6 +304,15 @@ crawler found; table `dump_urls`, `dump_count`, `?set=dump`), **Delta URLs** (wh
 change; `delta_urls`, `delta_count`, `?set=delta`) and **Curated URLs** (the approved set;
 `curated_urls`, `curated_count`, `?set=curated`). "Pending" is reserved for undecided suggestions.
 
+**Curated counts.** The Curated URLs list holds every approved row, included *and* excluded.
+`curated_count` is the rows that reach the index (`NOT excluded`) — the number on the tab, the
+dashboard column and the API — and `curated_rows` is the whole set, which is what the checks that
+ask "has anything been promoted" read. An exclude rule applies in place, so `curated_count` drops
+the moment the rule is added; coming back in is a delta URL, so it rises again on promote.
+`curated_changed_at` stamps every change to the set (a promote that moved something, or an exclude
+applied in place); a test index run older than it is behind the curated set, which is the second
+way the **needs re-indexing** chip goes up (the first is a run that failed or did not validate).
+
 Effective value per URL = the newest matching pattern (highest id — the curator's latest decision,
 whether a per-URL edit, an accepted AI suggestion or a glob typed by hand) → the curated value →
 NULL. `include` always beats `exclude`, however old. Title values are templates (`{title}` =
@@ -399,10 +434,11 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | Route | Purpose |
 |---|---|
 | `GET /events` | SSE stream: `collection`, `collection_created` |
-| `POST /api/collections` | create `{seed_url, name, division?, document_type?, max_pages?}` |
+| `POST /api/collections` | create `{seed_url, name, division?, document_type?, max_pages?}` (`division` defaults to `General` = not assigned, so the AI decides one per page) |
 | `GET /api/collections/{id}` | read |
 | `DELETE /api/collections/{id}` | delete the collection and all its data (admin only; 409 if busy) |
 | `POST …/index-key` | `{index_key, index_name?}` — index this collection as another `collection_key` |
+| `POST …/division` | `{division}` — the curator's division for the whole collection: applied to every URL no division rule decides, and never asked of the model; `General` puts it back to "not assigned" and the AI decides per page |
 | `POST …/status` | `{status, note?, force?}` — transition + data rules enforced |
 | `GET …/history`, `…/jobs`, `…/dump` | audit trail, job runs, ingested URLs |
 | `POST …/scrape` | run the crawl → job (202; 409 if busy) |
@@ -419,6 +455,7 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `POST …/suggest/patterns`, `POST …/suggest/metadata?all=` | LLM jobs (202; 409 if busy / nothing to do) |
 | `GET …/suggestions?state=`, `POST …/suggestions/{sid}/accept\|reject` | pattern suggestions |
 | `POST …/ai/accept\|reject` `{url, field}` | per-URL metadata suggestion |
+| `POST …/ai/bulk` `{decision, field?, url?, conf?}` | decide many at once; an accept without `url` passes over the fields your own rules decide |
 | `GET /health` | `{ok, db, sse_clients}` |
 
 ## Testing the workflow by hand

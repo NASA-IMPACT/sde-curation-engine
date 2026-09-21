@@ -2,6 +2,14 @@
    table under Curate › Metadata (partials/tab_curate.html). Import them `with context`: they read
    `cid` from the importing template. Every edit here is an exact-URL rule; a field that still
    carries an AI suggestion shows it with ✓ accept · ✎ edit-then-accept · ✕ dismiss. #}
+{# A field an SME rule already decides, with an AI suggestion still pending on it: the accept-all
+   buttons pass it over so a bulk accept cannot undo the rule, but ✓ on the row still accepts it. #}
+{% macro held_back(r, field) -%}
+  {%- if human_fields is defined and field in human_fields.get(r.url, []) %}
+  <span class="held" title="Your own rule sets this field. “Accept all” leaves it alone so a bulk accept cannot undo it — ✓ here still accepts the AI's answer for this row.">your rule · not in Accept all</span>
+  {%- endif -%}
+{%- endmacro %}
+
 {% macro edited_chip(r, why) -%}
   {%- if r.edited_by -%}
   <span class="edited e-{{ r.edited_by }}" title="{% for f, w in why.items() %}{{ f }}: {{ w }}&#10;{% endfor %}{% if not why %}set by rules that no longer apply to the current crawl{% endif %}">{{ {'ai': 'AI', 'sme': 'SME', 'mixed': 'AI + SME'}[r.edited_by] }}</span>
@@ -20,19 +28,29 @@
   <small class="muted">{{ r.scraped_title or '' }}</small><br>
   <button type="button" class="linkish" {% if not editable %}disabled{% endif %} title="{{ why.title or 'click to set a title (creates an exact-URL title rule)' }}"
           onclick='editTitle({{ cid|tojson }}, {{ r.url|tojson }}, {{ (r.title or r.scraped_title or "")|tojson }}, {{ 'true' if (r.title_ai is defined and r.title_ai) else 'false' }})'>{{ r.title or '—' }}</button>
-  {% if dup %} <a class="dup-title" href="/collections/{{ cid }}?tab={{ 'curated' if set is defined and set == 'curated' else 'delta' }}&dup=title" title="{{ dup.others }} other page{{ 's' if dup.others != 1 }} will be indexed as “{{ dup.title }}” with the same document type{{ ' (' ~ dup.document_type ~ ')' if dup.document_type }} too{{ ' (counting pending AI suggestions as accepted)' if r.title_ai is defined and (r.title_ai or r.document_type_ai) }}: search results cannot tell them apart.&#10;{% for u in dup.sample %}{{ u }}&#10;{% endfor %}{% if dup.others > dup.sample|length %}… and {{ dup.others - dup.sample|length }} more{% endif %}">⚠ same title + type ×{{ dup.others + 1 }}</a>{% endif %}
+  {# The badge is a filter link: on a URL table it filters that table, under Curate › Metadata it
+     filters the review table in place, so fixing a collision never leaves the step. #}
+  {% if dup %} <a class="dup-title" href="{{ dup_href if dup_href is defined else '/collections/' ~ cid ~ '?tab=' ~ ('curated' if set is defined and set == 'curated' else 'delta') ~ '&dup=title' }}" title="Show the pages that collide.&#10;{{ dup.others }} other page{{ 's' if dup.others != 1 }} will be indexed as “{{ dup.title }}” with the same document type{{ ' (' ~ dup.document_type ~ ')' if dup.document_type }} too{{ ' (counting pending AI suggestions as accepted)' if r.title_ai is defined and (r.title_ai or r.document_type_ai) }}: search results cannot tell them apart.&#10;{% for u in dup.sample %}{{ u }}&#10;{% endfor %}{% if dup.others > dup.sample|length %}… and {{ dup.others - dup.sample|length }} more{% endif %}">⚠ same title + type ×{{ dup.others + 1 }}</a>{% endif %}
   {% if r.title_ai is defined and r.title_ai %}<br><span class="ai conf-{{ r.title_ai_conf }}" title="AI suggestion · {{ r.title_ai_conf or '?' }} confidence · {{ r.ai_model or '' }}">AI: {{ r.title_ai }} <small>{{ r.title_ai_conf }}</small></span>
-    <span class="nowrap"><button class="mini ok" title="accept this title" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "title"}|tojson }}' hx-swap="none">✓</button><button class="mini" type="button" title="edit this title, then accept" {% if not editable %}disabled{% endif %} onclick='editTitle({{ cid|tojson }}, {{ r.url|tojson }}, {{ r.title_ai|tojson }}, true)'>✎</button><button class="mini" title="dismiss" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "title"}|tojson }}' hx-swap="none">✕</button></span>{% endif %}
-  {% if r.title_ai_before is defined and r.title_ai_before and r.title_ai %}<br><span class="dup-title was" title="This AI title was regenerated: before, the page shared “{{ r.title_ai_before }}” and its document type with other pages. ✓ above accepts the new title; ✎ here edits the original instead; ✕ above drops both.">⚠ was same title + type</span> <small class="was-title">“{{ r.title_ai_before }}”</small>
+    <span class="nowrap"><button class="mini ok" title="accept this title" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "title"}|tojson }}' hx-swap="none">✓</button><button class="mini" type="button" title="edit this title, then accept" {% if not editable %}disabled{% endif %} onclick='editTitle({{ cid|tojson }}, {{ r.url|tojson }}, {{ r.title_ai|tojson }}, true)'>✎</button><button class="mini" title="dismiss" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": "title"}|tojson }}' hx-swap="none">✕</button></span>{{ held_back(r, 'title') }}{% endif %}
+  {# Regenerated. Two ⚠ chips on one row would contradict each other, so the ⚠ is the one above
+     while the pages still share a title; here it says only where the title came from. #}
+  {% if r.title_ai_before is defined and r.title_ai_before and r.title_ai %}<br>
+    {%- if dup %}<span class="was-note" title="This AI title was already regenerated from “{{ r.title_ai_before }}” and the pages still share one. Regenerating asks the same question again — it starts from the original title, it does not add to this one — so a title by hand may be quicker. ✓ above accepts this one anyway; ✎ here edits the original instead.">↻ regenerated, still shared</span>
+    {%- else %}<span class="dup-title was" title="This AI title was regenerated: before, the page shared “{{ r.title_ai_before }}” and its document type with other pages. ✓ above accepts the new title; ✎ here edits the original instead; ✕ above drops both.">⚠ was same title + type</span>{% endif %} <small class="was-title">“{{ r.title_ai_before }}”</small>
     <button class="mini" type="button" title="edit the original title instead, then accept it" {% if not editable %}disabled{% endif %} onclick='editTitle({{ cid|tojson }}, {{ r.url|tojson }}, {{ r.title_ai_before|tojson }}, true)'>✎ original</button>{% endif %}
 {%- endmacro %}
 
 {% macro select_cell(r, why, editable, field, values) -%}
   {% set ai_val = r[field ~ '_ai'] if r[field ~ '_ai'] is defined else none %}
   {% set ai_conf = r[field ~ '_ai_conf'] if r[field ~ '_ai_conf'] is defined else none %}
-  <select class="cell" {% if not editable %}disabled{% endif %} title="{{ why[field] or ('set ' ~ field|replace('_', ' ') ~ ' for this URL (exact-URL rule)') }}"
+  {# A division of General means nobody has decided yet: it is offered like any other value, but
+     promote refuses the row until a real one is set, so the cell says so. #}
+  {% set unassigned = field == 'division' and r[field] == 'General' %}
+  <select class="cell {{ 'unassigned' if unassigned }}" {% if not editable %}disabled{% endif %} title="{{ why[field] or ('set ' ~ field|replace('_', ' ') ~ ' for this URL (exact-URL rule)') }}"
           onchange='editField({{ cid|tojson }}, {{ r.url|tojson }}, {{ field|tojson }}, this.value, {{ (ai_val is not none)|tojson }})'>
     <option value="">—</option>{% for v in values %}<option {% if r[field] == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+  {%- if unassigned %} <span class="held" title="General is a placeholder, not a division: promote refuses this row until one of the five is set">not promotable</span>{% endif %}
   {% if ai_val %}<br><span class="ai conf-{{ ai_conf }}" title="AI suggestion · {{ ai_conf or '?' }} confidence · {{ r.ai_model or '' }}">AI: {{ ai_val }} <small>{{ ai_conf }}</small></span>
-    <span class="nowrap"><button class="mini ok" title="accept" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✓</button><button class="mini" type="button" title="pick a different value, then it is accepted as edited" {% if not editable %}disabled{% endif %} onclick='pickAi(this, {{ ai_val|tojson }})'>✎</button><button class="mini" title="dismiss" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✕</button></span>{% endif %}
+    <span class="nowrap"><button class="mini ok" title="accept" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✓</button><button class="mini" type="button" title="pick a different value, then it is accepted as edited" {% if not editable %}disabled{% endif %} onclick='pickAi(this, {{ ai_val|tojson }})'>✎</button><button class="mini" title="dismiss" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✕</button></span>{{ held_back(r, field) }}{% endif %}
 {%- endmacro %}

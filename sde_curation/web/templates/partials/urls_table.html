@@ -138,8 +138,8 @@ q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is 
   {% else %}
     <tr><td colspan="9" class="empty">
       {% if set == 'dump' %}{% if c.dump_count %}No dump URLs match this filter.{% else %}No dump yet — <b>Scrape</b> from the header to fill this.{% endif %}
-      {% elif set == 'delta' %}{% if c.delta_count %}No delta URLs match this filter.{% elif not c.dump_count %}Scrape first, then <b>Start curating</b>.{% elif c.curated_count %}No delta URLs — the curated URLs are up to date with the dump. Edit a row under <b>Curated URLs</b> or add a rule in <a href="/collections/{{ cid }}?tab=curate">Curate</a> to change it.{% else %}Click <b>Start curating</b> in the header to compute what changed.{% endif %}
-      {% else %}{% if c.curated_count %}No curated URLs match this filter.{% else %}Nothing promoted yet — review <a href="/collections/{{ cid }}?tab=curate">Curate</a> and promote.{% endif %}{% endif %}
+      {% elif set == 'delta' %}{% if c.delta_count %}No delta URLs match this filter.{% elif not c.dump_count %}Scrape first, then <b>Start curating</b>.{% elif c.curated_rows %}No delta URLs — the curated URLs are up to date with the dump. Edit a row under <b>Curated URLs</b> or add a rule in <a href="/collections/{{ cid }}?tab=curate">Curate</a> to change it.{% else %}Click <b>Start curating</b> in the header to compute what changed.{% endif %}
+      {% else %}{% if c.curated_rows %}No curated URLs match this filter.{% else %}Nothing promoted yet — review <a href="/collections/{{ cid }}?tab=curate">Curate</a> and promote.{% endif %}{% endif %}
     </td></tr>
   {% endfor %}
   </tbody>

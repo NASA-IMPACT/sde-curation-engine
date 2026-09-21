@@ -384,14 +384,31 @@ th a.sort:hover { color: var(--fg); }
 th a.sort .arrow { font-size: .7rem; margin-left: .3rem; opacity: .35; }
 th.sorted a.sort { color: var(--fg); } th.sorted a.sort .arrow { opacity: 1; color: var(--accent); }
 
-/* a title another page of the collection will also be indexed under */
+/* a title another page of the collection will also be indexed under; as a link (a.dup-title) it
+   filters the table down to the colliding pages, so it has to read as one and not as a status chip */
 .dup-title { font-size: .72rem; font-weight: 600; white-space: nowrap; padding: .05rem .4rem; border-radius: 3px; background: #fef3c7; color: #78350f; text-decoration: none; }
-.dup-title:hover { text-decoration: underline; }
-@media (prefers-color-scheme: dark) { .dup-title { background: #78350f; color: #fef3c7; } }
+a.dup-title { cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
+a.dup-title:hover, a.dup-title:focus-visible { background: #fde68a; text-decoration-style: solid; }
+@media (prefers-color-scheme: dark) {
+  .dup-title { background: #78350f; color: #fef3c7; }
+  a.dup-title:hover, a.dup-title:focus-visible { background: #92400e; }
+}
 .dup-title.was { font-weight: 500; }
+/* regenerated but still sharing a title: the ⚠ belongs to the badge above, this one only says where
+   the title came from */
+.was-note { font-size: .72rem; color: var(--muted); white-space: nowrap; }
 .was-title { color: var(--muted); overflow-wrap: anywhere; }
+
+/* a row whose division is still the General placeholder: promote refuses it */
+select.cell.unassigned { border-color: #dc2626; }
+
+/* a field one of the curator's own rules decides: the accept-all buttons pass it over */
+.held { font-size: .7rem; font-weight: 600; white-space: nowrap; padding: .05rem .4rem; border-radius: 3px; background: #e2e8f0; color: #334155; margin-left: .25rem; }
+@media (prefers-color-scheme: dark) { .held { background: #334155; color: #e2e8f0; } }
 
 /* Curate › Metadata: filter the review table by confidence / field */
 .ai-filter { flex-wrap: wrap; gap: .4rem; margin: .4rem 0; }
 .ai-filter .conf { padding: .05rem .45rem; border-radius: 999px; border: 1px solid var(--line); text-decoration: none; }
 .ai-filter .conf.on { outline: 2px solid var(--accent); outline-offset: 1px; font-weight: 600; }
+.ai-filter .conf.dup { background: #fef3c7; color: #78350f; border-color: #fcd34d; }
+@media (prefers-color-scheme: dark) { .ai-filter .conf.dup { background: #78350f; color: #fef3c7; border-color: #92400e; } }

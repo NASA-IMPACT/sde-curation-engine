@@ -53,6 +53,41 @@ async def test_url_tables_sort_by_column(crawler_client):
     assert csv.splitlines()[1].startswith("https://ex.org/p9,")
 
 
+async def test_urls_are_ordered_base_first(client):
+    """A URL table is read like a site: the seed, then the pages under it, one level at a time.
+    Plain lexicographic order on the whole URL does not do that — it puts …/data/aerosol/access
+    above …/data/ozone because "a" < "o" — so the order is host, path depth, then alphabetical."""
+    from sde_curation.models import DumpUrl
+
+    cid = "ex.org"
+    await client.post("/api/collections",
+                      json={"seed_url": f"https://{cid}", "name": "Ex", "max_pages": 50, "division": "Earth Science"})
+    paths = ["/data/aerosol/access", "/", "/data/ozone", "/images/gallery/aurora", "/data",
+             "/missions", "/data/ozone/2024/monthly", "/images/gallery"]
+    await client.app.state.db.replace_dump(
+        cid, [DumpUrl(collection_id=cid, url=f"https://{cid}{p}", scraped_title=p.strip("/") or "Home")
+              for p in paths])
+    assert (await client.post(f"/api/collections/{cid}/recompute")).status_code == 200
+
+    def paths_in_order(page: str) -> list[str]:
+        return [p or "/" for p in re.findall(r'<td class="url"><a href="https://ex\.org([^"]*)"', page)]
+
+    base_first = ["/", "/data", "/missions", "/data/ozone", "/images/gallery",
+                  "/data/aerosol/access", "/images/gallery/aurora", "/data/ozone/2024/monthly"]
+    for tab in ("delta", "dump"):
+        assert paths_in_order((await client.get(f"/collections/{cid}?tab={tab}")).text) == base_first, tab
+        assert paths_in_order((await client.get(f"/collections/{cid}?tab={tab}&sort=url")).text) == base_first, tab
+    # descending mirrors it: the deepest page first
+    page = (await client.get(f"/collections/{cid}?tab=delta&sort=url&dir=desc")).text
+    assert paths_in_order(page) == list(reversed(base_first))
+    # the curated set and the CSV follow the same order
+    await classify(c=client, cid=cid)
+    assert (await client.post(f"/api/collections/{cid}/promote")).status_code == 200
+    assert paths_in_order((await client.get(f"/collections/{cid}?tab=curated")).text) == base_first
+    csv = (await client.get(f"/collections/{cid}/urls/curated?format=csv")).text
+    assert [line.split(",")[0].removeprefix(f"https://{cid}") or "/" for line in csv.splitlines()[1:]] == base_first
+
+
 def collections_in_order(page: str) -> list[str]:
     return re.findall(r'<td class="name"><a href="/collections/([^"]+)"', page)
 

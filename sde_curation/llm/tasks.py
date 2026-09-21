@@ -5,18 +5,21 @@ before anything is written. Suggestions never touch effective fields — only *_
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from ..config import Settings
 from ..engine.patterns import glob_to_regex
 from ..models import (
     Collection,
-    Division,
+    DistinctTitles,
     MetadataSuggestion,
+    MetadataSuggestionNoDivision,
     PatternSuggestion,
     PatternSuggestions,
-    TitleSuggestion,
+    division_assigned,
 )
 from .base import Completion, LLMError, LLMProvider
 
@@ -56,9 +59,10 @@ DIVISION_DEFINITIONS = """- Astrophysics: the universe beyond the solar system �
   space weather, magnetospheres, the ionosphere and aurora (e.g. SDO, Parker Solar Probe).
 - Planetary Science: planets, moons, asteroids, comets and meteorites of the solar system,
   planetary defense and astrobiology (e.g. Mars rovers, Cassini, the Planetary Data System).
-- General: content that spans several divisions or belongs to none (agency-wide science policy,
-  cross-division education). Not a fallback for a page whose division is unclear: give the most
-  likely division with low confidence instead."""
+There is no "general", "other" or "unclear" division: every page belongs to one of the five. A page
+that spans several — agency-wide science policy, cross-division education — takes the division it
+serves most, and a page whose division you cannot tell takes the most likely one with low
+confidence, which a reviewer checks."""
 
 PATTERN_SYSTEM = f"""You help curate web crawls for NASA's Science Discovery Engine (SDE), a search engine over
 NASA science content used by scientists, educators and the public. You are given one batch of
@@ -121,7 +125,7 @@ TITLE_RULES = """- Descriptive and self-contained, typically 4–12 words: the p
   page writes them.
 - Do not copy the site-wide scraped title; no slogans, "Welcome to" or "Home Page"."""
 
-METADATA_SYSTEM = f"""You classify one crawled web page at a time for NASA's Science Discovery Engine (SDE), a
+_METADATA_INTRO = f"""You classify one crawled web page at a time for NASA's Science Discovery Engine (SDE), a
 search engine over NASA science content. You receive the collection (the website the page was
 crawled from), the page URL, its scraped title and its full text (possibly long). The scraped
 title is often the same site-wide string on every page, and the text usually starts with the
@@ -134,16 +138,26 @@ title — a free-form title for this page as it should read in a search result, 
 who has not seen the site.
 {TITLE_RULES}
 - Never empty: a page with little content of its own still gets the best title its URL, scraped
-  title and text support, with low confidence.
+  title and text support, with low confidence."""
 
+_METADATA_DIVISION = f"""
 division — the NASA Science Mission Directorate division, one of:
 {DIVISION_DEFINITIONS}
 Judge from the page's subject read in the context of the whole collection: the pages of one site
 nearly always share a division, so a help page, data-format guide or proposer page on a planetary
-data archive is Planetary Science, not General. When `collection_division` is given, a subject-
-matter expert set it for the whole collection: use it unless the page is clearly about another
-division.
+data archive is Planetary Science like the rest of the archive.
+"""
 
+# What replaces the division section when the curator gave the collection a division: it is theirs,
+# it is already on every page, and no division is asked for (the schema has no division field).
+_METADATA_DIVISION_FIXED = """
+division — not asked for. A subject-matter expert set `collection_division` for the whole
+collection and it is already applied to this page; do not classify or comment on it. Read it as
+context for the two fields below: the pages of one site nearly always belong to that division, so
+judge the page as part of it.
+"""
+
+_METADATA_TYPE_AND_CONFIDENCE = f"""
 document_type — exactly one of the five SDE document types, for every page; never null, because
 the SDE cannot index a page without one:
 {DOCUMENT_TYPE_DEFINITIONS}
@@ -168,50 +182,73 @@ close types:
 When `collection_document_type` is given, an expert set it as the collection's usual type: use it
 when the page fits it, but a page that clearly fits another type gets that type.
 
-Confidence, one per field:
+Confidence, one per field you answer:
 - high: stated in the page text or title, or follows directly from the rules above (a dataset
-  landing page is Data; a page of a site devoted to one division has that division).
+  landing page is Data; a user guide is Documentation).
 - medium: a reasonable inference where another answer is also defensible.
 - low: a guess. No field is ever null or empty: when unsure, give the most likely value with low
   confidence — a reviewer checks every low-confidence answer.
 Never invent facts that are not in the input."""
 
+
+def metadata_system(ask_division: bool = True) -> str:
+    """The Suggest metadata prompt. `ask_division` is False when the curator gave the collection a
+    division: the division section becomes "already decided, here for context" and the answer
+    schema drops the field, so the model neither spends tokens on it nor contradicts the SME."""
+    middle = _METADATA_DIVISION if ask_division else _METADATA_DIVISION_FIXED
+    return _METADATA_INTRO + "\n" + middle + _METADATA_TYPE_AND_CONFIDENCE
+
+
+METADATA_SYSTEM = metadata_system()
+
 TITLES_SYSTEM = f"""You write search-result titles for NASA's Science Discovery Engine (SDE), a search engine over
 NASA science content. Several pages of one collection (the website they were crawled from) ended
 up with the same title and the same document type, so a list of search results cannot tell them
-apart. You receive ONE of those pages: the collection, the page URL, its scraped title, the title
-and document type it shares (the type stays as it is: you only write the title), the other pages
-that share it (their URLs; `keeps_title` marks a page whose title is settled and will not change,
-and `pages_sharing_it` says how many there are in all when only some are listed) and the page's
-full text. The text usually starts with the site's navigation menu, alerts and login links: skip
-that chrome and read the page's own content.
+apart. You receive the WHOLE GROUP in one call and rewrite it in one go: the collection, the title
+and document type they share (the type stays as it is: you only write titles), and for every page
+you must retitle its URL, its scraped title and its FULL text. The text usually starts with the
+site's navigation menu, alerts and login links: skip that chrome and read the page's own content.
 
-title — a new title for this page that is still true to the page and names what sets it apart
-from the other pages: the specific volume, dataset or data product, target, instrument, mission
-phase, version, date or date range, part or region that the page itself states, or that its URL
-shows where the other URLs differ. The other pages get their own calls: say what this page is, do
-not describe or compare with them.
+Also given:
+- `settled_titles` — pages of the same group whose titles will NOT change. Your titles must differ
+  from these too.
+- `url_differs_at` — for each page, the parts of its URL that the other pages of the group do not
+  have, worked out for you. When the text is thin this is usually what tells the pages apart.
+- `previous_titles` — titles an earlier pass already gave these pages and that still did not tell
+  them apart. Never return one of these, and never one of these with something appended.
+
+Return ONE title for EVERY page you were asked about, and make them all different from each other
+and from `settled_titles`. Compare the pages with each other — that is why they arrive together —
+and name the thing that actually separates them: the specific volume, dataset or data product,
+target, instrument, mission phase, version, date or date range, part or region the page states, or
+that `url_differs_at` shows.
 {TITLE_RULES}
 - Tell pages apart with words a reader understands. No bare IDs, URL fragments, "Page 2" or
   "(copy)" unless that is truly all that differs; a volume or part number the page states is fine
   ("Cassini ISS Calibrated Images, Volume 12").
-- If neither the page nor its URL gives anything that sets it apart, return the shared title
-  unchanged with low confidence: a reviewer decides.
+- There is no "leave this one as it was". Two pages a search result cannot tell apart is never an
+  acceptable answer, so every page gets a title of its own even when you have to fall back on what
+  its URL shows. Say so with low confidence rather than repeating a title.
+- When two pages really are the same page served at two URLs, still give each a distinct title and
+  list the URLs together in `same_page_groups`: excluding one of them is the curator's fix, not
+  yours.
 
-Confidence:
+Confidence, per page:
 - high: what sets the page apart is stated in its text or title.
-- medium: read from the URL, or a reasonable inference from the text.
-- low: a guess, or the shared title returned unchanged.
+- medium: a reasonable inference from the text.
+- low: the page is told apart only by what its URL shows.
 Never invent facts that are not in the input."""
 
-# Other pages sharing the title sent with each call: the URL-order neighbours of the page, where
-# the part of the URL that differs is easiest to see.
+# Settled titles listed as constraints in one call. A group is rewritten whole, so these are only
+# the pages of it whose titles will not change (and, for a group too big for one call, the titles
+# its earlier calls already handed out); the URL-order neighbours are the ones worth naming, because
+# that is where the URLs differ by the least.
 TITLE_SIBLINGS = 30
 
 
 def title_siblings(members: list[dict[str, Any]], url: str, k: int = TITLE_SIBLINGS) -> list[dict[str, Any]]:
     """Up to `k` other members of a duplicate-title group (sorted by URL), nearest to `url` first
-    in URL order, returned in URL order as {url, keeps_title}."""
+    in URL order, returned in URL order as {url, title, keeps_title}."""
     others = [m for m in members if m["url"] != url]
     if len(others) <= k:
         picked = others
@@ -219,30 +256,127 @@ def title_siblings(members: list[dict[str, Any]], url: str, k: int = TITLE_SIBLI
         at = next((i for i, m in enumerate(others) if m["url"] > url), len(others))
         lo = max(0, min(at - k // 2, len(others) - k))
         picked = others[lo:lo + k]
-    return [{"url": m["url"], "keeps_title": not m.get("rewrite", False)} for m in picked]
+    return [{"url": m["url"], "title": m.get("title"), "keeps_title": not m.get("rewrite", False)}
+            for m in picked]
 
 
-async def suggest_distinct_title(
-    llm: LLMProvider, doc: dict[str, Any], *, shared_title: str, siblings: list[dict[str, Any]],
-    sharing: int, document_type: str | None = None, collection: Collection | None = None,
+def norm_title(s: str) -> str:
+    """Titles compared the way the index would see them: case and runs of whitespace do not count."""
+    return " ".join((s or "").split()).lower()
+
+
+def _url_tokens(url: str) -> list[str]:
+    """A URL as the words that could name the page: its path segments, then its query values."""
+    parts = urlsplit(url)
+    toks = [unquote(s) for s in parts.path.split("/") if s]
+    toks += [f"{k}={v}" for k, v in parse_qsl(parts.query)]
+    return toks or [parts.netloc]
+
+
+def url_distinctions(urls: Iterable[str]) -> dict[str, list[str]]:
+    """What each URL has that the others in the group do not. Path depth differs from page to page,
+    so this compares the URLs as sets of tokens rather than position by position: a token every URL
+    of the group carries says nothing, the rest are what tells that page apart. Two URLs of one
+    collection are never identical, so no URL comes back with nothing to say (the last segment is
+    the fallback when the token sets themselves match, e.g. the same segments in another order)."""
+    toks = {u: _url_tokens(u) for u in urls}
+    if not toks:
+        return {}
+    common = set.intersection(*(set(t) for t in toks.values()))
+    return {u: [t for t in ts if t not in common] or ts[-1:] for u, ts in toks.items()}
+
+
+def humanise(tokens: Iterable[str]) -> str:
+    """URL tokens as something readable in a search result: "ozone-2024_v2.html" -> "Ozone 2024 V2"."""
+    words: list[str] = []
+    for t in tokens:
+        t = re.sub(r"\.(html?|php|aspx?|jsp|pdf)$", "", t, flags=re.IGNORECASE)
+        words += [w for w in re.split(r"[-_+.\s]+", t) if w]
+    out = " ".join(w if w.isupper() else w.capitalize() for w in words)
+    return out[:80].strip()
+
+
+# Recorded as the "model" of a title no model wrote: the pass resolved it from the URLs itself.
+URL_DISAMBIGUATED = "rule:url-distinction"
+
+
+def disambiguate(shared_title: str, urls: Iterable[str], *, taken: Iterable[str] = (),
+                 is_taken: Callable[[str], bool] | None = None) -> dict[str, str]:
+    """A distinct title for every URL without asking the model: the title they share plus what that
+    URL has and the others do not. The guarantee behind the whole pass — URLs are unique within a
+    collection, so this always resolves — and the floor under the model's answers, never the first
+    choice: it is only as good as the URL is descriptive.
+
+    `taken` are titles to stay off; `is_taken` is the same question asked of the whole collection,
+    because a title that is new to this group can still be one another page already carries."""
+    distinctions = url_distinctions(urls)
+    used = {norm_title(t) for t in taken}
+
+    def spoken_for(title: str) -> bool:
+        return norm_title(title) in used or bool(is_taken and is_taken(title))
+
+    out: dict[str, str] = {}
+    for url in sorted(distinctions):
+        label = humanise(distinctions[url])
+        title = f"{shared_title} — {label}" if label else shared_title
+        n = 2
+        while spoken_for(title):  # nothing readable left: number them rather than collide
+            title = f"{shared_title} — {label} ({n})" if label else f"{shared_title} ({n})"
+            n += 1
+        used.add(norm_title(title))
+        out[url] = title
+    return out
+
+
+async def suggest_distinct_titles(
+    llm: LLMProvider, docs: list[dict[str, Any]], *, shared_title: str, sharing: int,
+    settled: list[dict[str, Any]] | None = None, previous: Iterable[str] = (),
+    document_type: str | None = None, collection: Collection | None = None,
 ) -> dict[str, Any]:
-    """One call for one page {url, title, text} whose title and document type `sharing - 1` other
-    pages also have. Only a title is asked for.
-    Returns {url, title, title_conf, model} plus the token usage; `title` is None when the model
-    kept the shared title (or gave none)."""
-    text = doc.get("text") or ""
+    """ONE call for a whole group of pages {url, title, text} that would all be indexed under
+    `shared_title` + `document_type`: the model sees them together, so it can tell them apart from
+    each other instead of guessing page by page and colliding all over again. Every page's FULL text
+    goes in; `settled` are the group's pages whose titles will not change (their titles only, as
+    constraints) and `previous` are answers an earlier pass already gave and that did not work.
+
+    Returns {"titles": {url: {"title", "title_conf"}}, "same_page_groups", "model", tokens…}. Only
+    titles that are non-empty and differ from the shared title, the settled ones, `previous` and
+    each other come back — the caller disambiguates the rest from their URLs."""
+    settled = settled or []
     header: dict[str, Any] = {}
     if collection is not None:
         header["collection"] = collection.name
         header["collection_seed"] = collection.seed_url
-    header |= {"url": doc["url"], "scraped_title": doc.get("title"), "shared_title": shared_title,
-               "document_type": document_type, "pages_sharing_it": sharing, "other_pages": siblings, "text_chars": len(text)}
-    user = "Page:\n" + json.dumps(header, ensure_ascii=False) + "\n\nText:\n" + text
-    done = await llm.complete(system=TITLES_SYSTEM, user=user, schema=TitleSuggestion)
-    title = (done.parsed.title or "").strip()
-    same = " ".join(title.split()).lower() == " ".join(shared_title.split()).lower()
+    header |= {
+        "shared_title": shared_title, "document_type": document_type, "pages_sharing_it": sharing,
+        "pages_to_retitle": len(docs),
+        "url_differs_at": url_distinctions([d["url"] for d in docs] + [s["url"] for s in settled]),
+        "settled_titles": [{"url": s["url"], "title": s.get("title")} for s in settled],
+    }
+    if previous := [p for p in previous if p]:
+        header["previous_titles"] = sorted(set(previous))
+    pages = "\n\n".join(
+        f"Page {i} of {len(docs)}:\n"
+        + json.dumps({"url": d["url"], "scraped_title": d.get("title"),
+                      "text_chars": len(d.get("text") or "")}, ensure_ascii=False)
+        + "\nText:\n" + (d.get("text") or "")
+        for i, d in enumerate(docs, 1)
+    )
+    user = "Group:\n" + json.dumps(header, ensure_ascii=False) + "\n\n" + pages
+    done = await llm.complete(system=TITLES_SYSTEM, user=user, schema=DistinctTitles)
+
+    asked = {d["url"] for d in docs}
+    blocked = {norm_title(shared_title), *(norm_title(s.get("title") or "") for s in settled),
+               *(norm_title(p) for p in header.get("previous_titles", []))} - {""}
+    titles: dict[str, dict[str, Any]] = {}
+    for item in done.parsed.items:
+        title = (item.title or "").strip()
+        if item.url not in asked or item.url in titles or not title or norm_title(title) in blocked:
+            continue  # unasked, answered twice, empty, or a title that is already spoken for
+        blocked.add(norm_title(title))
+        titles[item.url] = {"title": title, "title_conf": item.title_confidence}
     return {
-        "url": doc["url"], "title": None if same or not title else title, "title_conf": done.parsed.title_confidence,
+        "titles": titles, "same_page_groups": [g for g in done.parsed.same_page_groups if len(g) > 1],
         "model": done.model,
         "tokens_in": done.tokens_in, "tokens_out": done.tokens_out, "tokens_cached": done.tokens_cached,
     }
@@ -288,26 +422,37 @@ async def suggest_metadata_one(
 ) -> dict[str, Any]:
     """One call for one document {url, title, text, content_hash}. Returns the row for
     `Database.set_delta_ai` plus the token usage. The collection's name and SME-set defaults go
-    with the page so answers agree across the collection."""
+    with the page so answers agree across the collection.
+
+    A collection whose curator set a division is asked for the title and document type only: the
+    division goes along as context (`collection_division`), the answer has no division field, and
+    the returned row carries none — so no division suggestion ever turns up for review."""
     text = doc.get("text") or ""  # the whole page, never cut: an accurate title needs all of it
+    # the curator's division, or None while the collection is still on the General placeholder
+    division = collection.division if collection is not None and division_assigned(collection.division) else None
     header: dict[str, Any] = {}
     if collection is not None:
         header["collection"] = collection.name
         header["collection_seed"] = collection.seed_url
-        if collection.division != Division.GENERAL:  # General is the untouched default
-            header["collection_division"] = collection.division.value
+        if division is not None:  # the curator's, for the whole collection: context, not a question
+            header["collection_division"] = division.value
         if collection.document_type is not None:
             header["collection_document_type"] = collection.document_type.value
     header |= {"url": doc["url"], "scraped_title": doc.get("title"), "text_chars": len(text)}
     user = "Document:\n" + json.dumps(header, ensure_ascii=False) + "\n\nText:\n" + text
-    done = await llm.complete(system=METADATA_SYSTEM, user=user, schema=MetadataSuggestion)
+    schema = MetadataSuggestion if division is None else MetadataSuggestionNoDivision
+    done = await llm.complete(system=metadata_system(division is None), user=user, schema=schema)
     r = done.parsed
     if not r.title.strip():  # recorded on the row as a failure; the next Suggest metadata asks again
         raise LLMError("the model returned an empty title")
     return {
         "url": doc["url"],
         "title": (r.title or "").strip() or None, "title_conf": r.title_confidence,
-        "division": r.division, "division_conf": r.division_confidence,
+        # absent when the curator set the division: set_delta_ai then writes NULL, clearing any
+        # division suggestion an earlier run (before the division was set) had left on the row, and
+        # records `division_skipped` so the row can be asked for a division alone if it is cleared
+        **({"division": r.division, "division_conf": r.division_confidence} if division is None
+           else {"division_skipped": True}),
         "document_type": r.document_type, "document_type_conf": r.document_type_confidence,
         "model": done.model, "content_hash": doc.get("content_hash"),
         "tokens_in": done.tokens_in, "tokens_out": done.tokens_out, "tokens_cached": done.tokens_cached,
