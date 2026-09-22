@@ -46,11 +46,17 @@
   <div>
     {% if c.status in ('backlog',) or c.dump_count == 0 %}<b>Nothing to curate yet.</b> Scrape the site first (Overview › step 1) to get the dump URLs.
     {% elif c.status == 'scraped' %}<b>Dump ready.</b> Start curating to compute the delta URLs (dump vs. curated).
-    {% else %}<b>No delta URLs.</b> The curated URLs ({{ c.curated_rows }}, of which {{ c.curated_count }} reach the index) are up to date with the dump. Add a rule below, edit a curated URL, or re-scrape to review again.{% endif %}
+    {% else %}<b>No delta URLs.</b> The curated URLs ({{ c.curated_rows }}, of which {{ c.curated_count }} reach the index) are up to date with the dump. Add a rule below, edit a curated URL, or re-scrape to review again — or send the whole collection back through curation, AI passes included.{% endif %}
   </div>
   <div class="inline">
     {% if c.status == 'scraped' and c.dump_count %}<button class="primary" hx-post="/api/collections/{{ cid }}/recompute?then={{ ('/collections/' ~ cid ~ '?tab=dump')|urlencode }}" hx-swap="none" {% if running %}disabled{% endif %}>Start curating</button>
-    {% elif c.status not in ('backlog', 'scraped') %}<button class="secondary" hx-post="/api/collections/{{ cid }}/recompute" hx-swap="none" {% if running %}disabled{% endif %} title="Recompute the delta URLs against the latest dump">Review / re-curate</button>{% endif %}
+    {% elif c.status not in ('backlog', 'scraped') %}
+    <button class="secondary" hx-post="/api/collections/{{ cid }}/recompute" hx-swap="none" {% if running %}disabled{% endif %} title="Re-run the diff of the dump URLs against the curated URLs: it queues what changed, so with an unchanged dump it finds nothing">Check for changes</button>
+    {# The way back into curation when nothing differs: every included page is queued for review
+       again, so the AI passes and the review tables have rows to work on. #}
+    <button class="primary" hx-post="/api/collections/{{ cid }}/recompute?all=true" hx-swap="none" {% if running or not c.dump_count %}disabled{% endif %}
+            hx-confirm="Curate this collection again from the start? All {{ c.dump_count }} dump URLs the rules include go back into the review queue (exclusions → metadata → promote). The curated URLs and the index stay exactly as they are until you promote."
+            title="Queue every included page for review again — Suggest exclusions, Suggest metadata and the review tables all get the whole collection back">Re-curate everything</button>{% endif %}
   </div>
 </div></section>
 {% endif %}
@@ -287,8 +293,8 @@
   {% if incomplete.urls and curating %}<div class="banner err">⛔ {{ incomplete.urls }} delta URL{{ 's' if incomplete.urls != 1 }} cannot be promoted yet:
     {% for f, label in [('title', 'title'), ('division', 'division'), ('document_type', 'document type')] if incomplete[f] %}{{ ' · ' if not loop.first }}{{ incomplete[f] }} without a {{ label }}{% endfor %}{% if incomplete.duplicate %}{{ ' · ' if incomplete.title or incomplete.division or incomplete.document_type }}{{ incomplete.duplicate }} sharing a title + document type with another page{% endif %}.
     {% if incomplete.general %}<b>{{ incomplete.general }}</b> of them are still on <b>General</b>, which is a placeholder, not a division — give {{ 'it' if incomplete.general == 1 else 'them' }} one of the five.{% endif %}
-    Nothing reaches the curated URLs without a division, a document type, or a title: accept the AI suggestions in step 2 or set the values by hand. (A page with no title rule is indexed under its scraped title — only a page the crawl found untitled counts as missing one.)
-    {% if incomplete.duplicate %}And nothing reaches it under a title a search cannot tell from another page's: <a href="#metadata">Regenerate duplicate titles in step 2</a> gives {{ 'it' if incomplete.duplicate == 1 else 'them' }} a title of {{ 'its' if incomplete.duplicate == 1 else 'their' }} own, or <a href="/collections/{{ cid }}?tab=delta&dup=title">set one by hand</a>. An AI title still undecided does not count — promoting discards it.{% endif %}
+    {% if incomplete.title or incomplete.division or incomplete.document_type %}Nothing reaches the curated URLs without a division, a document type, or a title: accept the AI suggestions in step 2 or set the values by hand. (A page with no title rule is indexed under its scraped title — only a page the crawl found untitled counts as missing one.){% endif %}
+    {% if incomplete.duplicate %}{{ 'And nothing reaches it' if incomplete.title or incomplete.division or incomplete.document_type else 'Nothing reaches the curated URLs' }} under a title a search cannot tell from another page's: <a href="#metadata">Regenerate duplicate titles in step 2</a> gives {{ 'it' if incomplete.duplicate == 1 else 'them' }} a title of {{ 'its' if incomplete.duplicate == 1 else 'their' }} own, or <a href="/collections/{{ cid }}?tab=delta&dup=title">set one by hand</a>. An AI title still undecided does not count — promoting discards it.{% endif %}
     <a href="/collections/{{ cid }}?tab=delta&missing=true">Show them ↗</a></div>{% endif %}
   {% if ai_pending_total and curating %}<div class="banner info">⚠ {{ ai_pending_total }} AI suggestion{{ 's are' if ai_pending_total != 1 else ' is' }} still undecided — promoting discards them. Accept or reject them in step 2 first.</div>{% endif %}
   <div class="inline">

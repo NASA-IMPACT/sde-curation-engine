@@ -7,7 +7,7 @@
 {% macro btn(label, url, hint, primary=False, disabled=False, confirm=None, then=None, method='post') -%}
   <button class="{{ 'primary' if primary else 'secondary' }}" title="{{ hint }}"
           {% if disabled or running %}disabled{% endif %}
-          hx-{{ method }}="{{ url }}{% if then %}?then={{ then|urlencode }}{% endif %}" hx-swap="none"
+          hx-{{ method }}="{{ url }}{% if then %}{{ '&' if '?' in url else '?' }}then={{ then|urlencode }}{% endif %}" hx-swap="none"
           {% if confirm %}hx-confirm="{{ confirm }}"{% endif %}>{{ label }}</button>
 {%- endmacro %}
 <div class="step-head">
@@ -83,7 +83,11 @@
              'Export ' ~ stats.exportable ~ ' curated URLs to S3 and run the WEB_COSMOS indexer against the test index',
              primary=True, disabled=(not stats.exportable or c.delta_count > 0),
              confirm='Export ' ~ stats.exportable ~ ' URLs and index them into the TEST index?') }}
-      {{ btn('Review / re-curate', '/api/collections/' ~ cid ~ '/recompute', 'Recompute the delta URLs against the current dump and open the curation workspace (status changes only if something differs)', then='/collections/' ~ cid ~ '?tab=curate') }}
+      {{ btn('Check for changes', '/api/collections/' ~ cid ~ '/recompute', 'Recompute the delta URLs against the current dump and open the curation workspace (it queues what changed, so an unchanged dump finds nothing)', then='/collections/' ~ cid ~ '?tab=curate') }}
+      {{ btn('Re-curate everything', '/api/collections/' ~ cid ~ '/recompute?all=true',
+             'Queue every included page for review again, changed or not — Suggest exclusions, Suggest metadata and the review tables all get the whole collection back',
+             disabled=(c.dump_count == 0), then='/collections/' ~ cid ~ '?tab=curate',
+             confirm='Curate this collection again from the start? All ' ~ c.dump_count ~ ' dump URLs the rules include go back into the review queue (exclusions → metadata → promote). The curated URLs and the index stay exactly as they are until you promote.') }}
       {% if c.delta_count %}<span class="muted small">{{ c.delta_count }} delta URLs — promote before indexing.</span>{% endif %}
     {% endif %}
   </div>

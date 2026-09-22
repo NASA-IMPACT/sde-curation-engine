@@ -1280,7 +1280,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             n and c.status in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE)
         ):
             c = await db(request).set_status(
-                c.collection_id, Status.CURATING, note=f"delta URLs recomputed: {n}", force=True,
+                c.collection_id, Status.CURATING, note=note or f"delta URLs recomputed: {n}", force=True,
                 actor=actor(request),
             )
         elif getattr(ds, "curated_excluded", None) and c.status in (Status.CONFIG_GENERATED, Status.LIVE):
@@ -1302,16 +1302,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return c
 
     @app.post("/api/collections/{collection_id}/recompute")
-    async def api_recompute(request: Request, collection_id: str):
-        """Calculate deltas (dump vs curated) and apply all patterns. Idempotent."""
+    async def api_recompute(request: Request, collection_id: str, all: bool = False):
+        """Calculate deltas (dump vs curated) and apply all patterns. Idempotent.
+
+        `?all=true` is the curator asking to curate the collection over again: every page the rules
+        include is queued for review, changed or not, and the stages start again at exclusions —
+        so the AI passes, the review tables and promote all have the whole collection to work on.
+        Nothing is written to the curated URLs (and nothing reaches the index) until it is promoted,
+        so a re-curate can be abandoned by promoting the queue back as it stands."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         if c.dump_count == 0:
             raise HTTPException(409, "no dump ingested yet — scrape first")
+
         async def work() -> dict:
-            ds = await curation(request).recompute(c)
-            await _after_curation_change(request, c, ds)
-            await audit(request, "recompute", collection_id, f"{len(ds.deltas)} delta URLs")
+            ds = await curation(request).recompute(c, review_all=all)
+            n = len(ds.deltas)
+            await _after_curation_change(
+                request, c, ds, note=f"re-curating: {n} delta URLs queued for review" if all else None)
+            if all and n:  # start the walk-through again, whatever stage the last one ended on
+                await _set_stage(request, collection_id, CurationStage.EXCLUSIONS)
+            await audit(request, "recompute.all" if all else "recompute", collection_id, f"{n} delta URLs")
             return ds.counts
 
         return await run_or_job(request, c, JobKind.RECOMPUTE, f"comparing {c.dump_count:,} dump URLs with the curated URLs", work)

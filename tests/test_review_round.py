@@ -260,6 +260,54 @@ async def test_validation_failure_needs_reindexing_not_recuration(index_client):
     assert ">⚠ needs re-indexing<" in (await c.get("/collections/half.org/header")).text
 
 
+# ── 6b. curating a promoted collection all over again ──────────────────
+
+
+async def test_re_curate_puts_the_whole_collection_back_in_the_queue(crawler_client):
+    """Once everything is promoted there is nothing to review and the curation steps sit idle:
+    a plain recompute honestly finds nothing. `?all=true` is the curator's way back in — every
+    included page is queued again, changed or not, the stages restart at exclusions, and the AI
+    passes have the whole collection to work on. Nothing moves in the curated set until a promote."""
+    c = crawler_client
+    db = c.app.state.db
+    await setup(c)
+    await classify(c)
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
+    k = await coll(c)
+    assert (k["status"], k["curated_count"], k["delta_count"]) == ("curated", 8, 0)
+    titles = {r["url"]: r["title"] for r in (await c.get("/api/collections/ex.org/curated?limit=100")).json()["items"]}
+
+    # the honest no-op: nothing differs from the dump, so nothing is queued and the status holds
+    assert (await c.post("/api/collections/ex.org/recompute")).json()["new"] == 0
+    assert (await coll(c))["status"] == "curated" and (await coll(c))["delta_count"] == 0
+    page = (await c.get("/collections/ex.org?tab=curate")).text
+    assert "Check for changes" in page and "Re-curate everything" in page
+    # the step-4 panel offers the same pair, and its ?all=true keeps the ?then= redirect intact
+    panel = (await c.get("/collections/ex.org?tab=overview")).text
+    assert 'hx-post="/api/collections/ex.org/recompute?all=true&amp;then=' in panel
+
+    # re-curate: the whole collection is back under review, at the first stage
+    r = await c.post("/api/collections/ex.org/recompute?all=true")
+    assert r.status_code == 200 and r.json()["modified"] == 8 and r.json()["new"] == 0
+    k = await coll(c)
+    assert (k["status"], k["delta_count"], k["curation_stage"]) == ("curating", 8, "exclusions")
+    assert k["curated_count"] == 8, "the curated URLs are untouched until the queue is promoted"
+    assert "re-curating: 8 delta URLs queued for review" in str(await db.status_history("ex.org"))
+    # the rows carry the values they were promoted with, and the AI passes see all of them again
+    rows = (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]
+    assert {d["url"]: d["title"] for d in rows} == titles
+    assert await db.count_deltas_for_llm("ex.org") == 8
+    await c.post("/api/collections/ex.org/suggest/metadata")
+    assert (await wait_job(c, "ex.org"))["progress"]["classified"] == 8
+
+    # promoting the queue back as it stands is the way out: the curated set is where it was
+    await c.post("/api/collections/ex.org/ai/bulk", json={"decision": "reject"})
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
+    k = await coll(c)
+    assert (k["status"], k["curated_count"], k["delta_count"]) == ("curated", 8, 0)
+    assert {r["url"]: r["title"] for r in (await c.get("/api/collections/ex.org/curated?limit=100")).json()["items"]} == titles
+
+
 # ── 7. rules never cross collections ───────────────────────────────────
 
 

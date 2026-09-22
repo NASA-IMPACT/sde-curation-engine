@@ -53,14 +53,15 @@ class CurationService:
         self.db = db
         self._lock_for = lock_for or (lambda cid: asyncio.Lock())
 
-    async def recompute(self, c: Collection) -> DeltaSet:
+    async def recompute(self, c: Collection, *, review_all: bool = False) -> DeltaSet:
         """diff + apply patterns in one idempotent pass; persists deltas and pattern effects.
         Serialised per collection so two recomputes (or a recompute and a promote) never
-        interleave their delete+insert on delta_urls."""
+        interleave their delete+insert on delta_urls.
+        `review_all`: queue every included page for review again, changed or not (see engine.diff)."""
         async with self._lock_for(c.collection_id):
-            return await self._recompute(c)
+            return await self._recompute(c, review_all=review_all)
 
-    async def _recompute(self, c: Collection) -> DeltaSet:
+    async def _recompute(self, c: Collection, *, review_all: bool = False) -> DeltaSet:
         dump, curated, patterns, previous, failures = (
             await self.db.load_dump(c.collection_id),
             await self.db.load_curated(c.collection_id),
@@ -80,6 +81,7 @@ class CurationService:
             failures=failures,
             capped=c.last_crawl_capped,
             division=c.division if division_assigned(c.division) else None,
+            review_all=review_all,
         )
         await self.db.replace_deltas(c.collection_id, ds.deltas, ds.effects)
         if ds.curated_edited_by:
