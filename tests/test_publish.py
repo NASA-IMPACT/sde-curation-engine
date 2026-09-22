@@ -239,17 +239,42 @@ async def test_a_failed_delete_stops_the_run_before_anything_is_written(aws):
     assert "index" not in ops(prod)
 
 
-async def test_a_collection_that_never_reads_empty_stops_before_writing(aws):
+async def test_lagging_deletes_do_not_block_the_write(aws):
     a = line("a", "A")
     manifest = export([a])
     put_vectors("20260905T000000Z-000002", [vectorized(a, "a")])
     prod = FakeAoss()
-    prod.visibility_lag = 1000
+    prod.visibility_lag = 1000  # the deleted copy keeps showing far past the timeout
+    old = prod.add(ex_doc("a", "A before", "a-before", manifest))
+
+    st = await run(publisher(prod, publish_wipe_poll_s=1, publish_wipe_settle_timeout_s=3))
+
+    assert st["state"] == "succeeded", st
+    assert st["wiped"] == 1 and st["wipe_lagging"] == 1 and st["indexed"] == 1
+    [pa] = prod.by_id(to_web_document(a, manifest)["id"])
+    assert pa["vectorized_title"] == ["a"] and old not in prod.store
+    assert not [x for call in prod.bulk_calls for x in call if "update" in x]  # the lagging copy is never updated
+
+
+async def test_unseen_documents_keep_the_wipe_waiting_then_fail(aws):
+    a = line("a", "A")
+    manifest = export([a])
+    put_vectors("20260905T000000Z-000002", [vectorized(a, "a")])
+
+    class Hiding(FakeAoss):  # counts a document of the collection its searches never return
+        def search(self, index, body):
+            r = super().search(index, body)
+            r["hits"]["hits"] = [h for h in r["hits"]["hits"] if h["_id"] != hidden]
+            return r
+
+    prod = Hiding()
     prod.add(ex_doc("x", "X", "x", manifest))
+    hidden = prod.add(ex_doc("h", "H", "h", manifest))
 
     st = await run(publisher(prod, publish_wipe_poll_s=1, publish_wipe_settle_timeout_s=3))
 
     assert st["state"] == "failed" and st["error"] == "wipe_incomplete" and "index" not in ops(prod)
+    assert st["wiped"] == 1 and "wipe_lagging" not in st
 
 
 async def test_failed_writes_are_retried_without_duplicates(aws):

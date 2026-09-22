@@ -82,7 +82,8 @@ class FakeAoss:
         return out
 
     def _visible(self):
-        return [*self.store.items(), *((a, g[0]) for a, g in self.ghosts.items())]
+        # lagging deletes first: with equal sort values they hide live copies behind a page boundary
+        return [*((a, g[0]) for a, g in self.ghosts.items()), *self.store.items()]
 
     def count(self, index: str, body: dict[str, Any]) -> dict[str, int]:
         n = sum(1 for _, s in self._visible() if self._match(s, body.get("query")))

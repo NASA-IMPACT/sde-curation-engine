@@ -183,7 +183,7 @@ After deletes started (the collection may be partial in prod; publish again):
 
 | error | meaning |
 |---|---|
-| `wipe_incomplete` | deletes still failed after 3 attempts, or the collection did not read empty within `PUBLISH_WIPE_SETTLE_TIMEOUT_S`; nothing was written |
+| `wipe_incomplete` | deletes still failed after 3 attempts, or documents that were never scanned/deleted were still visible after `PUBLISH_WIPE_SETTLE_TIMEOUT_S` (600 s); deleted documents that only lag do not count; nothing was written |
 | `upsert_failed` | bulk writes still failed after 3 attempts |
 
 Code: `sde_curation/backends/publish.py`. Stack grants: `infra/stacks/engine_stack.py`.

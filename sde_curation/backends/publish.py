@@ -448,10 +448,12 @@ class ProdPublisher:
     # ── wipe ───────────────────────────────────────────────────────────
 
     async def _wipe(self, key: str, copies: dict[str, str], status: dict[str, Any]) -> set[str]:
-        """Delete every document of the collection by explicit AOSS _id, then re-scan until the
-        collection reads empty — catching copies a page boundary skipped, the index showed late, or a
-        concurrent writer added. Returns the deleted _ids. Raises (nothing written yet) when a delete
-        keeps failing or the collection does not read empty in time."""
+        """Delete every document of the collection by explicit AOSS _id, then re-scan and re-count
+        until the collection reads empty — catching copies a page boundary skipped, the index showed
+        late, or a concurrent writer added. Documents that are deleted but still visible (AOSS lag) do
+        not hold the write back: once the scan accounts for everything the count reports and all of it
+        is already deleted, the wipe is done. Returns the deleted _ids. Raises (nothing written yet)
+        when a delete keeps failing, or documents never scanned or deleted stay visible past the timeout."""
         wiped: set[str] = set()
         rounds = max(1, int(self.s.publish_wipe_settle_timeout_s // max(self.s.publish_wipe_poll_s, 0.001))) + 1
         for attempt in range(1, rounds + 1):
@@ -467,12 +469,17 @@ class ProdPublisher:
                         f"{len(failed)} of the collection's prod documents could not be deleted after "
                         f"{_BULK_ATTEMPTS} attempts ({len(wiped)} were) — nothing was written; publish again",
                     )
-            if await self._call(count_collection, self.prod, self.index, key) == 0:
+            n = await self._call(count_collection, self.prod, self.index, key)
+            if n == 0:
+                return wiped
+            copies = await self._call(scan_collection_copies, self.prod, self.index, key)
+            if not set(copies) - wiped and len(copies) >= n:
+                log.info("[%s] %d deleted document(s) still visible in prod (index lag) — writing", key, n)
+                status["wipe_lagging"] = n
                 return wiped
             if attempt == rounds:
                 break
             await asyncio.sleep(self.s.publish_wipe_poll_s)
-            copies = await self._call(scan_collection_copies, self.prod, self.index, key)
         remaining = await self._call(count_collection, self.prod, self.index, key)
         raise PublishRefused(
             "wipe_incomplete",
