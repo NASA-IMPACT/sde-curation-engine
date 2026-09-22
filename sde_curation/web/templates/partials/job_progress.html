@@ -1,5 +1,6 @@
 {# One place for "what is this job doing / what did it do" text. Reads job.progress keys written
-   by jobs.py (scrape: docs/failed/queued/queue_ahead/reused/attached; index: exported/phase/waiting_s/
+   by jobs.py (scrape: docs/failed/queued/queue_ahead/reused/attached, then the ingest of the crawl
+   into PostgreSQL: phase=ingest|ingest_store with ingested/ingest_total/failures; index: exported/phase/waiting_s/
    validation_ok; prod publish: phase/source_test_run/changed/unchanged/indexed/remaining/to_remove; LLM: llm=patterns|metadata|titles, done/total/inflight/retrying/failed, urls/calls/global/
    suggestions, classified, tokens_in/tokens_out; the re-title pass: llm_phase=titles, titles_total (URLs),
    title_groups + title_calls_done/title_calls_failed… (the pool runs over groups), title_calls (calls made,
@@ -7,7 +8,9 @@
 {% macro job_progress(job) -%}
 {%- set p = job.progress or {} -%}
 {%- if job.state == 'running' -%}
-  {%- if p.reused %}loading existing crawl{% if p.docs %} · {{ p.docs }} docs{% endif %}
+  {%- if p.phase == 'ingest' %}storing the crawl · {{ '{:,}'.format(p.ingested or 0) }}{% if p.ingest_total %} of {{ '{:,}'.format(p.ingest_total) }}{% endif %} page{{ 's' if (p.ingested or 0) != 1 }} read{% if p.failures %} · {{ p.failures }} failed{% endif %}
+  {%- elif p.phase == 'ingest_store' %}storing the crawl · {{ '{:,}'.format(p.ingested or 0) }} page{{ 's' if (p.ingested or 0) != 1 }} read · writing them to the database{% if p.failures %} · {{ p.failures }} failed{% endif %}
+  {%- elif p.reused %}loading existing crawl{% if p.docs %} · {{ p.docs }} docs{% endif %}
   {%- elif p.queued %}{{ 'following a crawl already on the host, queued' if p.attached else 'queued' }} {{ job.started_at|since }}{% if p.queue_ahead %} behind {{ p.queue_ahead }} crawl{{ 's' if p.queue_ahead != 1 }}{% endif %}
   {%- elif p.attached and p.docs is defined %}{{ p.docs }} docs{% if p.failed %}, {{ p.failed }} failed{% endif %} · following a crawl that was already running on the host
   {%- elif p.phase == 'dispatch' %}exported {{ p.exported }} · starting indexer

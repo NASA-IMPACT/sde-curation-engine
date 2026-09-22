@@ -101,3 +101,27 @@ async def test_dashboard_row_polls_only_while_its_job_is_live(crawler_client):
     await wait_job(crawler_client, "ex.org")
     assert "every 10s" not in (await crawler_client.get("/collections/ex.org/row")).text
     assert "sseReopen from:body" in (await crawler_client.get("/rows")).text
+
+
+async def test_ingest_reports_page_counts_as_it_streams(crawler_client):
+    """A crawl is streamed into PostgreSQL after the crawler has gone quiet — minutes of it on a
+    multi-GB collection. The job reports the pages it has read instead of sitting on the crawler's
+    last figure, and the scrape's own progress carries the counts through to the end."""
+    await crawler_client.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 10})
+    jobs = crawler_client.app.state.jobs
+    seen: list[dict] = []
+
+    async def on_progress(p):
+        seen.append(p)
+
+    docs = [{"url": f"https://ex.org/p{i}", "title": f"Page {i}", "full_text": f"t{i}"} for i in range(3)]
+    assert await jobs.ingest_dump("ex.org", docs, on_progress=on_progress) == 3
+    # the last report says the stream is spent and the write-out is what remains
+    assert seen == [{"phase": "ingest", "ingested": 3}, {"phase": "ingest_store", "ingested": 3}]
+
+    await crawler_client.post("/api/collections/ex.org/scrape")
+    job = await wait_job(crawler_client, "ex.org")
+    assert job["state"] == "succeeded"
+    # 8 of the 10 pages come back as documents; the other 2 are in the failures log
+    assert job["progress"]["ingested"] == 8 and job["progress"]["ingest_total"] == 8
+    assert job["progress"]["docs"] == 8 and job["progress"]["failures"] == 2

@@ -15,7 +15,7 @@ from typing import Any
 from .backends.index import Dispatch, IndexBackend, IndexError_, wait_for_status
 from .backends.publish import ProdPublisher
 from .backends.s3 import S3
-from .backends.scrape import DocumentSource, ScrapeBackend, ScrapeError, iter_documents
+from .backends.scrape import DocumentSource, ProgressCb, ScrapeBackend, ScrapeError, iter_documents
 from .backends.validate import NoIndexAccess, validate_direct
 from .config import Settings
 from .db import Database
@@ -66,6 +66,10 @@ log = logging.getLogger(__name__)
 # Suggest metadata writes answers to the DB in small chunks (cancel keeps them, commits stay few).
 AI_FLUSH_ROWS = 25
 AI_FLUSH_SECONDS = 2.0
+# How often the crawl ingest reports the pages it has read. Each report is one job-row UPDATE and
+# one SSE event, so it is paced by the clock rather than by the 500-page read chunks: a small crawl
+# is over before the second report, a big one ticks steadily.
+_INGEST_PROGRESS_S = 2.0
 # Rounds of URL disambiguation after the model has had its passes. One resolves a group; the rest
 # are only there in case a title it wrote lands on one a page outside that group already had.
 DISAMBIGUATE_ROUNDS = 3
@@ -204,7 +208,13 @@ class JobManager:
                 else:
                     result = await self.scraper.run(c, on_progress)
                 failures = await asyncio.to_thread(result.failures)
-                n = await self.ingest_dump(c.collection_id, result.documents, failures)
+                # The crawl still has to be streamed into PostgreSQL, which on a multi-GB
+                # collection is minutes of work after the crawler itself has gone quiet. Say so,
+                # with the page counts, instead of leaving the last crawl figure on screen.
+                await on_progress({"phase": "ingest", "ingested": 0, "failures": len(failures),
+                                   "ingest_total": _expected_docs(result.summary, job.progress)})
+                n = await self.ingest_dump(c.collection_id, result.documents, failures,
+                                           on_progress=on_progress)
                 crawled_at = result.crawled_at or utcnow()
                 capped = result.capped(n, c.max_pages)
                 await self.db.set_last_scraped(c.collection_id, crawled_at, capped=capped)
@@ -923,7 +933,7 @@ class JobManager:
 
     async def ingest_dump(
         self, collection_id: str, docs: DocumentSource | list[dict[str, Any]],
-        failures: list[dict[str, Any]] | None = None,
+        failures: list[dict[str, Any]] | None = None, *, on_progress: ProgressCb | None = None,
     ) -> int:
         """Store the crawl as the collection's dump.
 
@@ -934,7 +944,12 @@ class JobManager:
 
         Which spellings of a page survive is decided there too, from the URL columns of the
         staging table (`engine.urls.duplicate_docs`) — it used to be a second pass over this
-        stream, which meant the crawl could not be a stream at all."""
+        stream, which meant the crawl could not be a stream at all.
+
+        `on_progress` is called every few seconds with the pages read so far. It runs while the
+        COPY is open, so it borrows a second pooled connection for the moment it writes the job
+        row — brief, and the alternative is a status frozen at the crawler's last figure for as
+        long as the ingest takes."""
         def source() -> Iterator[dict[str, Any]]:
             return iter(docs) if isinstance(docs, list) else iter_documents(docs)
 
@@ -954,13 +969,25 @@ class JobManager:
             return seen, rows
 
         async def rows() -> AsyncIterator[DumpUrl]:
+            """Counts as it reads: this is the only point that knows how far into the crawl the
+            ingest has got. The count is pages taken off the stream, not rows in the table — the
+            duplicate-spelling pass runs afterwards, so the job's final figure is a little lower."""
             it = source()
+            read, reported = 0, 0.0
             while True:
                 seen, chunk = await asyncio.to_thread(take, it, 500)
                 for r in chunk:
                     yield r
+                read += seen
                 if not seen:
-                    return
+                    break
+                now = time.monotonic()
+                if on_progress and now - reported >= _INGEST_PROGRESS_S:
+                    reported = now
+                    await on_progress({"phase": "ingest", "ingested": read})
+            if on_progress:
+                # the stream is spent; what is left is the duplicate pass and the two INSERTs
+                await on_progress({"phase": "ingest_store", "ingested": read})
 
         fails = [
             DumpFailure(
@@ -971,6 +998,14 @@ class JobManager:
             for f in failures or []
         ]
         return await self.db.replace_dump(collection_id, rows(), fails, dedupe_spellings=True)
+
+
+def _expected_docs(summary: dict[str, Any], progress: dict[str, Any]) -> int | None:
+    """How many pages the ingest is about to read, for an "x of y" status: the crawl's own count
+    when it wrote a summary (a reused crawl has one and nothing else), else what the job watched
+    the crawler log. Either can be absent, and then the status just counts up."""
+    n = summary.get("documents_scraped") or progress.get("docs")
+    return int(n) if isinstance(n, int | float) and n > 0 else None
 
 
 def _add_tokens(job: JobRun, row: dict[str, Any]) -> None:

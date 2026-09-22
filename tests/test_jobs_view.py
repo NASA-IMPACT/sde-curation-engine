@@ -74,6 +74,25 @@ async def test_llm_progress_tag_shows_on_every_surface(crawler_client):
     assert "LLM calls in progress · 1/4 calls · 3 in flight" in (await c.get("/jobs/panel")).text
 
 
+async def test_ingest_status_shows_on_every_surface(crawler_client):
+    """While the crawl streams into PostgreSQL the same macro says so, with the page counts."""
+    from sde_curation.models import JobKind, JobRun, JobState
+
+    c = crawler_client
+    await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 40})
+    # Synthetic, like the LLM case above: a live scrape's own poll loop rewrites this progress.
+    job = await c.app.state.db.insert_job(JobRun(
+        collection_id="ex.org", kind=JobKind.SCRAPE, state=JobState.RUNNING,
+        progress={"phase": "ingest", "ingested": 12500, "ingest_total": 31904, "failures": 7},
+    ))
+    expect = "storing the crawl · 12,500 of 31,904 pages read · 7 failed"
+    for url in ("/jobs/panel", "/collections/ex.org/header", "/", "/jobs"):
+        assert expect in (await c.get(url)).text, url
+    job.progress = {"phase": "ingest_store", "ingested": 31904, "failures": 7}
+    await c.app.state.db.update_job(job)
+    assert "storing the crawl · 31,904 pages read · writing them to the database" in (await c.get("/jobs/panel")).text
+
+
 async def test_user_manual_page_and_menu_link(crawler_client):
     c = crawler_client
     assert 'href="/manual"' in (await c.get("/")).text
