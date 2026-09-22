@@ -15,13 +15,15 @@ from pydantic import ValidationError
 
 from ..models import (
     Confidence,
+    DistinctTitle,
+    DistinctTitles,
     Division,
     DocumentType,
     MetadataSuggestion,
+    MetadataSuggestionNoDivision,
     PatternSuggestion,
     PatternSuggestions,
     PatternType,
-    TitleSuggestion,
 )
 from .base import Completion, LLMError, T
 
@@ -64,11 +66,12 @@ class FakeProvider:
                 raise LLMError(f"response did not match {schema.__name__}: {e}") from e
         if schema is PatternSuggestions:
             return self._patterns(json.loads(user.split("\n", 1)[1]))  # type: ignore[return-value]
-        if schema is MetadataSuggestion:
+        if schema in (MetadataSuggestion, MetadataSuggestionNoDivision):
             _, header, text = user.split("\n", 2)
-            return self._metadata(json.loads(header), text.split("\nText:\n", 1)[-1])  # type: ignore[return-value]
-        if schema is TitleSuggestion:
-            return self._title(json.loads(user.split("\n", 2)[1]))  # type: ignore[return-value]
+            full = self._metadata(json.loads(header), text.split("\nText:\n", 1)[-1])
+            return full if schema is MetadataSuggestion else schema(**full.model_dump())  # type: ignore[return-value]
+        if schema is DistinctTitles:
+            return self._titles(user)  # type: ignore[return-value]
         raise LLMError(f"fake provider has no handler for {schema.__name__}")
 
     def _patterns(self, payload: dict) -> PatternSuggestions:
@@ -90,10 +93,14 @@ class FakeProvider:
                                          rationale="fake: the last URL of every batch is excluded"))
         return PatternSuggestions(suggestions=out)
 
+    # No keyword matched: the model still has to name a division, so the fake names one and marks it
+    # low confidence, the way the prompt tells a real model to. There is no "General" to fall back on.
+    _FALLBACK_DIV = Division.ASTROPHYSICS
+
     def _metadata(self, header: dict, text: str) -> MetadataSuggestion:
         """Confidence is deterministic: high when the keyword is in the URL or title, medium when
         only in the page text, low when the value is a fallback (the collection's division or
-        General, Documentation, a title made from the URL)."""
+        _FALLBACK_DIV, Documentation, a title made from the URL)."""
         strong = (header["url"] + " " + (header.get("scraped_title") or "")).lower()
         weak = text.lower()
 
@@ -106,7 +113,7 @@ class FakeProvider:
                     return v, Confidence.MEDIUM
             return default, Confidence.LOW
 
-        div, div_c = pick(_DIV, Division(header.get("collection_division") or Division.GENERAL))
+        div, div_c = pick(_DIV, Division(header.get("collection_division") or self._FALLBACK_DIV))
         dt, dt_c = pick(_DT, DocumentType.DOCUMENTATION)
         title = re.sub(r"\s+[-–|]\s+.*$", "", header.get("scraped_title") or "").strip()
         title_c = Confidence.HIGH if title else Confidence.LOW
@@ -118,11 +125,17 @@ class FakeProvider:
             division=div, division_confidence=div_c, document_type=dt, document_type_confidence=dt_c,
         )
 
-    def _title(self, header: dict) -> TitleSuggestion:
-        """The shared title plus the page's last path segment ("Page — P3"); the shared title
-        unchanged (low confidence) when the URL has no path to tell it apart by."""
-        seg = urlsplit(header["url"]).path.rstrip("/").rsplit("/", 1)[-1]
-        if not seg:
-            return TitleSuggestion(title=header["shared_title"], title_confidence=Confidence.LOW)
-        return TitleSuggestion(title=f"{header['shared_title']} — {seg.replace('-', ' ').title()}",
-                               title_confidence=Confidence.MEDIUM)
+    def _titles(self, user: str) -> DistinctTitles:
+        """One title per page of the group: the shared title plus the page's last path segment
+        ("Page — P3"). Deliberately naive — pages whose last segment is the same get the same answer
+        back, which is how the real model fails too, and what the caller's URL disambiguation and
+        its refusal to store a colliding title are there to catch."""
+        header = json.loads(user.split("\n", 1)[1].split("\n\n", 1)[0])
+        shared = header["shared_title"]
+        items = []
+        for url in re.findall(r'^\{"url": "([^"]+)"', user.split("\n\n", 1)[1], re.MULTILINE):
+            seg = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+            items.append(DistinctTitle(
+                url=url, title=f"{shared} — {seg.replace('-', ' ').title()}" if seg else shared,
+                title_confidence=Confidence.MEDIUM if seg else Confidence.LOW))
+        return DistinctTitles(items=items)

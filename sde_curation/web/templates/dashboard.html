@@ -15,8 +15,11 @@
       <form method="post" action="/collections" class="inline">
         <input name="seed_url" placeholder="https://science.nasa.gov/" required size="34" value="{{ form.seed_url if form else '' }}">
         <input name="name" placeholder="Display name" required size="22" value="{{ form.name if form else '' }}">
-        <select name="division">
-          {% for d in divisions %}<option {% if (form.division if form else "General") == d %}selected{% endif %}>{{ d }}</option>{% endfor %}
+        {# General = not assigned: the AI is asked for a division per page and the curator reviews the
+           answers. Any of the five is the curator's decision for the whole collection — it fills every
+           URL and is never asked of the model. Either way it can be changed later. #}
+        <select name="division" title="one division for the whole collection, or leave it on General to have the AI suggest one per page">
+          {% for d in divisions %}<option {% if (form.division if form else 'General') == d %}selected{% endif %}>{{ d }}{% if d == 'General' %} — not assigned{% endif %}</option>{% endfor %}
         </select>
         <input name="max_pages" type="number" value="{{ form.max_pages if form else 100000 }}" min="1" max="100000" size="7" title="max pages">
         <button>Add collection</button>

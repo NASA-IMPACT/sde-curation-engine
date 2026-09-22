@@ -33,7 +33,11 @@ from .llm.base import LLMError, LLMProvider
 from .llm.global_excludes import global_exclude_hits, load_global_excludes
 from .llm.pool import run_pool
 from .llm.tasks import (
-    suggest_distinct_title,
+    TITLE_SIBLINGS,
+    URL_DISAMBIGUATED,
+    disambiguate,
+    norm_title,
+    suggest_distinct_titles,
     suggest_metadata_one,
     suggest_patterns_batch,
     title_siblings,
@@ -41,6 +45,7 @@ from .llm.tasks import (
 from .models import (
     SYSTEM_ACTOR,
     Collection,
+    Confidence,
     DumpFailure,
     DumpUrl,
     IndexRun,
@@ -59,6 +64,9 @@ log = logging.getLogger(__name__)
 # Suggest metadata writes answers to the DB in small chunks (cancel keeps them, commits stay few).
 AI_FLUSH_ROWS = 25
 AI_FLUSH_SECONDS = 2.0
+# Rounds of URL disambiguation after the model has had its passes. One resolves a group; the rest
+# are only there in case a title it wrote lands on one a page outside that group already had.
+DISAMBIGUATE_ROUNDS = 3
 
 
 class JobConflict(Exception):
@@ -192,9 +200,9 @@ class JobManager:
                 updated = await self.db.set_status(
                     c.collection_id, Status.SCRAPED, note=note, force=True, actor=SYSTEM_ACTOR,
                 )
-                if c.curated_count:  # anything already promoted must be re-reviewed
+                if c.curated_rows:  # anything already promoted must be re-reviewed
                     reason = (f"{'loaded existing crawl' if reuse else 're-crawled'} on {crawled_at:%Y-%m-%d %H:%M}Z"
-                              f" ({n} documents) after {c.curated_count} URLs were promoted — Start curating"
+                              f" ({n} documents) after {c.curated_rows} URLs were promoted — Start curating"
                               " shows what changed")
                     await self.db.set_flag(c.collection_id, True, reason)
                     updated.needs_recuration, updated.recuration_reason = True, reason
@@ -403,18 +411,12 @@ class JobManager:
                 raise LLMError("no delta URL shares its title and document type with another page")
         await self._guarded(c, job, body)
 
-    async def _retitle_duplicates(self, c: Collection, job: JobRun, llm: LLMProvider, *,
-                                  touching: set[str] | None = None) -> int:
-        """Pages of one collection that will be indexed under the same title AND document type go back
-        to the model, one call per page with its full text and the other URLs, for a title that tells
-        it apart. Only the title is asked for: the answer replaces the page's AI title suggestion and
-        the document type is left alone (nothing is applied until accepted).
-        Only delta URLs can take a suggestion. In a group, the ones with a pending AI title are
-        re-asked and the rest keep theirs; when none has one (a rule or a curator set them all)
-        every delta URL of the group is. `touching`: only groups with one of these URLs (the pages
-        Suggest metadata just titled). Returns how many pages were sent."""
-        cid = c.collection_id
-        work: list[tuple[str, dict[str, Any]]] = []
+    async def _plan_retitle(self, cid: str, touching: set[str] | None) -> list[dict[str, Any]]:
+        """The duplicate-title groups this pass will rewrite, each with the pages to ask about
+        (`rewrite`), the pages whose titles are fixed and must not be collided with (`settled`), the
+        title the group shared before any earlier regeneration (`origin`) and the answers that
+        already failed (`previous`)."""
+        plan = []
         for g in await self.db.duplicate_title_groups(cid):
             members = g["members"]
             if touching is not None and not any(m["url"] in touching for m in members):
@@ -423,54 +425,163 @@ class JobManager:
             ask = {m["url"] for m in ([m for m in delta if m["pending_ai"]] or delta)}
             for m in members:
                 m["rewrite"] = m["url"] in ask
-            work += [(m["url"], g) for m in members if m["rewrite"]]
+            # Asked again, a group is asked the SAME question, not a new one about the last answer:
+            # from the title the pages originally shared, or every pass builds on the one before it
+            # and the title grows a tail ("Data Access — Access — Access — …"). What was already
+            # tried goes along as `previous` so the model does not offer it twice.
+            origins = {m["before"] for m in members if m["rewrite"] and m["before"]}
+            g["origin"] = origins.pop() if len(origins) == 1 else g["title"]
+            g["previous"] = {g["title"]} - {g["origin"]}
+            g["settled"] = [m for m in members if not m["rewrite"]]
+            g["rewrite"] = [m for m in members if m["rewrite"]]
+            if g["rewrite"]:
+                plan.append(g)
+        return plan
+
+    async def _retitle_duplicates(self, c: Collection, job: JobRun, llm: LLMProvider, *,
+                                  touching: set[str] | None = None) -> int:
+        """Pages of one collection that will be indexed under the same title AND document type are
+        told apart, and this pass owns the outcome: when it ends, no delta URL it was allowed to
+        touch still shares a title + document type with another page. The curator is never handed a
+        button to press again.
+
+        A GROUP goes to the model in one call, with every page's full text, so the model tells the
+        pages apart from each other instead of guessing page by page and colliding all over again
+        (the old one-call-per-page shape manufactured nearly as many duplicates as it cleared). A
+        group whose texts exceed `llm_title_group_chars` is split, and each later call is told the
+        titles the earlier ones used. Groups that still collide are re-asked up to
+        `llm_title_passes` times, and whatever survives that is disambiguated from the URLs
+        (tasks.disambiguate) — unique URLs mean that always resolves.
+
+        Only the title is asked for; the document type is left alone and nothing is applied until
+        the SME accepts. Only delta URLs can take a suggestion: in a group the ones with a pending
+        AI title are re-asked and the rest keep theirs, and when none has one every delta URL is.
+        `touching`: only groups with one of these URLs (the pages Suggest metadata just titled).
+        Returns how many pages were sent."""
+        cid = c.collection_id
         progress = self._progress_cb(c, job)
-        await progress({"llm_phase": "titles", "titles_total": len(work), "titles_done": 0, "titles_failed": 0})
-        if not work:
+        plan = await self._plan_retitle(cid, touching)
+        asked = sum(len(g["rewrite"]) for g in plan)
+        # `titles_total` counts URLs (what the curator is told); the pool runs over GROUPS, so its
+        # own done / failed / inflight are reported as calls.
+        await progress({"llm_phase": "titles", "titles_total": asked, "title_groups": len(plan),
+                        "title_calls": 0, "title_calls_done": 0, "title_calls_failed": 0,
+                        "retitled": 0, "disambiguated": 0})
+        if not plan:
             return 0
-        buf: list[dict[str, Any]] = []
-        retitled = 0
+        retitled = disambiguated = calls = 0
 
-        async def flush() -> None:
-            nonlocal retitled
-            if buf:
-                rows, buf[:] = list(buf), []
-                retitled += await self.db.set_delta_ai_titles(cid, rows)
+        # Every title + document type the collection already uses. A group told apart within itself
+        # still collides if it picks a title another group — or a page that was never in a group —
+        # already has, which is how a pass that only looked at one group at a time kept clearing
+        # duplicates and making new ones. Claims are added here as they are handed out, so two
+        # groups running side by side cannot take the same title.
+        claimed = set((await self.db.title_keys(cid)).values())
 
-        async def items():  # page text in chunks: a big group never sits in memory at once
-            for chunk in batches(work, 200):
-                docs = {d["url"]: d for d in await self.db.docs_for_llm(cid, [u for u, _ in chunk])}
-                for u, g in chunk:
-                    if u in docs:
-                        yield docs[u], g
+        def key_of(title: str, document_type: str | None) -> str:
+            return f"{norm_title(title)}\x1f{document_type or ''}"
 
-        async def one(item):
-            doc, g = item
-            return await suggest_distinct_title(llm, doc, shared_title=g["title"], document_type=g["document_type"],
-                                                sharing=len(g["members"]),
-                                                siblings=title_siblings(g["members"], doc["url"]), collection=c)
+        def claim(title: str, document_type: str | None) -> bool:
+            """True if this title is free for this document type, and takes it. A group's own shared
+            title stays claimed throughout: one of its pages may end up keeping it."""
+            key = key_of(title, document_type)
+            if key in claimed:
+                return False
+            claimed.add(key)
+            return True
 
-        async def on_result(item, row):
-            _add_tokens(job, row)
-            if row["title"]:  # None: the model kept the shared title — the old suggestion stays
-                buf.append({**row, "before": item[1]["title"]})
-                if len(buf) >= AI_FLUSH_ROWS:
-                    await flush()
+        async def calls_for(g: dict[str, Any]) -> list[list[dict[str, Any]]]:
+            """The group's pages to ask about, packed into calls by how much text they carry: the
+            full text goes in uncut, so characters are what bounds a call, not the page count."""
+            urls = [m["url"] for m in g["rewrite"]]
+            sizes = await self.db.text_sizes(cid, urls)
+            out: list[list[dict[str, Any]]] = [[]]
+            budget = 0
+            for m in g["rewrite"]:
+                n = sizes.get(m["url"], 0)
+                if out[-1] and budget + n > self.s.llm_title_group_chars:
+                    out.append([]); budget = 0
+                out[-1].append(m); budget += n
+            return [batch for batch in out if batch]
 
-        async def on_error(item, e: Exception) -> None:
-            log.warning("titles %s: %s failed: %s", cid, item[0]["url"], e)
+        async def one(g: dict[str, Any]) -> dict[str, Any]:
+            """One group: its calls run in order, because a later call has to know the titles the
+            earlier ones already used. Groups run against each other in the pool."""
+            given: dict[str, dict[str, Any]] = {}
+            same_pages: list[list[str]] = []
+            made = 0
+            fixed = [{"url": m["url"], "title": g["title"]} for m in g["settled"]]
+            for batch in await calls_for(g):
+                docs = await self.db.docs_for_llm(cid, [m["url"] for m in batch])
+                if not docs:
+                    continue
+                settled = fixed + [{"url": u, "title": t["title"]} for u, t in given.items()]
+                if len(settled) > TITLE_SIBLINGS:  # a huge group: name the nearest in URL order
+                    settled = title_siblings(settled, docs[0]["url"])
+                row = await suggest_distinct_titles(
+                    llm, docs, shared_title=g["origin"], document_type=g["document_type"],
+                    sharing=len(g["members"]), settled=settled, previous=g["previous"], collection=c)
+                given |= {u: {**t, "model": row["model"]} for u, t in row["titles"].items()}
+                same_pages += row["same_page_groups"]
+                made += 1
+                _add_tokens(job, row)
+            return {"titles": given, "same_page_groups": same_pages, "calls": made}
+
+        async def on_result(g, row):
+            nonlocal retitled, calls
+            calls += row["calls"]
+            # the model answered for its group; the claim check is what makes the answer safe for
+            # the whole collection. A title that is already taken is dropped, and the page falls
+            # through to the next pass or to the URLs.
+            rows = [{"url": u, **t, "before": g["origin"]} for u, t in row["titles"].items()
+                    if claim(t["title"], g["document_type"])]
+            if rows:
+                # groups run side by side: read the counter, add, write back with no await in
+                # between, or five of them clobber each other's totals
+                written = await self.db.set_delta_ai_titles(cid, rows)
+                retitled += written
+
+        async def on_error(g, e: Exception) -> None:
+            log.warning("titles %s: group %r failed: %s", cid, g["title"], e)
 
         async def pool_progress(p: dict[str, Any]) -> None:
-            await progress({f"titles_{k}": v for k, v in p.items()})
+            await progress({f"title_calls_{k}": v for k, v in p.items()})
 
-        try:
-            await run_pool(items(), one, workers=self.s.llm_workers, on_result=on_result, on_error=on_error,
-                           on_progress=pool_progress, total=len(work), **self._retry())
-        finally:
-            await flush()
+        for attempt in range(self.s.llm_title_passes + 1):
+            if attempt:  # only the groups the last pass could not tell apart go round again
+                plan = await self._plan_retitle(cid, touching)
+                if not plan:
+                    break
+                await progress({"title_pass": attempt + 1, "title_groups": len(plan), "title_calls_done": 0})
+            await run_pool(plan, one, workers=self.s.llm_workers, on_result=on_result, on_error=on_error,
+                           on_progress=pool_progress, total=len(plan), **self._retry())
+            await progress({"retitled": retitled, "title_calls": calls})
+
+        # The floor: whatever the model could not tell apart, the URLs do. This is what makes one
+        # click enough — the pass never ends leaving the curator a group to send back again. One
+        # round settles it, because the claim check is over the whole collection; the second is
+        # there only in case a group's pages were themselves re-grouped by what the first wrote.
+        for _ in range(DISAMBIGUATE_ROUNDS):
+            groups = await self._plan_retitle(cid, touching)
+            if not groups:
+                break
+            for g in groups:
+                dt = g["document_type"]
+                titles = disambiguate(g["origin"], [m["url"] for m in g["rewrite"]],
+                                      taken=[g["title"], g["origin"]],
+                                      is_taken=lambda t, dt=dt: key_of(t, dt) in claimed)
+                rows = [{"url": u, "title": t, "title_conf": Confidence.LOW, "model": URL_DISAMBIGUATED,
+                         "before": g["origin"]} for u, t in titles.items() if claim(t, dt)]
+                written = await self.db.set_delta_ai_titles(cid, rows)
+                disambiguated += written
+        else:
+            log.warning("titles %s: %s URLs still share a title after disambiguating", cid,
+                        (await self.db.duplicate_title_counts(cid))["delta_urls"])
+
         still = await self.db.duplicate_title_counts(cid)
-        await progress({"retitled": retitled, "still_duplicate": still["urls"], "titles_inflight": 0})
-        return len(work)
+        await progress({"retitled": retitled, "disambiguated": disambiguated, "still_duplicate": still["urls"],
+                        "title_calls": calls, "title_calls_inflight": 0})
+        return asked
 
     # ── index (export → S3 → WEB_COSMOS → status.json) ─────────────────
 

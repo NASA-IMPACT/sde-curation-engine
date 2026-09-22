@@ -147,12 +147,12 @@ def test_exact_rule_matches_other_spellings_and_newest_wins():
         Pattern(id=1, collection_id="x", type=PatternType.TITLE, match="http://x.org/a/", value="One"),
         Pattern(id=2, collection_id="x", type=PatternType.TITLE, match="https://x.org/a#x", value="Two"),
         Pattern(id=3, collection_id="x", type=PatternType.EXCLUDE, match="https://x.org/b"),
-        Pattern(id=4, collection_id="x", type=PatternType.DIVISION, match="https://x.org/c", value="General"),
+        Pattern(id=4, collection_id="x", type=PatternType.DIVISION, match="https://x.org/c", value="Earth Science"),
     ]
     r = resolve_all(urls, pats, base={}, scraped_titles={}, collection_name="X")
     assert r["https://x.org/a"].title == "Two" and r["https://x.org/a"].effects["title"] == 2  # newest of the two
     assert r["https://x.org/b/"].excluded and r["https://x.org/b/"].effects["excluded"] == 3
-    assert r["http://x.org/c"].division == "General"
+    assert r["http://x.org/c"].division == "Earth Science"
 
 
 # ── over the API ─────────────────────────────────────────────────────────

@@ -15,7 +15,8 @@ from sde_curation.llm.tasks import (
 from sde_curation.models import Collection, Division, MetadataSuggestion, PatternSuggestions
 from tests.conftest import wait_job
 
-COLL = Collection(collection_id="ex.org", name="Ex", seed_url="https://ex.org", division=Division.GENERAL,
+# division defaults to General = "not assigned", so the model is asked for one per page
+COLL = Collection(collection_id="ex.org", name="Ex", seed_url="https://ex.org",
                   connector="crawler2", max_pages=10)
 
 
@@ -51,6 +52,9 @@ async def test_suggest_patterns_drops_globs_the_applied_global_list_already_cove
 
 
 async def test_suggest_metadata_sends_the_collection_context():
+    """A division the curator set goes along as context and is never asked for: the schema has no
+    division field, the prompt says so, and the row carries no division suggestion. Without one,
+    the model is asked for a division as before."""
     fake = FakeProvider()
     coll = COLL.model_copy(update={"name": "PDS", "division": Division.PLANETARY})
     row = await suggest_metadata_one(fake, {"url": "https://ex.org/a", "title": "Proposers - PDS", "text": "t"},
@@ -59,8 +63,13 @@ async def test_suggest_metadata_sends_the_collection_context():
     assert '"collection": "PDS"' in user and '"collection_division": "Planetary Science"' in user
     assert "collection_document_type" not in user  # not set on the collection
     assert row["title"] == "Proposers"  # the model's title as written: no prefix added
-    await suggest_metadata_one(fake, {"url": "https://ex.org/a", "text": "t"}, settings=SETTINGS, collection=COLL)
-    assert "collection_division" not in fake.calls[-1]["user"]  # General is the untouched default
+    assert fake.calls[-1]["schema"] == "MetadataSuggestionNoDivision"
+    assert "division" not in row and "division_conf" not in row
+    assert "division — not asked for." in fake.calls[-1]["system"]
+    # no division on the collection: the model decides one per page, as before
+    row = await suggest_metadata_one(fake, {"url": "https://ex.org/a", "text": "t"}, settings=SETTINGS, collection=COLL)
+    assert "collection_division" not in fake.calls[-1]["user"]
+    assert fake.calls[-1]["schema"] == "MetadataSuggestion" and row["division"]
 
 
 async def test_suggest_patterns_only_accepts_exclude_globs():
@@ -105,12 +114,17 @@ async def test_schemas_reject_bad_enums():
     from pydantic import ValidationError
 
     ok = {"title_confidence": "high", "division_confidence": "low", "document_type_confidence": "low"}
-    full = {"title": "T", "division": "General", "document_type": "Data", **ok}
+    full = {"title": "T", "division": "Earth Science", "document_type": "Data", **ok}
     MetadataSuggestion.model_validate(full)
     with pytest.raises(ValidationError):
         MetadataSuggestion.model_validate({**full, "division": "Kitchen"})
+    # "General" is not a division a page can be curated into, so it is not an answer the model
+    # can give: it is absent from the schema the provider is handed, not merely rejected after
     with pytest.raises(ValidationError):
-        MetadataSuggestion.model_validate({"title": "T", "division": "General", "document_type": "Data"})  # confidence per field
+        MetadataSuggestion.model_validate({**full, "division": "General"})
+    assert "General" not in str(MetadataSuggestion.model_json_schema())
+    with pytest.raises(ValidationError):
+        MetadataSuggestion.model_validate({"title": "T", "division": "Earth Science", "document_type": "Data"})  # confidence per field
     # every page gets every field: none may be missing or null
     for field in ("title", "division", "document_type"):
         with pytest.raises(ValidationError):
@@ -244,7 +258,7 @@ async def test_metadata_suggestions_flow(crawler_client):
     await c.post("/api/collections/ex.org/ai/reject", json={"url": "https://ex.org/p2", "field": "document_type"})
     d = (await c.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["document_type_ai"] is None and d["document_type"] is None
-    assert d["division_ai"] == "General" and d["division_ai_conf"] == "low"  # every field is answered, guesses too
+    assert d["division_ai"] == "Astrophysics" and d["division_ai_conf"] == "low"  # every field is answered, guesses too
     await c.post("/api/collections/ex.org/ai/reject", json={"url": "https://ex.org/p2", "field": "division"})
     assert (await c.post("/api/collections/ex.org/ai/accept", json={"url": "https://ex.org/p2", "field": "division"})).status_code == 409  # none
     assert (await c.post("/api/collections/ex.org/ai/accept", json={"url": "https://ex.org/p2", "field": "bogus"})).status_code == 422
@@ -463,7 +477,7 @@ async def test_openai_provider_sends_temperature_only_when_configured():
 
         async def parse(self, **kw):
             self.calls.append(kw)
-            answer = MetadataSuggestion(title="T", title_confidence="high", division="General", division_confidence="low", document_type="Data",
+            answer = MetadataSuggestion(title="T", title_confidence="high", division="Earth Science", division_confidence="low", document_type="Data",
                                         document_type_confidence="low")
             msg = SimpleNamespace(parsed=answer, refusal=None, content=None)
             return SimpleNamespace(choices=[SimpleNamespace(message=msg)], model=kw["model"], usage=None)

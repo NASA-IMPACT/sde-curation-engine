@@ -69,7 +69,25 @@ class Division(StrEnum):
     EARTH_SCIENCE = "Earth Science"
     HELIOPHYSICS = "Heliophysics"
     PLANETARY = "Planetary Science"
+    # Not a division a page belongs to: the placeholder a collection carries until a curator assigns
+    # one. It is the default when a collection is created, it says "nobody has decided yet", and it
+    # is the one value promote refuses to write into the curated set (see Database._INCOMPLETE).
     GENERAL = "General"
+
+
+# The divisions a page can actually be curated into — the five real SMD divisions. General is the
+# "not assigned yet" placeholder, so it is not among them.
+CURATION_DIVISIONS: tuple[Division, ...] = tuple(d for d in Division if d is not Division.GENERAL)
+
+# The same five values as their own enum, used for the model's answer schema: a division the model
+# picked is a real answer, and answering "General" would only produce a suggestion that can never be
+# promoted. Derived from Division so the two can never drift.
+CuratedDivision = StrEnum("CuratedDivision", {d.name: d.value for d in CURATION_DIVISIONS})
+
+
+def division_assigned(d: Division | None) -> bool:
+    """Has a curator actually chosen a division for this collection? General means "not yet"."""
+    return d is not None and d is not Division.GENERAL
 
 
 class Confidence(StrEnum):
@@ -215,6 +233,9 @@ def crawl_file_stem(seed: str) -> str:
 class CollectionCreate(BaseModel):
     seed_url: str
     name: str = Field(min_length=1, max_length=200)
+    # General = not assigned: the model is asked for a division per page. Any of the five real
+    # divisions is the curator's decision for the whole collection — every URL takes it, and the
+    # model is never asked for one.
     division: Division = Division.GENERAL
     document_type: DocumentType | None = None
     connector: ConnectorType = ConnectorType.CRAWLER
@@ -239,11 +260,15 @@ class Collection(BaseModel):
     _validated: bool = PrivateAttr(default=False)  # computed for the UI: latest test run validated
     _prod_unvalidated: bool = PrivateAttr(default=False)  # computed for the UI: see prod_not_validated
     _test_unvalidated: bool = PrivateAttr(default=False)  # computed for the UI: see needs_reindexing
+    _index_stale: bool = PrivateAttr(default=False)  # computed for the UI: see needs_reindexing
 
     collection_id: str
     name: str
     seed_url: str
-    division: Division
+    # The curator's division for the whole collection; General until they assign one. Once
+    # assigned it is the floor under every URL (see engine.patterns.resolve_all): a rule still
+    # overrides it on the URLs it matches, and Suggest metadata never asks for a division at all.
+    division: Division = Division.GENERAL
     document_type: DocumentType | None = None
     connector: ConnectorType
     max_pages: int
@@ -265,7 +290,13 @@ class Collection(BaseModel):
     # counters kept on the row for a cheap dashboard
     dump_count: int = 0
     delta_count: int = 0
+    # The curated URLs that reach the index: excluded rows stay in the Curated URLs list but are
+    # not counted (an exclude rule takes effect at once, so this drops as soon as one is added).
     curated_count: int = 0
+    curated_rows: int = 0  # the whole curated set, included + excluded ("has anything been promoted")
+    # when the curated set last changed (a promote, or an exclude rule applied in place): an index
+    # run older than this is behind the curated set
+    curated_changed_at: datetime | None = None
 
     @property
     def collection_key(self) -> str:
@@ -286,9 +317,28 @@ class Collection(BaseModel):
 
     @property
     def needs_reindexing(self) -> bool:
-        """The latest test index run failed, never finished, or did not pass validation (and no test
-        index / validate job is on it now). Set by the web layer; cleared only by a test run that passes."""
-        return self._test_unvalidated
+        """Either the latest test index run failed, never finished or did not pass validation, or the
+        curated set changed after it started (a promote, or an exclude rule applied in place) so the
+        index is behind. Set by the web layer; cleared only by a test run that passes over the
+        current curated set. No test run yet = nothing to re-index."""
+        return self._test_unvalidated or self._index_stale
+
+    @property
+    def reindex_reason(self) -> str:
+        """What the chip's tooltip says — the two ways it goes up read differently."""
+        if self._index_stale and not self._test_unvalidated:
+            return ("The curated URLs changed after the last test index run (promoted rows, or an"
+                    " exclude rule applied in place) — Re-index to test to apply them")
+        return ("The latest test index run failed or did not pass validation — Re-index to test, or"
+                " Re-validate if the index only needed more time")
+
+
+class DivisionUpdate(BaseModel):
+    """Change the collection's division after it was created, to any division. One of the five is
+    applied to every URL no rule decides and is never asked of the model; General puts it back to
+    "not assigned", and the next Suggest metadata asks for one per page again."""
+
+    division: Division
 
 
 class IndexKeyUpdate(BaseModel):
@@ -379,6 +429,10 @@ class DeltaUrl(BaseModel):
     ai_content_hash: str | None = None  # hash of the text the model saw (resume / re-classify logic)
     ai_error: str | None = None  # why the last Suggest metadata call for this URL failed (cleared on success)
     ai_failures: int = 0  # Suggest metadata runs in a row that failed for this URL
+    # the last answer left out the division because the collection had one: the model was never
+    # asked. Only matters once that division is cleared — the row then owes a division nobody has
+    # been asked for, and Suggest metadata picks it up (see Database._LLM_MISSING).
+    division_skipped: bool = False
     # the title this page shared with other pages of the same document type before "Regenerate duplicate titles"
     # replaced its AI title (cleared with the AI title, and by a fresh Suggest metadata answer)
     title_ai_before: str | None = None
@@ -586,15 +640,39 @@ class MetadataSuggestion(BaseModel):
 
     title: str
     title_confidence: Confidence
-    division: Division
+    division: CuratedDivision  # the five real divisions: "General" is not an answer
     division_confidence: Confidence
     document_type: DocumentType
     document_type_confidence: Confidence
 
 
-class TitleSuggestion(BaseModel):
-    """The model's answer for ONE page whose title other pages of its collection share: a title
-    that tells it apart (the shared title unchanged, or null, when nothing does)."""
+class MetadataSuggestionNoDivision(BaseModel):
+    """The same answer for ONE document, without the division: what is asked when the curator gave
+    the collection a division. The division is theirs, so the model is not asked to second-guess
+    it and no division suggestion ever reaches the review table."""
 
-    title: str | None = None
+    title: str
     title_confidence: Confidence
+    document_type: DocumentType
+    document_type_confidence: Confidence
+
+
+class DistinctTitle(BaseModel):
+    """One page's new title inside a group that would all be indexed under the same one."""
+
+    url: str
+    title: str
+    title_confidence: Confidence
+
+
+class DistinctTitles(BaseModel):
+    """The model's answer for a GROUP of pages of one collection that would all be indexed under the
+    same title and document type: one title per page asked about, every one of them different from
+    the others and from the titles already settled in the group. There is no "leave it as it was":
+    two pages a search result cannot tell apart is never an acceptable answer, and the caller
+    disambiguates from the URLs whatever the model still leaves colliding."""
+
+    items: list[DistinctTitle]
+    # Pages whose content is the same page served at another URL. Retitling them is not the fix —
+    # one of the URLs should be excluded — so they are titled like the rest and flagged for the SME.
+    same_page_groups: list[list[str]] = []

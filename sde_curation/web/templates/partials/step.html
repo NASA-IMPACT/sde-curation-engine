@@ -26,7 +26,7 @@
 {% if step == 'backlog' %}
   {% set ex = stats.existing_crawl %}
   <dl class="meta"><dt>Seed</dt><dd><a href="{{ c.seed_url }}" target="_blank" rel="noopener">{{ c.seed_url }}</a></dd>
-      <dt>Max pages</dt><dd>{{ c.max_pages }}</dd><dt>Division</dt><dd>{{ c.division }}</dd>
+      <dt>Max pages</dt><dd>{{ c.max_pages }}</dd><dt>Division</dt><dd>{{ c.division }}{% if not c.division or c.division == 'General' %} <span class="muted small">not assigned — the AI suggests one per page</span>{% endif %}</dd>
       {% if ex %}<dt>Existing crawl</dt><dd>{{ ex.modified.strftime('%Y-%m-%d %H:%M') }}Z{% if not ex.complete %} <span class="err">(crawl in progress — checkpoint, not loadable)</span>{% elif ex.already_loaded %} <span class="muted">(loaded)</span>{% else %} <span class="muted">(not loaded yet)</span>{% endif %} <small class="muted">{{ ex.where }}</small></dd>{% endif %}</dl>
   {% if ex and not ex.complete %}<p class="muted">The crawler is still writing this collection on the crawler host (or died mid-run): the object above is a partial checkpoint. Wait for the crawl to finish, then reload this page to load it.</p>{% endif %}
   <div class="inline">
@@ -75,7 +75,7 @@
   </div>
 
 {% elif step == 'curated' %}
-  <dl class="meta"><dt>Curated</dt><dd>{{ c.curated_count }} URLs ({{ stats.curated_excluded }} excluded from indexing)</dd></dl>
+  <dl class="meta"><dt>Curated</dt><dd>{{ c.curated_count }} URLs indexed{% if stats.curated_excluded %} · <a href="/collections/{{ cid }}?tab=curated&excluded=true" title="excluded by rules: still listed under Curated URLs, kept out of the index">{{ stats.curated_excluded }} excluded</a>{% endif %}</dd></dl>
   <div class="inline">
     {% if info.state == 'todo' %}<span class="muted">Promote the deltas in step 3 first.</span>
     {% else %}

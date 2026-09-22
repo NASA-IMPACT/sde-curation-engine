@@ -20,7 +20,7 @@ ACTIONS = [
     ("POST", "/api/collections/{c}/scrape", None),
     ("POST", "/api/collections/{c}/recompute", None),
     ("POST", "/api/collections/{c}/patterns", {"type": "exclude", "match": "*/p3"}),
-    ("POST", "/api/collections/{c}/urls", {"url": "https://ex.org/p2", "type": "division", "value": "General"}),
+    ("POST", "/api/collections/{c}/urls", {"url": "https://ex.org/p2", "type": "division", "value": "Earth Science"}),
     ("POST", "/api/collections/{c}/urls", {"url": "https://ex.org/p2", "type": "exclude"}),
     ("POST", "/api/collections/{c}/promote", None),
     ("GET", "/api/collections/{c}/deltas?excluded=true", None),
@@ -43,11 +43,15 @@ STEP_PAGES = [f"/collections/{{c}}/step/{s.value}" for s in Status]
 async def invariants(client, cid):
     c = (await client.get(f"/api/collections/{cid}")).json()
     db = client.app.state.db
-    for table, col in (("dump_urls", "dump_count"), ("delta_urls", "delta_count"), ("curated_urls", "curated_count")):
+    for table, col in (("dump_urls", "dump_count"), ("delta_urls", "delta_count"), ("curated_urls", "curated_rows")):
         assert await db.fetchval(f"SELECT COUNT(*) FROM {table} WHERE collection_id=%s", (cid,)) == c[col], f"{col} drift"
+    # curated_count is the indexed subset: the curated rows an exclude rule does not keep out
+    assert await db.fetchval(
+        "SELECT COUNT(*) FROM curated_urls WHERE collection_id=%s AND NOT excluded", (cid,)
+    ) == c["curated_count"], "curated_count drift"
     st = c["status"]
     if st in ("curating", "curated", "config_generated", "live"):
-        assert c["dump_count"] > 0 or c["curated_count"] > 0, f"{st} with no data"
+        assert c["dump_count"] > 0 or c["curated_rows"] > 0, f"{st} with no data"
     if st == "curating":
         assert c["curation_stage"] in ("exclusions", "metadata"), "curating without a stage"
     else:
@@ -203,8 +207,10 @@ async def test_workbench_urls_tabs_and_csv(crawler_client):
     # the tab row carries the counts (the header has none)
     h = (await c.get("/collections/ex.org?tab=curated")).text
     assert re.search(r'Dump URLs <span class="count[^"]*">8</span>', h) and re.search(r'Curated URLs <span class="count[^"]*">7</span>', h)
-    # 3 typed rules + 21 from accepted AI suggestions (a title, division and type for each of the 7 included URLs)
-    assert re.search(r'Rules <span class="count[^"]*">24</span>', h) and ">Curate</a>" in h and "wb-chips" not in h
+    # 3 typed rules + 20 from accepted AI suggestions: a title, division and type for each of the 7
+    # included URLs, less p2's division — the typed `division */p2` rule decides it, so accept-all
+    # passed it over rather than overwrite it
+    assert re.search(r'Rules <span class="count[^"]*">23</span>', h) and ">Curate</a>" in h and "wb-chips" not in h
     assert (await c.get("/collections/ex.org/urls/nope")).status_code == 404
 
 

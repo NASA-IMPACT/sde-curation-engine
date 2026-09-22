@@ -5,11 +5,12 @@
   <td class="status-cell"><span class="status s-{{ c.status }}">{{ status_icon(c.status) }} {{ status_label(c.status) }}</span>
       {% if c.status == 'curating' and c.curation_stage %}<span class="chip stage" title="curation stage">{{ '① Exclusions' if c.curation_stage == 'exclusions' else '② Metadata' }}</span>{% endif %}
       {% if c.needs_recuration %}<span class="flag" title="needs re-curation: {{ c.recuration_reason or 'a re-crawl happened after a promote' }}">⚠</span>{% endif %}
-      {% if c.needs_reindexing %}<a class="chip warn" href="/collections/{{ c.collection_id }}?step=config_generated" title="The latest test index run failed or did not pass validation — Re-index to test, or Re-validate if the index only needed more time">⚠ needs re-indexing</a>{% endif %}
+      {% if c.needs_reindexing %}<a class="chip warn" href="/collections/{{ c.collection_id }}?step=config_generated" title="{{ c.reindex_reason }}">⚠ needs re-indexing</a>{% endif %}
       {% if c.prod_not_validated %}<a class="chip warn" href="/collections/{{ c.collection_id }}?step=live" title="The latest prod publish failed its validation or was never checked — see step 6: Re-validate prod, or Re-index to prod">⚠ prod not validated</a>{% endif %}</td>
   <td title="dump URLs"><a href="/collections/{{ c.collection_id }}?tab=dump">{{ c.dump_count }}</a></td>
   <td title="delta URLs"><a href="/collections/{{ c.collection_id }}?tab=delta">{{ c.delta_count }}</a></td>
-  <td title="curated URLs"><a href="/collections/{{ c.collection_id }}?tab=curated">{{ c.curated_count }}</a></td>
+{% set n_excl = c.curated_rows - c.curated_count %}
+  <td title="curated URLs that reach the index{% if n_excl > 0 %} — {{ n_excl }} more curated URL{{ 's are' if n_excl != 1 else ' is' }} excluded by rules: listed, but not counted and not indexed{% endif %}"><a href="/collections/{{ c.collection_id }}?tab=curated">{{ c.curated_count }}</a>{% if n_excl > 0 %}<small class="muted"> +{{ n_excl }}</small>{% endif %}</td>
   <td class="lastjob">{% if job %}<span class="job j-{{ job.state }}" title="{{ job.error or '' }}">{{ job.kind }} · {{ 'queued' if job.state == 'running' and job.progress.queued else job.state }}</span>
       {% if job.state == 'failed' %}<br><small class="err">{{ (job.error or '')[:90] }}</small>{% else %}<small class="muted"> {{ job_progress(job) }}</small>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
   <td><time datetime="{{ c.updated_at.isoformat() }}">{{ c.updated_at.strftime('%m-%d %H:%M') }}</time></td>
