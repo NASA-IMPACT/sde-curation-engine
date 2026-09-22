@@ -10,6 +10,9 @@ recompute(dump, curated, patterns, failures, capped) -> deltas
   (no delta) url in both and nothing changed; or url in curated, not in dump, but the crawl is
             not evidence it is gone — the row is kept and flagged (`crawl_failure`)
 
+`review_all=True` is the curator asking to curate the whole collection over again: every page the
+rules include is queued as `modified`, unchanged or not.
+
 Exclusions are decided by the rules alone, never queued as deltas: a dump URL an exclude rule
 keeps out has no delta row (not new, not modified); a curated row it newly keeps out is flagged
 excluded in place (`curated_excluded`, the next index run drops it). Only the way back in — a
@@ -119,11 +122,17 @@ def recompute(
     failures: dict[str, str] | None = None,
     capped: bool = False,
     division: str | None = None,
+    review_all: bool = False,
 ) -> DeltaSet:
     """`failures`: url -> crawler reason for every URL the crawl tried and could not fetch;
     `capped`: the crawl stopped at its page cap (unmet curated URLs are kept, not removed);
     `division`: the division the curator set for the whole collection, which fills every URL no
-    division rule decides (None = left to the AI, one suggestion per page)."""
+    division rule decides (None = left to the AI, one suggestion per page);
+    `review_all`: the curator asked to go through the whole collection again — every included page
+    is queued as a delta even where nothing differs from the curated row, so the AI passes and the
+    review tables have something to work on. Exclusions are still the rules' decision, removals are
+    still removals, and promoting the queue writes back what it says: an untouched row re-promotes
+    to the values it already had."""
     dump_by = {d.url: d for d in dump}
     cur_by = {c.url: c for c in curated}
     prev_by = {p.url: p for p in previous or []}
@@ -182,7 +191,7 @@ def recompute(
         renamed_from = cu if cu is not None and cu != u else None
         if c is None:
             kind = DeltaKind.NEW
-        elif (renamed_from or content_changed
+        elif (review_all or renamed_from or content_changed
               or eff != (c.scraped_title, c.title, c.division, c.document_type, c.excluded)):
             kind = DeltaKind.MODIFIED
         else:
@@ -243,10 +252,10 @@ def promote(
     curated: list[CuratedUrl], deltas: list[DeltaUrl], content_hashes: dict[str, str | None] | None = None
 ) -> list[CuratedUrl]:
     """Apply deltas to the curated set: tombstones remove, renames move, everything else upserts.
-    Every row the dump has takes the current dump text hash (`content_hashes`); the store copies
-    the matching dump text onto the row at the same time (`Database.replace_curated`), so the
-    curated set carries exactly the text its hash fingerprints and the export ships that. Rows
-    the dump lacks (kept through a crawl failure) keep their hash, text and flag."""
+    Every row the dump has takes the current dump text hash (`content_hashes`), and the hash is how
+    a row holds its text: `page_text` keys the page text by it, so a row carries exactly the text
+    its hash fingerprints and the export ships that. Rows the dump lacks (kept through a crawl
+    failure) keep their hash — and with it their text — and their flag."""
     hashes = content_hashes or {}
     by = {c.url: c for c in curated}
     for d in deltas:

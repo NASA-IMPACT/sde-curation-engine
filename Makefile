@@ -38,6 +38,14 @@ db-down:  ## stop it (data stays in the `pgdata` volume; `docker compose down -v
 	docker compose down
 db-shell:  ## psql into the local database
 	docker compose exec postgres psql -U engine -d engine
+db-compact:  ## VACUUM FULL the text-heavy tables — hands freed space back to the OS (DB_URL=...)
+	@echo "VACUUM FULL takes an ACCESS EXCLUSIVE lock and needs free space for a copy of each"
+	@echo "table: run it in a maintenance window, with the service stopped. Schema V9 left the"
+	@echo "old page text as dead rows; autovacuum already reuses that space, so this is only"
+	@echo "needed to shrink the volume itself."
+	psql "$(DB_URL)" -c "VACUUM (FULL, ANALYZE) dump_urls" \
+	                 -c "VACUUM (FULL, ANALYZE) curated_urls" \
+	                 -c "VACUUM (FULL, ANALYZE) page_text"
 run: db-up
 	$(VENV)/bin/uvicorn sde_curation.web.app:app --reload --port 8080
 test:  ## tests: reuse TEST_DATABASE_URL when set, else testcontainers starts a throwaway PostgreSQL

@@ -38,8 +38,13 @@ TS_COLS = {
 JSON_COLS = {("index_runs", "status"), ("index_runs", "validation"), ("job_runs", "progress")}
 IDENTITY_TABLES = ("status_history", "patterns", "pattern_suggestions", "job_runs", "users", "audit_log")
 # Tables that only ever existed in PostgreSQL: nothing to copy, and their absence from the source is fine.
-PG_ONLY_TABLES = {"dump_failures"}
+# `page_text` is one of them — the SQLite era kept the page text in a `full_text` column on the two
+# tables below, and `_copy_with_text` re-homes it as it copies.
+PG_ONLY_TABLES = {"dump_failures", "page_text"}
 SQLITE_TABLES = tuple(t for t in TABLES if t not in PG_ONLY_TABLES)
+# Tables whose SQLite `full_text` column has no counterpart here (schema V9): the text goes to
+# `page_text` once per content hash and the row keeps the hash that points at it.
+TEXT_TABLES = ("dump_urls", "curated_urls")
 
 # Columns the last SQLite release added at boot. A file without them was never opened by that
 # release; the importer does not replay ALTERs, so ask for a boot on the old version first.
@@ -55,9 +60,11 @@ REQUIRED_COLS = {
 # Portable versions of the data fix-ups the SQLite `_migrate` ran on every boot.
 BACKFILLS = (
     # SQLite never stored the approved text on the curated rows; the export shipped the dump text,
-    # so the dump text is what the index holds for them
-    """UPDATE curated_urls c SET full_text = d.full_text FROM dump_urls d
-       WHERE d.collection_id = c.collection_id AND d.url = c.url AND c.full_text IS NULL""",
+    # so the dump text is what the index holds for them. Since schema V9 a row holds its text by
+    # content hash, so taking the dump's hash is taking the dump's text (and both being NULL — an
+    # empty page — is the same no-op it was).
+    """UPDATE curated_urls c SET content_hash = d.content_hash FROM dump_urls d
+       WHERE d.collection_id = c.collection_id AND d.url = c.url AND c.content_hash IS NULL""",
     # rules that came from an accepted suggestion keep their origin instead of reading as SME
     """UPDATE patterns SET source = s.source FROM pattern_suggestions s
        WHERE s.collection_id = patterns.collection_id AND s.type = patterns.type
@@ -87,6 +94,42 @@ BACKFILLS = (
 
 class ImportError_(Exception):
     pass
+
+
+def _copy(pg, src: sqlite3.Connection, table: str, cols: list[str]) -> int:
+    n = 0
+    with pg.cursor() as cur, cur.copy(f"COPY {table} ({','.join(cols)}) FROM STDIN") as copy:
+        for row in src.execute(f"SELECT {','.join(cols)} FROM {table}"):
+            copy.write_row(tuple(_convert(table, c, row[c]) for c in cols))
+            n += 1
+    return n
+
+
+def _copy_with_text(pg, src: sqlite3.Connection, table: str, cols: list[str]) -> int:
+    """Copy a table whose SQLite rows carry `full_text`, splitting the text off into `page_text`.
+
+    The text is read once, through a temp table, and lands once per distinct content hash — which
+    is the whole point of V9: the dump and the curated set shared their text and the database
+    stored it twice. A row whose hash is NULL (an empty page) contributes no blob, as it holds no
+    text. `ON CONFLICT DO NOTHING` covers both the pages that repeat inside one table and the ones
+    the second table has already brought in: same hash, same normalised text."""
+    n = 0
+    pg.execute(f"CREATE TEMP TABLE import_in (LIKE {table}) ON COMMIT DROP")
+    pg.execute("ALTER TABLE import_in ADD COLUMN full_text text")
+    read = [*cols, "full_text"]
+    with pg.cursor() as cur, cur.copy(f"COPY import_in ({','.join(read)}) FROM STDIN") as copy:
+        for row in src.execute(f"SELECT {','.join(read)} FROM {table}"):
+            copy.write_row(tuple(_convert(table, c, row[c]) for c in read))
+            n += 1
+    pg.execute(
+        "INSERT INTO page_text (collection_id, content_hash, full_text)"
+        " SELECT collection_id, content_hash, full_text FROM import_in"
+        " WHERE content_hash IS NOT NULL AND full_text IS NOT NULL"
+        " ON CONFLICT (collection_id, content_hash) DO NOTHING"
+    )
+    pg.execute(f"INSERT INTO {table} ({','.join(cols)}) SELECT {','.join(cols)} FROM import_in")
+    pg.execute("DROP TABLE import_in")
+    return n
 
 
 def _ts(v: Any) -> datetime | None:
@@ -148,11 +191,10 @@ def run(sqlite_path: str | Path, dsn: str, *, replace: bool = False,
                         "SELECT column_name FROM information_schema.columns WHERE table_schema='public'"
                         " AND table_name=%s ORDER BY ordinal_position", (t,))]
                     cols = [c for c in pg_cols if c in src_cols[t]]
-                    n = 0
-                    with pg.cursor() as cur, cur.copy(f"COPY {t} ({','.join(cols)}) FROM STDIN") as copy:
-                        for row in src.execute(f"SELECT {','.join(cols)} FROM {t}"):
-                            copy.write_row(tuple(_convert(t, c, row[c]) for c in cols))
-                            n += 1
+                    if t in TEXT_TABLES and "full_text" in src_cols[t]:
+                        n = _copy_with_text(pg, src, t, cols)
+                    else:
+                        n = _copy(pg, src, t, cols)
                     counts[t] = n
                     log(f"{t}: {n} rows")
                 for sql in BACKFILLS:

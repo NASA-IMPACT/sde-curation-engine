@@ -43,7 +43,7 @@ and only two of those carry page text.
 
 | Tier | What | Memory |
 |---|---|---|
-| **Paginated** — `LIMIT`/`OFFSET` + a SQL `COUNT(*)` | `list_dump` (`db.py:425`), `list_curated` (`db.py:503`), `list_deltas`, `list_delta_ai`, `list_audit`, `list_jobs`, `list_index_runs`, `list_pattern_suggestions` | one page (default 100 rows). `list_dump` and `list_curated` return `length(full_text) AS text_len` rather than the text itself |
+| **Paginated** — `LIMIT`/`OFFSET` + a SQL `COUNT(*)` | `list_dump` (`db.py:425`), `list_curated` (`db.py:503`), `list_deltas`, `list_delta_ai`, `list_audit`, `list_jobs`, `list_index_runs`, `list_pattern_suggestions` | one page (default 100 rows). `list_dump` and `list_curated` return the page text's length (a scalar subquery on `page_text`) rather than the text itself |
 | **Keyset-streamed** | `iter_deltas_for_llm` (`db.py:1066`) — chunks of 200, `WHERE d.url > last ORDER BY d.url`, each chunk its own transaction | one chunk of 200 pages *with* full text. This is the one place full text is read in bulk and it is explicitly bounded: *"so a 100k-URL collection never sits in memory at once"* |
 | **Whole set, no text** | `load_dump` (`db.py:530`), `load_curated` (`db.py:753`, default), `load_deltas` (`db.py:586`), `list_patterns` (`db.py:1405`), `dump_urls`, `dump_content_hashes`, `title_keys`, `load_dump_failures` | proportional to URL count, not to crawl size. `load_dump` selects only `url, scraped_title, content_type, depth, content_hash`; `load_curated` uses `_CURATED_COLS`, which excludes `full_text` |
 | **Whole set, with text** | `load_curated(with_text=True)` (`jobs.py:629`, the export) and `parse_documents` (`backends/scrape.py:143`, the crawl ingest) | proportional to **bytes of page text**. These are the hotspots |
@@ -168,9 +168,10 @@ same way everywhere — tables, count columns, `?set=` query param, and UI label
 
 | Set | Table | Meaning |
 |---|---|---|
-| **Dump** | `dump_urls` | what the crawler found, one row per canonical page, carrying `full_text` and `content_hash`. Replaced wholesale by each crawl |
+| **Dump** | `dump_urls` | what the crawler found, one row per canonical page, carrying `content_hash` — the key of its page text in `page_text`. Replaced wholesale by each crawl |
 | **Delta** | `delta_urls` | the review queue: what would change in the curated set if promoted now. `new` / `modified` / `deleted`. Carries the AI's suggestions and their confidence |
-| **Curated** | `curated_urls` | what the index gets. Carries its **own** `full_text`, copied from the dump at promote time (schema V2), so an export never depends on the dump still holding that crawl |
+| **Curated** | `curated_urls` | what the index gets. Carries the `content_hash` it was promoted with, so an export never depends on the dump still holding that crawl — the text it names is kept in `page_text` until no row points at it |
+| **Page text** | `page_text` | the page text itself, once per `(collection, content_hash)` (schema V9). The dump and the curated rows approved from it share one copy; `Database._gc_page_text` drops a blob in the transaction that removes its last reference |
 
 Supporting tables: `patterns` (the rules), `pattern_effects` (which rule decided which field on
 which URL — so the UI can say *why*), `pattern_suggestions` (AI exclude proposals awaiting a
@@ -373,8 +374,8 @@ the stream, the ALB idle timeout is 3600 s, and uvicorn's keep-alive is 3620 s t
 
 | Store | Contents | Survives task replacement |
 |---|---|---|
-| **RDS Postgres** | everything that matters: all 13 tables | yes (snapshots + PITR) |
-| **EFS `/data`** | `collections/<id>/{collection,patterns}.yaml` (git-trackable provenance), index logs, scrape job files, and the downloaded crawl dump under `scrapes/` | yes |
+| **RDS Postgres** | everything that matters: all 14 tables | yes (snapshots + PITR) |
+| **EFS `/data`** | `collections/<id>/{collection,patterns}.yaml` (git-trackable provenance), index logs and scrape job files. **Not** the crawl: a remote scrape is streamed from S3 straight into the ingest and never written down here | yes |
 | **S3 (crawler bucket)** | the crawler's documents + failure logs | yes |
 | **S3 (cosmos bucket)** | exports (`curated_collections/`), run status (`index_runs/`), vectors (`vectorized/`) | yes |
 | **AOSS** | the `sde-web` index itself, test and prod | yes |
@@ -420,8 +421,10 @@ What grows with what:
 
 ### Known risks, in priority order
 
-1. **Crawl ingest reads the whole documents file** (`backends/scrape.py:143`). A 6.7 GB crawl
-   cannot be ingested on a 2 GB task. The streaming rewrite is in `git stash@{0}`, not in the tree.
+1. **The ingest holds a transaction open for the length of the S3 read.** A crawl is streamed
+   straight into the `COPY` that fills the staging table, so one pool connection (of
+   `DB_POOL_SIZE`) is held for as long as the object takes to read, and a broken stream fails the
+   scrape job. The crawl stays in S3, so a re-run is the recovery.
 2. **Export loads the curated set with text** (`jobs.py:629`). Needs a keyset-paginated
    `iter_curated` in the mould of `iter_deltas_for_llm`.
 3. **The in-process job registry** blocks replication, makes deploys destructive, and loses
@@ -430,5 +433,6 @@ What grows with what:
 5. **Migrations run at boot in the serving process**, so a slow `ALTER` on a large table can
    outrun the 120 s ALB health-check grace period and loop.
 6. **No stale-edit detection** on curation edits.
-7. **Dump files under `DATA_DIR/scrapes/` are never deleted after ingest** — only overwritten by
-   the next crawl of the same collection, so EFS grows with the number of collections crawled.
+7. **Only the app can turn a crawl into rows.** `aws_s3.table_import_from_s3` would let RDS read
+   the object itself, but it takes COPY formats only — the crawler would have to stop emitting a
+   JSON array, and duplicate-spelling detection and hashing would have to move into SQL.

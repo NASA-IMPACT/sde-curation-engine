@@ -4,9 +4,10 @@
   curated_collections/{collection_key}/{run_id}/manifest.json     written LAST (= "export complete")
 
 Only non-excluded curated URLs are exported, with the page text each row was approved with
-(`CuratedUrl.full_text`, copied from the dump at promote) — the curated set is the whole contract,
-the dump is not consulted. Title falls back to the scraped title; division and document_type fall
-back to the collection defaults via the manifest (the indexer applies them).
+(`CuratedUrl.full_text`, read through the `content_hash` the row was promoted with) — the curated
+set is the whole contract, the dump's current text is not consulted. Title falls back to the
+scraped title; division and document_type fall back to the collection defaults via the manifest
+(the indexer applies them).
 """
 
 from __future__ import annotations

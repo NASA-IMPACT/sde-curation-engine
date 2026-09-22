@@ -1,8 +1,14 @@
 """Scrape backends: run the crawl4ai scraper locally (subprocess) or remotely (EC2 via SSM).
 
-Both produce the same thing: a path to the crawler's documents JSON
+Both produce the same thing: a `DocumentSource` for the crawler's documents JSON
 (array of {url,title,full_text,content_type,seed,host,depth}), the failures JSONL
 (one {url,reason,status,detail,…} per URL the crawler could not fetch) and the failure summary.
+
+A source is opened, read once and closed — `ingest_dump` streams it into PostgreSQL and never
+holds more than a few hundred pages. The remote backend's source is the S3 object itself, so a
+crawl goes S3 → COPY without being written down anywhere on the way: parking it on DATA_DIR meant
+a multi-GB copy of every collection's crawl sitting on the shared EFS mount for ever, read twice
+and then never again.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import IO, Any, Protocol
 
 import ijson
 
@@ -37,16 +43,69 @@ class ScrapeError(RuntimeError):
     pass
 
 
+class DocumentSource(Protocol):
+    """Somewhere the crawl's documents JSON can be read from as a byte stream."""
+
+    def open(self) -> IO[bytes]:
+        """A fresh reader positioned at the start. The caller closes it."""
+
+    def describe(self) -> str:
+        """Where this is, for an error message."""
+
+
+@dataclass(frozen=True)
+class FileDocuments:
+    """A file on this host — the local crawler's own output, which it owns and we only read."""
+
+    path: Path
+
+    def open(self) -> IO[bytes]:
+        return self.path.open("rb")
+
+    def describe(self) -> str:
+        return str(self.path)
+
+    def exists(self) -> bool:
+        return self.path.is_file()
+
+
+@dataclass(frozen=True)
+class S3Documents:
+    """An object in the crawler's bucket, read straight into the ingest.
+
+    `open()` issues a fresh GET, so the object is never copied to disk on the way to PostgreSQL.
+    The body is a single long-lived HTTP stream: a crawl is read exactly once (`replace_dump` does
+    the duplicate-spelling pass from a temp table, not from a second read of this), and a stream
+    that breaks fails the scrape job, which is re-runnable — the crawl stays in S3 either way."""
+
+    s3: Any
+    bucket: str
+    key: str
+
+    def open(self) -> IO[bytes]:
+        return self.s3.get_object(Bucket=self.bucket, Key=self.key)["Body"]
+
+    def describe(self) -> str:
+        return f"s3://{self.bucket}/{self.key}"
+
+
 @dataclass
 class ScrapeResult:
-    documents_path: Path
+    documents: DocumentSource
     summary: dict[str, Any] = field(default_factory=dict)
     external_ref: str | None = None
     crawled_at: datetime | None = None  # when the documents were produced (reused crawls); None = now
-    failures_path: Path | None = None  # the crawler's failures JSONL, when it produced one
+    # The crawler's failures JSONL, when it produced one. Unlike the documents this is read whole:
+    # it is one short line per URL the crawl could not fetch, and the diff wants all of them at once.
+    failures_source: DocumentSource | None = None
 
     def failures(self) -> list[dict[str, Any]]:
-        return parse_failures(self.failures_path) if self.failures_path and self.failures_path.is_file() else []
+        if self.failures_source is None:
+            return []
+        if isinstance(self.failures_source, FileDocuments) and not self.failures_source.exists():
+            return []
+        with self.failures_source.open() as fh:
+            return parse_failures(fh.read())
 
     def capped(self, documents: int, fallback_max_pages: int | None = None) -> bool:
         """Did the crawl stop at its page cap? The summary knows the cap the crawler ran with;
@@ -142,25 +201,47 @@ class LogProgress:
         return {"processed": self.processed, "docs": self.ok, "failed": self.failed}
 
 
-def iter_documents(path: Path) -> Iterator[dict[str, Any]]:
-    """The crawl's documents, one at a time. The file is a single JSON array with the full text of
-    up to 100k pages; read whole and parsed whole it was held in memory three times over during
-    ingest, which is what decided the engine's memory size."""
-    with path.open("rb") as fh:
-        if not fh.read(256).lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"["):
-            raise ScrapeError(f"documents file is not a JSON array: {path}")
-        fh.seek(0)
+def iter_documents(source: DocumentSource) -> Iterator[dict[str, Any]]:
+    """The crawl's documents, one at a time. The source is a single JSON array with the full text
+    of up to 100k pages; read whole and parsed whole it was held in memory three times over during
+    ingest, which is what decided the engine's memory size. Read once, forwards only — an S3 body
+    cannot be rewound, so the opening bracket is checked from a buffer rather than by seeking."""
+    where = source.describe()
+    with source.open() as raw:
+        head = raw.read(256)
+        if not head.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"["):
+            raise ScrapeError(f"documents file is not a JSON array: {where}")
         try:
-            yield from ijson.items(fh, "item", use_float=True)
+            yield from ijson.items(_Pushback(raw, head), "item", use_float=True)
         except ijson.JSONError as e:
-            raise ScrapeError(f"documents file is not valid JSON: {path} ({e})") from e
+            raise ScrapeError(f"documents file is not valid JSON: {where} ({e})") from e
 
 
-def parse_failures(path: Path) -> list[dict[str, Any]]:
+class _Pushback:
+    """`raw` with `head` put back in front of it. An S3 body is forwards-only — it cannot be
+    seeked back to 0 after the opening bracket has been sniffed — and this is the whole of what
+    ijson asks of a stream (`read(n)`), so it costs one small object instead of a second GET."""
+
+    def __init__(self, raw: IO[bytes], head: bytes):
+        self._raw, self._head = raw, head
+
+    def read(self, size: int = -1) -> bytes:
+        if not self._head:
+            return self._raw.read(size)
+        if size is None or size < 0:
+            out, self._head = self._head + self._raw.read(), b""
+            return out
+        out, self._head = self._head[:size], self._head[size:]
+        if len(out) < size:
+            out += self._raw.read(size - len(out))
+        return out
+
+
+def parse_failures(data: bytes) -> list[dict[str, Any]]:
     """The crawler's failures JSONL: one object per line; a bad line is skipped, not fatal
     (the file is a log, and losing one record only turns a kept row into a removal)."""
     out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in data.decode("utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -211,8 +292,8 @@ class LocalSubprocessScraper:
         summary: dict[str, Any] = {}
         if p["summary"].is_file():
             summary = json.loads(p["summary"].read_text(encoding="utf-8"))
-        return ScrapeResult(documents_path=p["docs"], summary=summary, external_ref="reused", crawled_at=ex.modified,
-                            failures_path=p["failures"])
+        return ScrapeResult(documents=FileDocuments(p["docs"]), summary=summary, external_ref="reused",
+                            crawled_at=ex.modified, failures_source=FileDocuments(p["failures"]))
 
     async def run(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult:
         if not (self.root / "run.py").is_file():
@@ -262,8 +343,8 @@ class LocalSubprocessScraper:
         summary: dict[str, Any] = {}
         if p["summary"].is_file():
             summary = json.loads(p["summary"].read_text(encoding="utf-8"))
-        return ScrapeResult(documents_path=p["docs"], summary=summary, external_ref=str(proc.pid),
-                            failures_path=p["failures"])
+        return ScrapeResult(documents=FileDocuments(p["docs"]), summary=summary, external_ref=str(proc.pid),
+                            failures_source=FileDocuments(p["failures"]))
 
     async def _tail(self, log: Path, on_progress: ProgressCb, proc: asyncio.subprocess.Process) -> None:
         """Poll the crawler's job log and push progress snapshots when they change."""
@@ -455,36 +536,33 @@ class SsmRemoteScraper:
                 "collection, or died mid-run. Wait for it to finish, or run the crawler."
             )
         await on_progress({"reused": True})
-        result = await self._download(collection)
+        result = await self._resolve(collection)
         result.external_ref, result.crawled_at = "reused", ex.modified
         return result
 
-    async def _download(self, collection: Collection) -> ScrapeResult:
-        cid, keys = collection.collection_id, self._crawl_keys(collection)
-        docs_key, summary_key, failures_key = keys["docs"], keys["summary"], keys["failures"]
-        local = self.s.data_dir / "scrapes" / f"{cid}.json"
-        local_failures = local.with_name(f"{cid}_failures.jsonl")
-        local.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(
-            self.s3.download_file, self.s.crawler_s3_bucket, docs_key, str(local)
-        )
+    async def _resolve(self, collection: Collection) -> ScrapeResult:
+        """Point the ingest at the crawl in S3 — nothing is downloaded here.
+
+        The documents object is GBs of JSON per collection. Copying it to DATA_DIR gave every
+        collection a permanent second copy on the shared EFS mount that nothing ever read again
+        (`existing` heads S3, `fetch_existing` comes back through here), and put an NFS round trip
+        between the crawl and PostgreSQL. `ingest_dump` reads this stream exactly once, straight
+        into a COPY. Only the two small objects — the failure summary and the failures log — are
+        fetched now, because the diff wants all of their contents at once anyway."""
+        keys = self._crawl_keys(collection)
+        bucket = self.s.crawler_s3_bucket
         summary: dict[str, Any] = {}
         try:
-            obj = await asyncio.to_thread(
-                self.s3.get_object, Bucket=self.s.crawler_s3_bucket, Key=summary_key
-            )
+            obj = await asyncio.to_thread(self.s3.get_object, Bucket=bucket, Key=keys["summary"])
             summary = json.loads(obj["Body"].read())
         except self.s3.exceptions.ClientError:
             pass
-        local_failures.unlink(missing_ok=True)  # never pair a new dump with an older crawl's failures
-        try:
-            await asyncio.to_thread(
-                self.s3.download_file, self.s.crawler_s3_bucket, failures_key, str(local_failures)
-            )
-        except self.s3.exceptions.ClientError:
-            pass
-        return ScrapeResult(documents_path=local, summary=summary,
-                            failures_path=local_failures if local_failures.is_file() else None)
+        # a crawl with no failures uploads no log; never pair this dump with an older crawl's
+        failures = S3Documents(self.s3, bucket, keys["failures"])
+        if await self._head(keys["failures"]) is None:
+            failures = None
+        return ScrapeResult(documents=S3Documents(self.s3, bucket, keys["docs"]), summary=summary,
+                            failures_source=failures)
 
     async def _poll(self, cid: str) -> RemotePoll | None:
         status, out = await self._invocation(await self._send(self.poll_script(cid)))
@@ -561,7 +639,7 @@ class SsmRemoteScraper:
                     f"remote crawl stalled: no log activity for {stalled / 3600:.1f}h"
                 )
 
-        result = await self._download(collection)
+        result = await self._resolve(collection)
         result.external_ref = cmd_id or "attached"
         return result
 

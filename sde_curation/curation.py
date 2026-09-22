@@ -22,19 +22,30 @@ from .models import (
 
 class IncompleteMetadata(Exception):
     """Promote refused: some delta URLs would reach the curated set without a title, a division or a
-    document type. `counts` is Database.incomplete_counts."""
+    document type, or under a title another page is already indexed under. `counts` is
+    Database.incomplete_counts — a row with no title rule but a scraped title is not blank: the
+    export indexes it under the scraped title. It is refused only if that title is shared."""
 
     def __init__(self, counts: dict[str, int]):
         self.counts = counts
         general = counts.get("general", 0)
-        missing = ", ".join(f"{counts[f]} without a {label}" for f, label in
-                            (("title", "title"), ("division", "division"), ("document_type", "document type"))
-                            if counts[f])
-        if general:  # the same rows as `division`, but they read as set until you look
-            missing += f" (of those, {general} still on the General placeholder)"
+        # the General note belongs to the division clause: those rows read as set until you look
+        parts = [f"{counts[f]} without a {label}"
+                 + (f" (of those, {general} still on the General placeholder)" if f == "division" and general else "")
+                 for f, label in (("title", "title"), ("division", "division"), ("document_type", "document type"))
+                 if counts[f]]
+        dup = counts.get("duplicate", 0)
+        blank, fix = bool(parts), []
+        if dup:
+            parts.append(f"{dup} sharing a title and document type with another page")
+        if blank:
+            fix.append("accept the AI suggestions or set the values by hand first")
+        if dup:
+            fix.append("Regenerate duplicate titles gives the shared ones a title of their own"
+                       if blank else "run Regenerate duplicate titles, or give them a title of their own by hand")
         n = counts["urls"]
-        super().__init__(f"{n} delta URL{'s' if n != 1 else ''} cannot be promoted yet ({missing}):"
-                         " accept the AI suggestions or set the values by hand first")
+        super().__init__(f"{n} delta URL{'s' if n != 1 else ''} cannot be promoted yet"
+                         f" ({', '.join(parts)}): {'; '.join(fix)}")
 
 
 class CurationService:
@@ -42,14 +53,15 @@ class CurationService:
         self.db = db
         self._lock_for = lock_for or (lambda cid: asyncio.Lock())
 
-    async def recompute(self, c: Collection) -> DeltaSet:
+    async def recompute(self, c: Collection, *, review_all: bool = False) -> DeltaSet:
         """diff + apply patterns in one idempotent pass; persists deltas and pattern effects.
         Serialised per collection so two recomputes (or a recompute and a promote) never
-        interleave their delete+insert on delta_urls."""
+        interleave their delete+insert on delta_urls.
+        `review_all`: queue every included page for review again, changed or not (see engine.diff)."""
         async with self._lock_for(c.collection_id):
-            return await self._recompute(c)
+            return await self._recompute(c, review_all=review_all)
 
-    async def _recompute(self, c: Collection) -> DeltaSet:
+    async def _recompute(self, c: Collection, *, review_all: bool = False) -> DeltaSet:
         dump, curated, patterns, previous, failures = (
             await self.db.load_dump(c.collection_id),
             await self.db.load_curated(c.collection_id),
@@ -69,6 +81,7 @@ class CurationService:
             failures=failures,
             capped=c.last_crawl_capped,
             division=c.division if division_assigned(c.division) else None,
+            review_all=review_all,
         )
         await self.db.replace_deltas(c.collection_id, ds.deltas, ds.effects)
         if ds.curated_edited_by:
@@ -253,7 +266,7 @@ class CurationService:
                 content_hashes={u: h for u, h in hashes.items() if u in wanted},
             )
             picked_urls = [d.url for d in picked]
-            n = await self.db.replace_curated(c.collection_id, curated, text_urls=picked_urls)
+            n = await self.db.replace_curated(c.collection_id, curated)
             await self.db.delete_deltas(c.collection_id, picked_urls)
             await self.db.delete_effects(c.collection_id, [d.url for d in picked if d.kind is DeltaKind.DELETED])
             if not left:  # the whole queue is through: the re-curation flag comes down, as in _promote

@@ -113,9 +113,15 @@ def test_v2_backfills_curated_text_from_the_dump(pg_url):
         conn.execute("INSERT INTO curated_urls (collection_id,url,excluded) VALUES"
                      " ('c','https://c/a',false), ('c','https://c/gone',false), ('c','https://c/out',true)")
         try:
-            assert migrate_sync(conn) == 8
-            rows = dict(conn.execute("SELECT url, full_text FROM curated_urls ORDER BY url").fetchall())
+            assert migrate_sync(conn) == 9
+            # V2 put the dump text on the curated row; V9 moved both onto one blob keyed by the
+            # content hash it gives a row that predates hashing, so the text survives shared
+            rows = dict(conn.execute(
+                "SELECT c.url, p.full_text FROM curated_urls c"
+                " LEFT JOIN page_text p ON p.collection_id=c.collection_id AND p.content_hash=c.content_hash"
+                " ORDER BY c.url").fetchall())
             assert rows == {"https://c/a": "body a", "https://c/gone": None, "https://c/out": None}
+            assert conn.execute("SELECT COUNT(*) FROM page_text").fetchone() == (1,), "one copy, not two"
             # V7 derives both curated counters from the table: the count is the included rows only
             assert conn.execute("SELECT curated_count, curated_rows, curated_changed_at FROM collections"
                                 " WHERE collection_id='c'").fetchone() == (2, 3, None)
@@ -125,6 +131,6 @@ def test_v2_backfills_curated_text_from_the_dump(pg_url):
                 "c": "Earth Science", "g": "General"}
             # V8 adds the flag that records "the model was never asked for this row's division"
             assert conn.execute("SELECT division_skipped FROM delta_urls").fetchall() == []
-            assert migrate_sync(conn) == 8
+            assert migrate_sync(conn) == 9  # idempotent: nothing left to apply
         finally:
             conn.execute("DROP SCHEMA mig CASCADE")

@@ -23,11 +23,19 @@
           aria-label="{{ 'force include' if r.excluded else 'exclude' }}" title="{{ 'excluded — click to force include (exact-URL include rule: shows up under Delta URLs to promote)' if r.excluded else 'included — click to exclude (exact-URL exclude rule: takes effect at once, never waits under Delta URLs)' }}">{{ '✓ include' if r.excluded else '✗ exclude' }}</button>
 {%- endmacro %}
 
+{# The effective title is the row's own (a rule set it) or, with no rule, the scraped title: that is
+   what the export indexes the page under, so the cell shows it rather than an empty dash, and
+   promote counts the row as titled. The scraped line above it is dropped when it IS the effective
+   title — one title, said once. #}
 {% macro title_cell(r, why, editable) -%}
   {% set dup = dup_titles.get(r.url) if dup_titles is defined else none %}
-  <small class="muted">{{ r.scraped_title or '' }}</small><br>
-  <button type="button" class="linkish" {% if not editable %}disabled{% endif %} title="{{ why.title or 'click to set a title (creates an exact-URL title rule)' }}"
-          onclick='editTitle({{ cid|tojson }}, {{ r.url|tojson }}, {{ (r.title or r.scraped_title or "")|tojson }}, {{ 'true' if (r.title_ai is defined and r.title_ai) else 'false' }})'>{{ r.title or '—' }}</button>
+  {% set own = (r.title or '')|trim %}
+  {% set eff = own or (r.scraped_title or '')|trim %}
+  {% if own %}<small class="muted">{{ r.scraped_title or '' }}</small><br>{% endif %}
+  <button type="button" class="linkish{{ ' scraped' if not own }}" {% if not editable %}disabled{% endif %}
+          title="{{ why.title or ('scraped from the page — no title rule, so this is the title the index gets. Click to set one.' if eff else 'the crawl found no title on this page: promote refuses it until you set one. Click to set a title (creates an exact-URL title rule)') }}"
+          onclick='editTitle({{ cid|tojson }}, {{ r.url|tojson }}, {{ eff|tojson }}, {{ 'true' if (r.title_ai is defined and r.title_ai) else 'false' }})'>{{ eff or '—' }}</button>
+  {%- if not own and eff %} <span class="src" title="no title rule on this URL: the index gets the scraped title">scraped</span>{% endif %}
   {# The badge is a filter link: on a URL table it filters that table, under Curate › Metadata it
      filters the review table in place, so fixing a collision never leaves the step. #}
   {% if dup %} <a class="dup-title" href="{{ dup_href if dup_href is defined else '/collections/' ~ cid ~ '?tab=' ~ ('curated' if set is defined and set == 'curated' else 'delta') ~ '&dup=title' }}" title="Show the pages that collide.&#10;{{ dup.others }} other page{{ 's' if dup.others != 1 }} will be indexed as “{{ dup.title }}” with the same document type{{ ' (' ~ dup.document_type ~ ')' if dup.document_type }} too{{ ' (counting pending AI suggestions as accepted)' if r.title_ai is defined and (r.title_ai or r.document_type_ai) }}: search results cannot tell them apart.&#10;{% for u in dup.sample %}{{ u }}&#10;{% endfor %}{% if dup.others > dup.sample|length %}… and {{ dup.others - dup.sample|length }} more{% endif %}">⚠ same title + type ×{{ dup.others + 1 }}</a>{% endif %}
@@ -44,13 +52,16 @@
 {% macro select_cell(r, why, editable, field, values) -%}
   {% set ai_val = r[field ~ '_ai'] if r[field ~ '_ai'] is defined else none %}
   {% set ai_conf = r[field ~ '_ai_conf'] if r[field ~ '_ai_conf'] is defined else none %}
-  {# A division of General means nobody has decided yet: it is offered like any other value, but
-     promote refuses the row until a real one is set, so the cell says so. #}
+  {# General is the collection's "not assigned yet" placeholder, not a division a page is curated
+     into, so it is not among the values offered here. A row still carrying it — from an older rule,
+     or one written before — keeps it as an option of its own so the cell shows the row's real value
+     rather than a blank, and says that promote refuses it until one of the five is set. #}
   {% set unassigned = field == 'division' and r[field] == 'General' %}
   <select class="cell {{ 'unassigned' if unassigned }}" {% if not editable %}disabled{% endif %} title="{{ why[field] or ('set ' ~ field|replace('_', ' ') ~ ' for this URL (exact-URL rule)') }}"
           onchange='editField({{ cid|tojson }}, {{ r.url|tojson }}, {{ field|tojson }}, this.value, {{ (ai_val is not none)|tojson }})'>
-    <option value="">—</option>{% for v in values %}<option {% if r[field] == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
-  {%- if unassigned %} <span class="held" title="General is a placeholder, not a division: promote refuses this row until one of the five is set">not promotable</span>{% endif %}
+    <option value="">—</option>{% for v in values %}<option {% if r[field] == v %}selected{% endif %}>{{ v }}</option>{% endfor %}
+    {%- if r[field] and r[field] not in values %}<option selected>{{ r[field] }}</option>{% endif %}</select>
+  {%- if unassigned %} <span class="held" title="General is a placeholder, not a division: promote refuses this row until one of the five is set. It is no longer offered here — pick one of the five.">not promotable</span>{% endif %}
   {% if ai_val %}<br><span class="ai conf-{{ ai_conf }}" title="AI suggestion · {{ ai_conf or '?' }} confidence · {{ r.ai_model or '' }}">AI: {{ ai_val }} <small>{{ ai_conf }}</small></span>
     <span class="nowrap"><button class="mini ok" title="accept" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✓</button><button class="mini" type="button" title="pick a different value, then it is accepted as edited" {% if not editable %}disabled{% endif %} onclick='pickAi(this, {{ ai_val|tojson }})'>✎</button><button class="mini" title="dismiss" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✕</button></span>{{ held_back(r, field) }}{% endif %}
 {%- endmacro %}

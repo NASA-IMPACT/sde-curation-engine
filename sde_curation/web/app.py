@@ -44,6 +44,7 @@ from ..llm.global_excludes import load_global_excludes
 from ..llm.tasks import PATTERN_SYSTEM, TITLE_SIBLINGS, TITLES_SYSTEM, metadata_system
 from ..models import (
     ANONYMOUS_ACTOR,
+    CURATION_DIVISIONS,
     NOT_VISITED,
     Collection,
     CollectionCreate,
@@ -195,9 +196,13 @@ def status_label(st) -> str:
     return STATUS_LABEL.get(Status(st), str(st))
 
 
+# `divisions` (per request) is all six, for the collection's own division and the filters; a page is
+# curated into one of the five — General is the collection's "not assigned yet" placeholder, never an
+# answer for a URL — so everything that sets a division on a URL offers `curation_divisions`.
 templates.env.globals.update(
     next_action=next_action, pipeline_steps=pipeline_steps, status_icon=status_icon, status_label=status_label,
     step_for_kind=lambda kind: STEP_FOR_KIND.get(str(kind)),
+    curation_divisions=list(CURATION_DIVISIONS),
 )
 
 
@@ -864,9 +869,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ai_dups_only = lp["dup"] == "title"
         ai_conf = None if ai_dups_only or qp.get("conf") not in ("high", "medium", "low") else qp.get("conf")
         ai_field = None if ai_dups_only or qp.get("field") not in AI_FIELDS else qp.get("field")
+        # A row the curator has finished stays in the table, in its place, marked decided — the list
+        # must not renumber under the hand that is working down it. ?decided=hide drops them.
+        ai_hide_decided = qp.get("decided") == "hide"
         ai_args = {"field": ai_field, "conf": ai_conf, "dups_only": ai_dups_only,
-                   "with_dups": not (ai_conf or ai_field)}
-        _, ai_total = await d.list_delta_ai(cid, limit=0, **ai_args)
+                   "with_dups": not (ai_conf or ai_field), "undecided_only": ai_hide_decided}
+        # the whole round, and how much of it is still to decide: both counted whichever way the
+        # toggle is set, so the toggle can always say how many rows it hides or brings back
+        ai_round, ai_left = await d.count_delta_ai(cid, **{k: v for k, v in ai_args.items() if k != "undecided_only"})
+        ai_total = ai_left if ai_hide_decided else ai_round
         ai_paging = paging("metadata", ai_total)
         ai_rows, _ = await d.list_delta_ai(cid, limit=ai_paging["limit"], offset=ai_paging["offset"], **ai_args)
         step = await step_context(request, c, Status.CURATING)
@@ -888,6 +899,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "ai_accept_counts": accept_counts, "ai_held": held, "ai_held_total": sum(held.values()),
             "ai_accept_total": sum(accept_counts.values()),
             "ai_rows": ai_rows, "ai_conf": ai_conf, "ai_field": ai_field, "ai_dups_only": ai_dups_only,
+            "ai_hide_decided": ai_hide_decided, "ai_left": ai_left, "ai_round": ai_round,
+            "ai_decided": ai_round - ai_left,
             # the ⚠ same-title badge stays on this step instead of jumping to the Delta URLs tab
             "dup_href": f"/collections/{cid}?tab=curate{'&focus=metadata' if focus else ''}&dup=title#metadata",
             "ai_filtered": await d.count_ai_suggestions(cid, field=ai_field, conf=ai_conf) if (ai_conf or ai_field) else 0,
@@ -1280,7 +1293,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             n and c.status in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE)
         ):
             c = await db(request).set_status(
-                c.collection_id, Status.CURATING, note=f"delta URLs recomputed: {n}", force=True,
+                c.collection_id, Status.CURATING, note=note or f"delta URLs recomputed: {n}", force=True,
                 actor=actor(request),
             )
         elif getattr(ds, "curated_excluded", None) and c.status in (Status.CONFIG_GENERATED, Status.LIVE):
@@ -1302,16 +1315,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return c
 
     @app.post("/api/collections/{collection_id}/recompute")
-    async def api_recompute(request: Request, collection_id: str):
-        """Calculate deltas (dump vs curated) and apply all patterns. Idempotent."""
+    async def api_recompute(request: Request, collection_id: str, all: bool = False):
+        """Calculate deltas (dump vs curated) and apply all patterns. Idempotent.
+
+        `?all=true` is the curator asking to curate the collection over again: every page the rules
+        include is queued for review, changed or not, and the stages start again at exclusions —
+        so the AI passes, the review tables and promote all have the whole collection to work on.
+        Nothing is written to the curated URLs (and nothing reaches the index) until it is promoted,
+        so a re-curate can be abandoned by promoting the queue back as it stands."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         if c.dump_count == 0:
             raise HTTPException(409, "no dump ingested yet — scrape first")
+
         async def work() -> dict:
-            ds = await curation(request).recompute(c)
-            await _after_curation_change(request, c, ds)
-            await audit(request, "recompute", collection_id, f"{len(ds.deltas)} delta URLs")
+            ds = await curation(request).recompute(c, review_all=all)
+            n = len(ds.deltas)
+            await _after_curation_change(
+                request, c, ds, note=f"re-curating: {n} delta URLs queued for review" if all else None)
+            if all and n:  # start the walk-through again, whatever stage the last one ended on
+                await _set_stage(request, collection_id, CurationStage.EXCLUSIONS)
+            await audit(request, "recompute.all" if all else "recompute", collection_id, f"{n} delta URLs")
             return ds.counts
 
         return await run_or_job(request, c, JobKind.RECOMPUTE, f"comparing {c.dump_count:,} dump URLs with the curated URLs", work)
