@@ -284,6 +284,15 @@ class Database:
             await self._pool.close()
             self._pool = None
 
+    async def recycle_connections(self) -> None:
+        """Replace every pooled connection with a fresh one. A connection that carried a crawl's
+        COPY keeps libpq/psycopg buffers at the size of the biggest pages it moved for as long as
+        it lives — on a 45K-page crawl that was most of what the engine still held once the job
+        was over. Idle connections close now; one out on a request closes when it is returned,
+        after its own transaction, so nothing in flight is cut off. Nothing is bound to a
+        connection between transactions (temp tables are ON COMMIT DROP, locks are xact-scoped)."""
+        await self.pool.drain()
+
     async def ping(self) -> bool:
         async with self._conn() as conn:
             cur = await conn.execute("SELECT 1 AS ok")

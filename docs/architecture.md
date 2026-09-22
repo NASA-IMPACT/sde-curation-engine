@@ -1,8 +1,9 @@
 # Architecture and workflow
 
 How the engine is put together, what happens at each stage of the curation pipeline, where jobs
-live, and what it loads into memory. Describes the code at the current commit
-(`git log -1 --oneline` → `cc796b6 llm fixes`).
+live, and what it loads into memory. Describes the code at `3b1810e` on `featuure/optimize-app`
+plus the ingest-memory changes in the working tree (2026-09-22): schema V9, the streamed ingest
+with byte-capped chunks, connection recycling after the ingest, and the streamed export.
 
 Companion docs: `infra/README.md` (the deployed stack), `docs/deploy-dev.md` (deploys),
 `docs/workflow.md` (the curator’s view).
@@ -17,16 +18,16 @@ The per-set counts shown on each row are denormalized integer columns on `collec
 dashboard never touches `dump_urls`, `delta_urls` or `curated_urls` at all.
 
 What it does do is **one query per collection** for the latest job. Full profile of one dashboard
-render (`dashboard_context`, `web/app.py:529`):
+render (`dashboard_context`, `web/app.py:551`):
 
 | Query | Count | Notes |
 |---|---|---|
-| `list_collections()` (`db.py:252`) | 1 | all 30 rows, `SELECT *` on a narrow table |
-| `latest_runs("test")` + `latest_runs("prod")` (`db.py:921`) | 2 | `DISTINCT ON (collection_id)` — deliberately batched for the chips |
+| `list_collections()` (`db.py:345`) | 1 | all 30 rows, `SELECT *` on a narrow table |
+| `latest_runs("test")` + `latest_runs("prod")` (`db.py:1170`) | 2 | `DISTINCT ON (collection_id)` — deliberately batched for the chips |
 | `active_jobs()` | 1 | `WHERE state IN ('queued','running')` |
 | `list_recent_jobs(5, "failed")` | 1 | jobs strip |
-| `list_collections()` again, in `jobs_context` (`web/app.py:605`) | 1 | duplicate of the first; the two contexts are merged but not shared |
-| `latest_job(cid)` per shown collection, via `row_context` (`web/app.py:487`) | **30** | sequential `await` in a list comprehension |
+| `list_collections()` again, in `jobs_context` (`web/app.py:627`) | 1 | duplicate of the first; the two contexts are merged but not shared |
+| `latest_job(cid)` per shown collection, via `row_context` (`web/app.py:509`) | **30** | sequential `await` in a list comprehension |
 
 So ~36 round trips, each an index lookup — `latest_job` is `ORDER BY id DESC LIMIT 1` served by
 `job_runs_coll (collection_id, id DESC)`. It is an N+1, but a cheap one: the cost is 30 serialized
@@ -37,16 +38,17 @@ those 30 objects (`keep()`, `Counter`) — deliberately, because the pane shows 
 distribution.
 
 **Everything the curator browses is paginated. The batch paths are the ones that load whole sets**,
-and only two of those carry page text.
+and none of those carry page text: the three paths that move text in bulk (ingest, LLM, export) all
+stream it.
 
 ### The four tiers of data access
 
 | Tier | What | Memory |
 |---|---|---|
-| **Paginated** — `LIMIT`/`OFFSET` + a SQL `COUNT(*)` | `list_dump` (`db.py:425`), `list_curated` (`db.py:503`), `list_deltas`, `list_delta_ai`, `list_audit`, `list_jobs`, `list_index_runs`, `list_pattern_suggestions` | one page (default 100 rows). `list_dump` and `list_curated` return the page text's length (a scalar subquery on `page_text`) rather than the text itself |
-| **Keyset-streamed** | `iter_deltas_for_llm` (`db.py:1066`) — chunks of 200, `WHERE d.url > last ORDER BY d.url`, each chunk its own transaction | one chunk of 200 pages *with* full text. This is the one place full text is read in bulk and it is explicitly bounded: *"so a 100k-URL collection never sits in memory at once"* |
-| **Whole set, no text** | `load_dump` (`db.py:530`), `load_curated` (`db.py:753`, default), `load_deltas` (`db.py:586`), `list_patterns` (`db.py:1405`), `dump_urls`, `dump_content_hashes`, `title_keys`, `load_dump_failures` | proportional to URL count, not to crawl size. `load_dump` selects only `url, scraped_title, content_type, depth, content_hash`; `load_curated` uses `_CURATED_COLS`, which excludes `full_text` |
-| **Whole set, with text** | `load_curated(with_text=True)` (`jobs.py:629`, the export) and `parse_documents` (`backends/scrape.py:143`, the crawl ingest) | proportional to **bytes of page text**. These are the hotspots |
+| **Paginated** — `LIMIT`/`OFFSET` + a SQL `COUNT(*)` | `list_dump` (`db.py:593`), `list_curated` (`db.py:672`), `list_deltas`, `list_delta_ai`, `list_audit`, `list_jobs`, `list_index_runs`, `list_pattern_suggestions` | one page (default 100 rows). `list_dump` and `list_curated` return the page text's length (a scalar subquery on `page_text`) rather than the text itself |
+| **Streamed, with text** | `iter_deltas_for_llm` (`db.py:1315`) — keyset chunks of 200, each its own transaction; `iter_curated_for_export` (`db.py:974`) — the URLs first, then pages of 500 by primary key, each its own transaction; the crawl ingest (`JobManager.ingest_dump`, `jobs.py:943`) — the S3 object parsed forwards by `iter_documents` (`backends/scrape.py:204`) in chunks of 500 pages or 1 MB of text, straight into a `COPY` | one chunk *with* full text. These are the only places page text is read or written in bulk, and each is bounded by its chunk, not by the collection |
+| **Whole set, no text** | `load_dump` (`db.py:700`), `load_curated` (`db.py:966`, default), `load_deltas` (`db.py:757`), `list_patterns` (`db.py:1799`), `dump_urls`, `dump_content_hashes`, `title_keys`, `load_dump_failures` | proportional to URL count, not to crawl size. `load_dump` selects only `url, scraped_title, content_type, depth, content_hash`; `load_curated` uses `_CURATED_COLS`; the text lives only in `page_text` (schema V9) |
+| **Whole set, with text** | `load_curated(with_text=True)` (`db.py:966`) — kept, but no production path calls it any more | proportional to **bytes of page text** |
 
 ### Why the batch paths load whole sets
 
@@ -79,29 +81,47 @@ measurements — the honest way to get the real numbers is `tracemalloc.get_trac
 `CurationService.recompute`, which is the technique the scale work used.
 
 The text-carrying paths are a different order of magnitude entirely: a 6.7 GB crawl is 6.7 GB of
-text regardless of URL count.
+text regardless of URL count. That is why all three stream.
 
-### The two hotspots, and where they stand right now
+### The text paths
 
-1. **Crawl ingest — currently loads the whole crawl twice over.**
-   `_run_scrape` (`jobs.py:185`) calls `parse_documents`, which is
-   `json.loads(path.read_text())` (`backends/scrape.py:143-144`) — the decoded text *and* the
-   parsed object graph resident together — and then `ingest_dump` (`jobs.py:874`) materializes
-   every `DumpUrl` row in a list before writing. On a 6.7 GB documents file this dies with
-   `MemoryError` on a 2 GB task before a single row is stored.
-   **A streaming rewrite of exactly this path exists but is not in the working tree** — it is in
-   `git stash@{0}` ("scale audit 2026-09-18: C1-C12 fixes…"), which adds `iter_documents` (a
-   brace-depth JSON streamer), `ingest_dump_file`, and `Database.replace_dump_batches` feeding
-   `COPY` from an async batch iterator. Until that lands, the largest crawl the engine can ingest
-   is bounded by task memory.
+1. **Crawl ingest — streamed, chunk-bounded.**
+   `_run_scrape` (`jobs.py:202`) hands `ingest_dump` a `DocumentSource` (`S3Documents` for a remote
+   crawl, `FileDocuments` locally); nothing is downloaded. `iter_documents` parses the JSON array
+   forwards with `ijson`, and `take()` turns it into `DumpUrl` rows off the event loop, a chunk at
+   a time: **500 pages or 1 MB of page text, whichever comes first** (`_INGEST_BATCH_DOCS`,
+   `_INGEST_BATCH_BYTES`). The rows go straight into the `COPY` that `replace_dump` (`db.py:477`)
+   runs into a temp staging table; the duplicate-spelling pass and the two `INSERT … SELECT`s into
+   `page_text` and `dump_urls` then happen in SQL. When the transaction commits, `ingest_dump`
+   calls `Database.recycle_connections()` (`db.py:287`, psycopg_pool `drain()`) and glibc
+   `malloc_trim(0)`.
+   Why each piece is there, measured on an ascl.net-shaped crawl (2.8 GB, 45,024 pages, a band of
+   ~1 MB pages), 2026-09-22:
 
-2. **Export — loads the curated set with text.**
-   `_run_index` (`jobs.py:629`) does `load_curated(with_text=True)`, then `write_jsonl`
-   (`engine/export.py`) streams it to a temp file — the write is streamed, the read is not, and
-   `export_lines` additionally `sorted()`s the list. Peak memory is the full text of every
-   non-excluded curated row. Streaming this is the obvious next fix: `export_lines` already takes
-   an iterator's shape, so it needs a keyset-paginated `iter_curated(with_text=True)` in the mould
-   of `iter_deltas_for_llm`.
+   | | peak RSS | after the job | time |
+   |---|---|---|---|
+   | chunks of 500 pages only | 1,640–1,750 MB | 445 MB | 88–91 s |
+   | + 1 MB byte cap | **337 MB** | 445 MB | **70 s** |
+   | + connection recycle + `malloc_trim` | 337 MB | **86–90 MB** | 70 s |
+
+   The byte cap bounds the chunk: a count alone let a run of 1 MB pages make a 500 MB chunk. Below
+   1 MB the peak stops falling (~320 MB at 0.25 MB); that floor is not the chunk. The
+   after-job figure was not Python objects (tracemalloc: 9 MB live) — ~57% was the buffers of the
+   pooled connection that carried the `COPY`, which libpq keeps at their high-water mark for the
+   connection's life, and ~35% freed heap glibc had not returned. On dev, before these changes,
+   the real 6.7 GB ascl.net crawl peaked at ~5 GB (6.6 GB high-water mark) and left 2.8 GB
+   resident; a 2 GB task was OOM-killed on it twice.
+
+2. **Export — streamed.**
+   `_run_index` (`jobs.py:680`) iterates `iter_curated_for_export` (`db.py:974`): the exportable
+   URLs first, sorted in Python (code-point order, what `sorted()` gave before), then each page of
+   500 rows with their approved text by primary key, in its own short transaction — a cursor held
+   open across a slow file write would pin one of the pool's connections. Each page is serialised
+   off the event loop into a `NamedTemporaryFile`, uploaded, then the manifest is written.
+   `export_lines` still `sorted()`s, but only within a page that is already in order.
+
+3. **LLM — streamed.** `iter_deltas_for_llm` reads `delta_urls → dump_urls → page_text` in keyset
+   chunks of 200 and sends the whole page text, uncut.
 
 Everything else is either paginated or metadata-only.
 
@@ -138,9 +158,9 @@ browser ──HTTPS──> CloudFront + WAF ──HTTP──> ALB ──> uvicor
 
 | Module | Responsibility |
 |---|---|
-| `web/app.py` | routes, HTMX partials, SSE, auth, all request-shaped logic (1908 lines) |
+| `web/app.py` | routes, HTMX partials, SSE, auth, all request-shaped logic (1976 lines) |
 | `db.py` | every SQL statement; one transaction per method; `Database` is the only DB surface |
-| `schema.py` | numbered migrations (`MIGRATIONS`, 8 versions) applied at `connect()` |
+| `schema.py` | numbered migrations (`MIGRATIONS`, 9 versions) applied at `connect()` |
 | `jobs.py` | `JobManager`: the eight long-running job kinds, their progress and their failure handling |
 | `curation.py` | `CurationService`: the glue between the pure engine and the DB (bulk only) |
 | `engine/patterns.py` | rule resolution — **pure**, no I/O |
@@ -206,13 +226,18 @@ Name, seed URL, connector, `max_pages`, division (nullable, resolved at recomput
 `*` rule for it). `collection_id` is the apex host.
 
 ### 2. `scraped` — the crawl is in the dump
-`start_scrape` (`jobs.py:155`) → `ScrapeBackend.run` (or `fetch_existing` to load an existing
-crawl) → `parse_documents` → `ingest_dump`.
+`start_scrape` (`jobs.py:186`) → `ScrapeBackend.run` (or `fetch_existing` to load an existing
+crawl) → a `DocumentSource` pointing at the crawl → `ingest_dump`, which streams it (section 1,
+*The text paths*).
 
-Duplicate spellings collapse here: `duplicate_docs` (`engine/urls.py:58`) decides, from each
-document's `url` and `final_url`, which spelling of a page survives — the one whose own URL is the
-resolved page, then https, then the shorter string. `replace_dump` deletes the previous dump and
-`COPY`s the new one **in one transaction**, so a failed ingest leaves the old dump intact.
+Duplicate spellings collapse here: `duplicate_docs` (`engine/urls.py:60`) decides, from each
+document's `url` and `final_url` read back from the staging table, which spelling of a page
+survives — the one whose own URL is the resolved page, then https, then the shorter string. The
+job records how many went (`progress.duplicates_dropped`) and says so in the job line and the
+history note — "45,024 read, 22,700 duplicate links dropped" for ascl.net, whose crawl reaches
+every page over both `http://` and `https://www.` links. `replace_dump` deletes the previous dump
+and `COPY`s the new one **in one transaction**, so a failed ingest leaves the old dump intact; its
+page text goes to `page_text` once per content hash.
 
 A re-crawl of a collection that already has curated rows raises `needs_recuration` with a reason,
 and wipes the deltas (computed against the old dump, now meaningless).
@@ -237,12 +262,13 @@ Two sub-stages, tracked in `collections.curation_stage`:
   **required**: promote refuses blanks (`IncompleteMetadata`, `curation.py:23`).
 
 ### 4. `curated` — promoted
-`promote` (`curation.py:203`) applies the pure `promote()` to the delta queue, writes the curated
-set whole, copies the dump's text and hash onto the promoted rows, keeps the rule→URL effects so
-the Curated table can still explain itself, and clears `needs_recuration`. `promote_urls` does the
-same for a picked subset, leaving the rest of the queue alone — and only the picked rows take the
-dump's current text, so a row still under review cannot silently acquire text its metadata was
-never approved with.
+`promote` (`curation.py:218`) applies the pure `promote()` to the delta queue, writes the curated
+set whole, gives the promoted rows the dump's content hash — which is what names their text in
+`page_text`; nothing is copied — keeps the rule→URL effects so the Curated table can still explain
+itself, and clears `needs_recuration`. `promote_urls` (`curation.py:245`) does the same for a
+picked subset, leaving the rest of the queue alone — and only the picked rows take the dump's
+current hash, so a row still under review cannot silently acquire text its metadata was never
+approved with.
 
 ### 5. `config_generated` — indexed to test and validated
 `start_index` → export → dispatch → poll → **validation gate** (section 6).
@@ -398,7 +424,7 @@ the service run more than one task, make deploys non-destructive, and let a job 
 | LLM calls within a job | `LLM_WORKERS` = 16 | `llm/pool.py` |
 | LLM calls across jobs | **unbounded** — the first rate-limit risk | see `README.md` guidance |
 | Index runs | unlimited; each dispatches its own ECS task | `backends/index.py` |
-| DB connections | `DB_POOL_SIZE` = 8 per process | `db.py:182` |
+| DB connections | `DB_POOL_SIZE` = 8 per process; replaced wholesale after each crawl ingest (`recycle_connections`) | `db.py:248` |
 | AOSS bulk request | 100 docs / 8 MB (AOSS caps at 10 MiB) | `config.py:82-83` |
 | Curation edits | **no stale-edit check** — two curators on one collection, last save wins silently | `README.md` |
 
@@ -415,7 +441,7 @@ What grows with what:
 |---|---|
 | Number of collections (30, 300) | dashboard round trips (N+1 on `latest_job`); nothing else |
 | URLs in a collection | whole-set loads in recompute/promote — URL count × ~0.5–1 KB |
-| Bytes of page text | the crawl ingest and the export — the two hotspots |
+| Bytes of page text | storage (`page_text`, once per hash) and time (~24 s/GB ingest on a laptop); memory only up to one chunk — the ingest, export and LLM paths all stream |
 | Concurrent curators | LLM in-flight calls (unbounded across jobs); DB pool at 8 |
 | Job history | `job_runs` / `audit_log` growth; both indexed and read with `LIMIT` |
 
@@ -425,13 +451,15 @@ What grows with what:
    straight into the `COPY` that fills the staging table, so one pool connection (of
    `DB_POOL_SIZE`) is held for as long as the object takes to read, and a broken stream fails the
    scrape job. The crawl stays in S3, so a re-run is the recovery.
-2. **Export loads the curated set with text** (`jobs.py:629`). Needs a keyset-paginated
-   `iter_curated` in the mould of `iter_deltas_for_llm`.
+2. **The ingest peak has a ~270 MB floor that is not the chunk.** Most likely libpq's send buffer
+   growing while rows are produced faster than PostgreSQL takes them (psycopg does not flush per
+   row on Linux). Only pacing the `COPY` itself would lower it; not worth it at 340 MB.
 3. **The in-process job registry** blocks replication, makes deploys destructive, and loses
    long jobs to any task replacement.
 4. **No cross-job LLM limiter** — concurrent curators can exceed the provider's rate limit.
 5. **Migrations run at boot in the serving process**, so a slow `ALTER` on a large table can
-   outrun the 120 s ALB health-check grace period and loop.
+   outrun the 120 s ALB health-check grace period and loop. V9 took ~21 s from container start
+   to serving on dev; it is the first migration where this could bite.
 6. **No stale-edit detection** on curation edits.
 7. **Only the app can turn a crawl into rows.** `aws_s3.table_import_from_s3` would let RDS read
    the object itself, but it takes COPY formats only — the crawler would have to stop emitting a

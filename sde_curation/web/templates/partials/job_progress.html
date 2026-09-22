@@ -1,10 +1,14 @@
 {# One place for "what is this job doing / what did it do" text. Reads job.progress keys written
    by jobs.py (scrape: docs/failed/queued/queue_ahead/reused/attached, then the ingest of the crawl
-   into PostgreSQL: phase=ingest|ingest_store with ingested/ingest_total/failures; index: exported/phase/waiting_s/
+   into PostgreSQL: phase=ingest|ingest_store with ingested/ingest_total/failures, and when it is done
+   duplicates_dropped (pages read under more than one link, kept once); index: exported/phase/waiting_s/
    validation_ok; prod publish: phase/source_test_run/changed/unchanged/indexed/remaining/to_remove; LLM: llm=patterns|metadata|titles, done/total/inflight/retrying/failed, urls/calls/global/
    suggestions, classified, tokens_in/tokens_out; the re-title pass: llm_phase=titles, titles_total (URLs),
    title_groups + title_calls_done/title_calls_failed… (the pool runs over groups), title_calls (calls made,
    a big group takes more than one), title_pass, retitled, disambiguated, still_duplicate, titles_error). #}
+{% macro dropped(p) -%}
+{%- if p.duplicates_dropped %} · {{ '{:,}'.format(p.ingested or 0) }} read, {{ '{:,}'.format(p.duplicates_dropped) }} duplicate link{{ 's' if p.duplicates_dropped != 1 }} dropped{% endif -%}
+{%- endmacro %}
 {% macro job_progress(job) -%}
 {%- set p = job.progress or {} -%}
 {%- if job.state == 'running' -%}
@@ -29,8 +33,8 @@
 {%- elif job.error -%}
   {{ job.error }}
 {%- else -%}
-  {%- if p.reused %}loaded existing crawl · {{ p.docs or 0 }} docs
-  {%- elif p.docs is defined %}{{ p.docs }} docs{% if p.failed %}, {{ p.failed }} failed{% endif %}
+  {%- if p.reused %}loaded existing crawl · {{ p.docs or 0 }} docs{{ dropped(p) }}
+  {%- elif p.docs is defined %}{{ p.docs }} docs{% if p.failed %}, {{ p.failed }} failed{% endif %}{{ dropped(p) }}
   {%- elif p.suggestions is defined %}{{ p.suggestions }} suggestions{% if p.urls %} · {{ '{:,}'.format(p.urls) }} URLs in {{ p.calls or p.done or 0 }} call{{ 's' if (p.calls or p.done) != 1 }}{% endif %}{% if p.global %} · {{ p.global }} from the global list{% endif %}{% if p.failed %} · {{ p.failed }} call{{ 's' if p.failed != 1 }} failed{% endif %}
   {%- elif p.llm == 'titles' %}{{ p.retitled or 0 }} of {{ p.titles_total or 0 }} URLs sharing a title and doc type retitled{% if p.title_calls %} in {{ p.title_calls }} group call{{ 's' if p.title_calls != 1 }}{% endif %}{% if p.disambiguated %} · {{ p.disambiguated }} told apart by their URLs{% endif %}{% if p.title_calls_failed %} · {{ p.title_calls_failed }} failed{% endif %}{% if p.still_duplicate is defined %} · {{ p.still_duplicate }} still share one{% endif %}{% if p.tokens_in %} · {{ '{:,}'.format(p.tokens_in) }} tokens in / {{ '{:,}'.format(p.tokens_out or 0) }} out{% endif %}
   {%- elif p.classified is defined %}{{ p.classified }} classified{% if p.failed %} · {{ p.failed }} failed{% endif %}{% if p.titles_total %} · {{ p.retitled or 0 }} of {{ p.titles_total }} sharing a title and doc type retitled{% endif %}{% if p.disambiguated %} · {{ p.disambiguated }} told apart by their URLs{% endif %}{% if p.still_duplicate %} · {{ p.still_duplicate }} still share one{% endif %}{% if p.titles_error %} · telling titles apart failed{% endif %}{% if p.tokens_in %} · {{ '{:,}'.format(p.tokens_in) }} tokens in / {{ '{:,}'.format(p.tokens_out or 0) }} out{% endif %}
