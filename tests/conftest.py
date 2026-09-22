@@ -138,10 +138,13 @@ FAKE_RUN_PY = textwrap.dedent(
             time.sleep(0.02)
         out.write(f"  ... {n - n // 5} docs / {n // 5} failures logged  (cap {n})\\n")
         out.write("\\n# exit=0 elapsed_s=0.5\\n")
-    docs.write_text(json.dumps([
+    pages = [
         {"url": f"{job['seed']}/p{i}", "title": f"Page {i}", "full_text": "text " * 5, "content_type": "text/html", "depth": 0}
         for i in range(1, n + 1) if i % 5
-    ]))
+    ]
+    if n == 11:  # sentinel: the site also links every page over http://, and the crawl follows both
+        pages += [{**d, "url": d["url"].replace("https://", "http://", 1)} for d in pages]
+    docs.write_text(json.dumps(pages))
     fails = ROOT / "logs" / "collections" / f"{cid}_failures.jsonl"; fails.parent.mkdir(parents=True, exist_ok=True)
     with fails.open("w") as out:  # p5 is gone (404); every later failure is a 403
         for i in range(5, n + 1, 5):
@@ -164,6 +167,7 @@ def _crawler_app(tmp_path, **extra):
 @pytest.fixture
 async def crawler_client(tmp_path):
     """App wired to a fake crawl4ai `run.py` (see FAKE_RUN_PY): max_pages=13 simulates a crash,
+    max_pages=11 crawls every page under a second (http://) link as well,
     every 5th page fails (p5 with a 404, the others with a 403 — logged to the failures JSONL),
     the rest succeed."""
     app = _crawler_app(tmp_path)

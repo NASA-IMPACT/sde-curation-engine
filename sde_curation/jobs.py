@@ -4,7 +4,7 @@ records explicit success/failure in job_runs, and publishes SSE events."""
 from __future__ import annotations
 
 import asyncio
-import itertools
+import ctypes
 import logging
 import tempfile
 import time
@@ -67,9 +67,15 @@ log = logging.getLogger(__name__)
 AI_FLUSH_ROWS = 25
 AI_FLUSH_SECONDS = 2.0
 # How often the crawl ingest reports the pages it has read. Each report is one job-row UPDATE and
-# one SSE event, so it is paced by the clock rather than by the 500-page read chunks: a small crawl
+# one SSE event, so it is paced by the clock rather than by the read chunks: a small crawl
 # is over before the second report, a big one ticks steadily.
 _INGEST_PROGRESS_S = 2.0
+# One read chunk of the crawl ingest: this many pages, or this much page text, whichever comes
+# first. A count alone let a run of 1 MB pages (ascl.net has thousands) make a 500 MB chunk.
+# Measured on an ascl.net-shaped crawl (2.8 GB, 45K pages): peak 1.7 GB with the count alone,
+# 640 MB at 16 MB, 340 MB at 1 MB, and no lower below that; the ingest got faster, not slower.
+_INGEST_BATCH_DOCS = 500
+_INGEST_BATCH_BYTES = 1024 * 1024
 # Rounds of URL disambiguation after the model has had its passes. One resolves a group; the rest
 # are only there in case a title it wrote lands on one a page outside that group already had.
 DISAMBIGUATE_ROUNDS = 3
@@ -225,6 +231,9 @@ class JobManager:
                 job.external_ref = result.external_ref or job.external_ref
                 note = (f"loaded existing crawl from {crawled_at:%Y-%m-%d %H:%M}Z: {n} documents" if reuse
                         else f"scrape ok: {n} documents")
+                if dropped := job.progress.get("duplicates_dropped"):
+                    note += (f" ({job.progress.get('ingested', n + dropped):,} read,"
+                             f" {dropped:,} duplicate links dropped)")
                 # Collection state first, job record last: "succeeded" must mean every effect of
                 # the job is already visible to whoever polls the job list.
                 updated = await self.db.set_status(
@@ -953,29 +962,38 @@ class JobManager:
         def source() -> Iterator[dict[str, Any]]:
             return iter(docs) if isinstance(docs, list) else iter_documents(docs)
 
-        def take(it: Iterator[dict[str, Any]], size: int) -> tuple[int, list[DumpUrl]]:
-            """The next `size` documents as rows (parsing and hashing happen here, off the event loop)."""
-            seen, rows = 0, []
-            for d in itertools.islice(it, size):
+        def take(it: Iterator[dict[str, Any]]) -> tuple[int, list[DumpUrl]]:
+            """The next chunk of documents as rows (parsing and hashing happen here, off the event
+            loop): up to `_INGEST_BATCH_DOCS` of them, cut short once they carry
+            `_INGEST_BATCH_BYTES` of text."""
+            seen, size, rows = 0, 0, []
+            for d in it:
                 seen += 1
                 if d.get("url"):
                     text = _no_nul(d.get("full_text"))
+                    size += len(text or "")
                     rows.append(DumpUrl(
                         collection_id=collection_id, url=_no_nul(d["url"]),
                         final_url=_no_nul(d.get("final_url")), scraped_title=_no_nul(d.get("title")),
                         full_text=text, content_type=_no_nul(d.get("content_type")), depth=d.get("depth"),
                         content_hash=content_hash(text),
                     ))
+                if seen >= _INGEST_BATCH_DOCS or size >= _INGEST_BATCH_BYTES:
+                    break
             return seen, rows
+
+        linked = 0  # pages read that have a URL: what the duplicate-link pass started from
 
         async def rows() -> AsyncIterator[DumpUrl]:
             """Counts as it reads: this is the only point that knows how far into the crawl the
             ingest has got. The count is pages taken off the stream, not rows in the table — the
             duplicate-spelling pass runs afterwards, so the job's final figure is a little lower."""
+            nonlocal linked
             it = source()
             read, reported = 0, 0.0
             while True:
-                seen, chunk = await asyncio.to_thread(take, it, 500)
+                seen, chunk = await asyncio.to_thread(take, it)
+                linked += len(chunk)
                 for r in chunk:
                     yield r
                 read += seen
@@ -997,7 +1015,25 @@ class JobManager:
             )
             for f in failures or []
         ]
-        return await self.db.replace_dump(collection_id, rows(), fails, dedupe_spellings=True)
+        n = await self.db.replace_dump(collection_id, rows(), fails, dedupe_spellings=True)
+        if on_progress:
+            # A crawl that reached a page under several links (http/https, www., a trailing slash)
+            # keeps it once: say how many went, or 45,024 read → 22,324 stored looks like loss.
+            await on_progress({"duplicates_dropped": linked - n})
+        # Hand the ingest's memory back to the OS: the connection's buffers first, then the heap
+        # glibc keeps after the pages are freed. Measured on an ascl.net-shaped crawl, the two
+        # were ~90% of what stayed resident after the job (live Python objects were ~2%).
+        await self.db.recycle_connections()
+        await asyncio.to_thread(_trim_heap)
+        return n
+
+
+def _trim_heap() -> None:
+    """Return freed heap to the OS (glibc only; a no-op on macOS and other libcs)."""
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
 
 
 def _expected_docs(summary: dict[str, Any], progress: dict[str, Any]) -> int | None:

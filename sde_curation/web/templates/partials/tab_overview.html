@@ -1,5 +1,6 @@
 {# The panel of the selected pipeline step, details, last job, advanced. Shown alone under most
    steps; under Curating / Curated it is the Overview tab. #}
+{% from "partials/job_progress.html" import dropped %}
 <div id="step-panel" class="next">
   {% include "partials/step.html" %}
 </div>
@@ -42,7 +43,7 @@
       <dt>Started</dt><dd>{{ job.started_at.strftime('%Y-%m-%d %H:%M:%S') }}Z</dd>
       {% if job.finished_at %}<dt>Took</dt><dd>{{ (job.finished_at - job.started_at).seconds }}s</dd>{% endif %}
       {% if job.error %}<dt>Error</dt><dd class="err">{{ job.error }}</dd>{% endif %}
-      {% if job.progress.docs is defined %}<dt>Result</dt><dd>{{ job.progress.docs }} docs{% if job.progress.failed %}, {{ job.progress.failed }} failed{% endif %}</dd>{% endif %}
+      {% if job.progress.docs is defined %}<dt>Result</dt><dd>{{ job.progress.docs }} docs{% if job.progress.failed %}, {{ job.progress.failed }} failed{% endif %}{{ dropped(job.progress) }}</dd>{% endif %}
     </dl>
     <p><a href="/collections/{{ c.collection_id }}?tab=activity">All jobs & history →</a></p>
     {% else %}<p class="muted">No jobs yet — start with <b>Scrape</b>.</p>{% endif %}
