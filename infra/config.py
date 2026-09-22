@@ -103,8 +103,10 @@ class EnvConfig:
 CONFIGS: dict[Environment, EnvConfig] = {
     Environment.DEV: EnvConfig(env=Environment.DEV),
     # The test crawler (SdeCrawlerStack in 119417011911) writes scraped_collections/ at the bucket root.
+    # The engine's real deployment: sized for ~5 concurrent curators and ~100k-URL collections, whose
+    # scrape ingest and test export hold the full page text in memory.
     Environment.TEST: EnvConfig(env=Environment.TEST, web_index_name="sde-web", crawler_s3_prefix="",
-                                prod_publish_via_role=True),
+                                prod_publish_via_role=True, cpu=4096, memory_mib=16384),
     Environment.PROD: EnvConfig(
         env=Environment.PROD, web_index_name="sde-web", cpu=2048, memory_mib=4096,
         db_multi_az=True, db_backup_days=35, db_deletion_protection=True,
