@@ -1,23 +1,32 @@
-"""Publish to prod: write the vectors the validated test run already produced straight into the
-production web index. Nothing is re-chunked or re-vectorized.
+"""Publish to prod: replace the collection in the production web index with the vectors the
+validated test run already produced. Nothing is re-chunked or re-vectorized.
+
+Every publish is a fresh start for the collection. Every document carrying its `collection_key` is
+deleted, whatever its `id` looks like (old id schemes, duplicates, hidden, unversioned), and the
+whole validated set is written back under freshly minted ids (`/SDE/<key>/|<url>`).
 
 Source of truth is the gating test run's export (curated_collections/<key>/<test_run>/), i.e.
-exactly what was validated. For each document the engine needs a vectorized copy whose `version`
-matches the export:
+exactly what was validated. For each document the engine needs a vectorized copy (matched on `url`)
+whose `version` matches the export:
 
   1. s3://COSMOS_INDEX_BUCKET/vectorized/<key>/<run>/batch_NNNN.jsonl, newest run first. The indexer
      only vectorizes *changed* documents, so a collection's vectors are spread over many runs.
-  2. the test index itself (full _source, embeddings included) for anything S3 does not have,
-     e.g. documents indexed before the S3 copies existed.
+  2. the test index itself (full _source, embeddings included).
+  3. the prod index, read before anything is deleted: a current prod copy is exactly what would be
+     written back, whatever id it carried.
 
-A document found in neither fails the run (and no deletions happen). Once everything is written,
-the collection's prod documents the export no longer holds are deleted — really removed, whether or
-not they carry a `version` (documents from before the indexer do not) and whether or not an earlier
-publish had hidden them.
+Order is the safety net, because there is no backup and no deletion guard:
 
-The identity, versioning, scoping and deletion rules are ports of the indexer's
-(sde-api-scrapers/web/{web_processor,scope,id_collision,deletion_guard}.py) and must not drift:
-a different id or version would duplicate documents in the shared sde-web index.
+  export → read-only pre-flight → enumerate the wipe set → stage every vector to a local file →
+  wipe (by explicit AOSS _id only) → confirm the collection reads empty → write.
+
+A document without vectors, a foreign document in any scan, or a failed delete stops the run
+*before* the write. Nothing outside the collection is ever deleted: every delete target comes from
+a `term collection_key` query whose isolation is probed first, and every hit is re-checked in code.
+
+The id and version rules are ports of the indexer's (sde-api-scrapers/web/web_processor.py) and
+must not drift. The test index and its indexer-side guards are not touched here; the test index is
+only read, as a vector source.
 """
 
 from __future__ import annotations
@@ -55,14 +64,15 @@ DOC_FIELDS = (*_PASSTHROUGH_FIELDS, *_COLLECTION_DEFAULTED_FIELDS, "id", "collec
 _MODIFIED_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 _PAGE = 1000
+_MAX_WINDOW = 10_000  # AOSS max result window
 _LOOKUP_CHUNK = 100
-_TEST_FETCH_CHUNK = 20  # whole documents with embeddings: keep responses small
+_FETCH_CHUNK = 20  # whole documents with embeddings: keep responses small
 _BULK_ATTEMPTS = 3
 _MAX_REPORTED = 50
 
 
 class PublishRefused(IndexError_):
-    """The run stopped deliberately before writing anything unsafe; `reason` goes to status.json."""
+    """The run stopped deliberately before writing anything; `reason` goes to status.json."""
 
     def __init__(self, reason: str, message: str):
         super().__init__(message)
@@ -105,22 +115,22 @@ def to_web_document(line: dict[str, Any], manifest: dict[str, Any]) -> dict[str,
     return doc
 
 
-# ── scope (web/scope.py, web/id_collision.py) ──────────────────────────
+# ── scope ──────────────────────────────────────────────────────────────
 
 
 def scope_filter(collection_key: str) -> dict[str, Any]:
-    """This collection's visible documents: the state scan. A hidden one the export holds again
-    reads as changed, so it is written back visible."""
+    """This collection's visible documents (web/scope.py)."""
     return {"bool": {"filter": [{"term": {"collection_key": collection_key}},
                                 {"term": {"public_visibility": True}}]}}
 
 
 def collection_filter(collection_key: str) -> dict[str, Any]:
-    """Every document of the collection, hidden or not, versioned or not: the scope of deletions."""
+    """Every document of the collection, hidden or not, whatever its id: the scope of the wipe."""
     return {"term": {"collection_key": collection_key}}
 
 
 def assert_owned(collection_key: str, ids, boundary: str) -> None:
+    """Every id the engine writes carries the fresh prefix of this collection."""
     prefix = web_id_prefix(collection_key)
     foreign = [i for i in ids if not (isinstance(i, str) and i.startswith(prefix))]
     if foreign:
@@ -132,99 +142,77 @@ def assert_owned(collection_key: str, ids, boundary: str) -> None:
 
 
 def probe_scope(client, index: str, collection_key: str) -> None:
-    body = {"size": 0, "query": scope_filter(collection_key),
-            "aggs": {"keys": {"terms": {"field": "collection_key", "size": 5}},
-                     "missing_key": {"missing": {"field": "collection_key"}}}}
-    aggs = client.search(index=index, body=body).get("aggregations") or {}
-    found = [b.get("key") for b in (aggs.get("keys") or {}).get("buckets") or []]
-    missing = (aggs.get("missing_key") or {}).get("doc_count") or 0
-    if missing or len(found) > 1 or (found and found[0] != collection_key):
-        raise PublishRefused(
-            "scope_filter_ineffective",
-            f"[{index}] the collection filter matched {found!r} (+{missing} without collection_key), "
-            f"expected only ['{collection_key}']",
-        )
+    """The `collection_key` term filter must match exactly this key — it is the wipe boundary."""
+    for label, query in (("visible", scope_filter(collection_key)), ("collection", collection_filter(collection_key))):
+        body = {"size": 0, "query": query,
+                "aggs": {"keys": {"terms": {"field": "collection_key", "size": 5}},
+                         "missing_key": {"missing": {"field": "collection_key"}}}}
+        aggs = client.search(index=index, body=body).get("aggregations") or {}
+        found = [b.get("key") for b in (aggs.get("keys") or {}).get("buckets") or []]
+        missing = (aggs.get("missing_key") or {}).get("doc_count") or 0
+        if missing or len(found) > 1 or (found and found[0] != collection_key):
+            raise PublishRefused(
+                "scope_filter_ineffective",
+                f"[{index}] the {label} filter matched {found!r} (+{missing} without collection_key), "
+                f"expected only ['{collection_key}']",
+            )
 
 
-def check_id_collisions(client, index: str, collection_key: str) -> None:
+def check_prefix_orphans(client, index: str, collection_key: str) -> None:
+    """Documents under this collection's fresh id prefix but another (or no) collection_key are
+    outside the wipe, and would sit next to the fresh documents under the same id: stop, delete nothing."""
     prefix = web_id_prefix(collection_key)
-    mismatched = client.count(index=index, body={"query": {"bool": {
-        "filter": [{"term": {"collection_key": collection_key}}],
-        "must_not": [{"prefix": {"id": prefix}}],
+    n = client.count(index=index, body={"query": {"bool": {
+        "filter": [{"prefix": {"id": prefix}}],
+        "must_not": [collection_filter(collection_key)],
     }}})["count"]
-    if mismatched:
+    if n:
         raise PublishRefused(
-            "id_scheme_collision",
-            f"[{index}] {mismatched} document(s) of '{collection_key}' do not carry the id prefix {prefix!r}: "
-            f"publishing would duplicate them instead of updating — remediate the ids first",
-        )
-    r = client.search(index=index, body={
-        "size": 0, "query": {"term": {"collection_key": collection_key}},
-        "aggs": {"dups": {"terms": {"field": "id", "size": 1, "min_doc_count": 2}}},
-    })
-    buckets = ((r.get("aggregations") or {}).get("dups") or {}).get("buckets") or []
-    if buckets:
-        raise PublishRefused(
-            "duplicate_business_ids",
-            f"[{index}] '{collection_key}' has ids carried by more than one document "
-            f"(e.g. {buckets[0].get('key')!r} ×{buckets[0].get('doc_count')}) — remediate first",
+            "orphaned_prefixed_docs",
+            f"[{index}] {n} document(s) carry the id prefix {prefix!r} but not collection_key '{collection_key}': "
+            f"they are outside this collection, so they are not deleted, and they would duplicate the fresh "
+            f"documents — remediate them first",
         )
 
 
-def scan_state(client, index: str, collection_key: str) -> dict[str, str]:
-    """{id: version} of the collection's visible, versioned documents (search_after paging)."""
+def scan_collection_copies(client, index: str, collection_key: str) -> dict[str, str]:
+    """{AOSS _id: business id ("" when missing)} of every document of the collection, hidden, versioned
+    or not, whatever its id scheme. Every hit is re-checked in code: one with another collection_key
+    aborts the run before anything is deleted."""
     out: dict[str, str] = {}
-    last = None
-    while True:
-        body: dict[str, Any] = {"size": _PAGE, "_source": ["id", "version"],
-                                "query": scope_filter(collection_key), "sort": [{"id": "asc"}]}
-        if last is not None:
-            body["search_after"] = last
-        hits = client.search(index=index, body=body)["hits"]["hits"]
+
+    def take(hits) -> None:
         for h in hits:
             src = h.get("_source") or {}
-            if src.get("id") and src.get("version") is not None:
-                out[src["id"]] = str(src["version"])
-        last = hits[-1].get("sort") if hits else None
-        if len(hits) < _PAGE or last is None:
-            return out
+            if src.get("collection_key") != collection_key:
+                raise PublishRefused(
+                    "foreign_documents_in_scan",
+                    f"[{index}] the scan of '{collection_key}' returned _id {h.get('_id')!r} with collection_key "
+                    f"{src.get('collection_key')!r} — refusing with nothing deleted",
+                )
+            out[h["_id"]] = src.get("id") or ""
 
-
-def scan_ids(client, index: str, collection_key: str) -> list[str]:
-    """Every id the collection holds. Unlike scan_state it needs no `version`, so documents indexed
-    before the indexer existed are seen — and removed once they are no longer curated."""
-    out: list[str] = []
+    with_id = {"bool": {"filter": [collection_filter(collection_key), {"exists": {"field": "id"}}]}}
     last = None
     while True:
-        body: dict[str, Any] = {"size": _PAGE, "_source": ["id"], "query": collection_filter(collection_key),
+        body: dict[str, Any] = {"size": _PAGE, "_source": ["id", "collection_key"], "query": with_id,
                                 "sort": [{"id": "asc"}]}
         if last is not None:
             body["search_after"] = last
         hits = client.search(index=index, body=body)["hits"]["hits"]
-        out += [i for h in hits if (i := (h.get("_source") or {}).get("id"))]
+        take(hits)
         last = hits[-1].get("sort") if hits else None
         if len(hits) < _PAGE or last is None:
-            return out
+            break
+    # no id to sort on: one window; the wipe's settle loop picks up anything past it
+    without_id = {"bool": {"filter": [collection_filter(collection_key)], "must_not": [{"exists": {"field": "id"}}]}}
+    take(client.search(index=index, body={"size": _MAX_WINDOW, "_source": ["id", "collection_key"],
+                                          "query": without_id})["hits"]["hits"])
+    return out
 
 
-def deletion_decision(candidates: list[str], state_count: int, settings: Settings) -> float:
-    """Raise when the deletions would remove too much (web/deletion_guard.py); returns the ratio."""
-    if not candidates:
-        return 0.0
-    ratio = len(candidates) / state_count if state_count else 1.0
-    if len(candidates) > settings.publish_deletion_abort_max:
-        raise PublishRefused(
-            "deletion_budget_exceeded",
-            f"{len(candidates)} documents would be removed from prod, above PUBLISH_DELETION_ABORT_MAX="
-            f"{settings.publish_deletion_abort_max} — refusing with nothing written",
-        )
-    if ratio > settings.publish_deletion_abort_ratio:
-        raise PublishRefused(
-            "deletion_threshold_exceeded",
-            f"{len(candidates)}/{state_count} ({ratio:.0%}) of the collection's prod documents would be removed, "
-            f"above PUBLISH_DELETION_ABORT_RATIO={settings.publish_deletion_abort_ratio:.0%} — refusing with nothing written",
-        )
-    return ratio
+def count_collection(client, index: str, collection_key: str) -> int:
+    return client.count(index=index, body={"query": collection_filter(collection_key)})["count"]
 
 
 def has_vectors(doc: dict[str, Any]) -> bool:
@@ -256,16 +244,16 @@ class ProdPublisher:
         self.published_at = datetime.now(UTC).strftime(_MODIFIED_DATE_FORMAT)
         status: dict[str, Any] = {
             "run_id": run_id, "collection_key": collection_key, "target": "prod", "index": self.index,
-            "mode": "publish_vectors", "source_test_run": source_run_id, "state": "failed",
-            "documents_in_export": 0, "unchanged": 0, "changed": 0, "indexed": 0, "failed": 0, "deleted": 0,
-            "from_vectorized": 0, "from_test_index": 0, "missing": 0, "missing_urls": [],
-            "deletion_ratio": 0.0, "deletions_skipped": [], "error": None,
+            "mode": "replace", "source_test_run": source_run_id, "state": "failed",
+            "documents_in_export": 0, "changed": 0, "wiped": 0, "wipe_failed": 0, "indexed": 0, "failed": 0,
+            "deleted": 0, "from_vectorized": 0, "from_test_index": 0, "from_prod_index": 0,
+            "missing": 0, "missing_urls": [], "error": None,
             "started_at": datetime.now(UTC).isoformat(), "finished_at": None,
         }
         try:
             await self._run(collection_key, source_run_id, status, on_progress)
-            if status["failed"] or status["missing"]:
-                status["error"] = "vectors_missing" if status["missing"] else "upsert_failed"
+            if status["failed"]:
+                status["error"] = "upsert_failed"
             else:
                 status["state"] = "succeeded"
         except PublishRefused as e:
@@ -275,6 +263,7 @@ class ProdPublisher:
             status["error"], status["error_detail"] = "publish_error", f"{type(e).__name__}: {e}"[:500]
             log.exception("[%s] publish failed", collection_key)
         finally:
+            status["deleted"] = status["wiped"]
             status["finished_at"] = datetime.now(UTC).isoformat()
             status["duration_seconds"] = round(time.time() - t0, 2)
             try:
@@ -287,9 +276,9 @@ class ProdPublisher:
         # 1. what was validated
         await progress({"phase": "preflight", "source_test_run": source_run_id})
         manifest, expected, urls = await self._load_export(key, source_run_id)
-        status["documents_in_export"] = len(expected)
+        status["documents_in_export"] = status["changed"] = len(expected)
 
-        # 2. pre-flight against prod — before anything is written
+        # 2. read-only pre-flight against prod
         try:
             exists = await self._call(self.prod.indices.exists, index=self.index)
         except Exception as e:
@@ -297,73 +286,36 @@ class ProdPublisher:
         if not exists:
             raise PublishRefused("index_not_found", f"the prod index {self.index} does not exist — it is never created here")
         await self._call(probe_scope, self.prod, self.index, key)
-        await self._call(check_id_collisions, self.prod, self.index, key)
-        state = await self._call(scan_state, self.prod, self.index, key)
-        assert_owned(key, state.keys(), "state_scan")
+        await self._call(check_prefix_orphans, self.prod, self.index, key)
 
-        needed = {i for i, v in expected.items() if state.get(i) != v}
-        status["unchanged"] = len(expected) - len(needed)
-        status["changed"] = len(needed)
-        held = set(await self._call(scan_ids, self.prod, self.index, key)) | set(state)
-        assert_owned(key, held, "collection_scan")
-        candidates = sorted(held - set(expected))
-        status["deletion_ratio"] = round(deletion_decision(candidates, len(held), self.s), 6)
-        await progress({"phase": "from_vectorized", "documents_in_export": len(expected),
-                        "unchanged": status["unchanged"], "changed": len(needed), "to_remove": len(candidates)})
+        # 3. what the wipe will remove (verified) — before staging, so a foreign hit stops everything early
+        copies = await self._call(scan_collection_copies, self.prod, self.index, key)
 
-        batch = _Batch(self.s)
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = Path(tmp) / "staged.jsonl"
+            # 4. every vector, before anything is deleted
+            await progress({"phase": "stage", "documents_in_export": len(expected), "to_remove": len(copies)})
+            await self._stage(key, manifest, expected, urls, status, staged)
 
-        async def flush() -> None:
-            if batch.docs:
-                ok, bad = await self._upsert(key, batch.take())
-                status["indexed"] += ok
-                status["failed"] += bad
-                await progress({"indexed": status["indexed"], "failed": status["failed"]})
+            # 5. wipe the collection, and only the collection
+            await progress({"phase": "wipe", "to_remove": len(copies)})
+            wiped = await self._wipe(key, copies, status)
 
-        # 3. vectors from S3, newest run first
-        async for rec in self._vectorized_records(key):
-            i = rec.get("id")
-            if i in needed and rec.get("version") == expected[i] and has_vectors(rec):
-                needed.discard(i)
-                status["from_vectorized"] += 1
-                if batch.add(self._normalize(rec, manifest)):
+            # 6. write the whole set under fresh ids
+            await progress({"phase": "write", "changed": len(expected), "wiped": status["wiped"], "indexed": 0})
+            batch = _Batch(self.s)
+
+            async def flush() -> None:
+                if batch.docs:
+                    ok, bad = await self._insert(key, batch.take(), wiped)
+                    status["indexed"] += ok
+                    status["failed"] += bad
+                    await progress({"indexed": status["indexed"], "failed": status["failed"]})
+
+            for doc in _read_jsonl(staged):
+                if batch.add(doc):
                     await flush()
-                if not needed:
-                    break
-        await flush()
-
-        # 4. whatever S3 did not have: the test index
-        if needed and self.test is not None:
-            await progress({"phase": "from_test_index", "remaining": len(needed)})
-            try:
-                for chunk in _chunks(sorted(needed), _TEST_FETCH_CHUNK):
-                    for src in await self._call(self._test_docs, key, chunk):
-                        i = src.get("id")
-                        if i in needed and src.get("version") == expected[i] and has_vectors(src):
-                            needed.discard(i)
-                            status["from_test_index"] += 1
-                            if batch.add(self._normalize(src, manifest)):
-                                await flush()
-                await flush()
-            except Exception as e:  # noqa: BLE001 - the rest is reported as missing
-                log.warning("[%s] test-index fallback failed: %s", key, e)
-                status["test_index_error"] = f"{type(e).__name__}: {e}"[:300]
-                await flush()
-
-        status["missing"] = len(needed)
-        status["missing_urls"] = sorted(urls[i] for i in needed)[:_MAX_REPORTED]
-
-        # 5. deletions — never on top of an incomplete write
-        if status["failed"] or needed:
-            if candidates:
-                status["deletions_skipped"] = ["upsert_incomplete"]
-            return
-        if candidates:
-            await progress({"phase": "delete", "to_remove": len(candidates)})
-            assert_owned(key, candidates, "deletion_candidates")
-            status["deleted"], delete_failed = await self._delete(key, candidates)
-            if delete_failed:
-                status["delete_failed"] = delete_failed
+            await flush()
 
     async def _load_export(self, key: str, run_id: str) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
         prefix = export_prefix(key, run_id)
@@ -391,8 +343,53 @@ class ProdPublisher:
             raise PublishRefused("export_incomplete", f"export declares {declared} documents but has {lines} lines")
         if len(expected) != lines:
             raise PublishRefused("export_incomplete", f"{lines} export lines collapse to {len(expected)} unique ids")
+        if not expected:
+            raise PublishRefused("empty_export", f"the export of test run {run_id} holds no documents — refusing to empty the collection")
         assert_owned(key, expected.keys(), "export_ids")
         return manifest, expected, urls
+
+    # ── staging ────────────────────────────────────────────────────────
+
+    async def _stage(self, key: str, manifest: dict[str, Any], expected: dict[str, str], urls: dict[str, str],
+                     status: dict[str, Any], out: Path) -> None:
+        """Write a normalized, vectorized copy of every expected document to `out`; refuse — with
+        nothing deleted — when any has no vectors at its current version anywhere."""
+        by_url = {u: i for i, u in urls.items()}
+        needed = set(expected)
+
+        with out.open("w", encoding="utf-8") as fh:
+            def accept(rec: dict[str, Any], source: str) -> None:
+                i = by_url.get(rec.get("url"))
+                if i in needed and rec.get("version") == expected[i] and has_vectors(rec):
+                    needed.discard(i)
+                    status[source] += 1
+                    fh.write(json.dumps(self._normalize(rec, manifest, i), ensure_ascii=False) + "\n")
+
+            async for rec in self._vectorized_records(key):
+                accept(rec, "from_vectorized")
+                if not needed:
+                    break
+
+            for source, client in (("from_test_index", self.test), ("from_prod_index", self.prod)):
+                if not needed or client is None:
+                    continue
+                try:
+                    for chunk in _chunks(sorted(needed), _FETCH_CHUNK):
+                        for src in await self._call(self._fetch_docs, client, key, chunk, [urls[i] for i in chunk]):
+                            if src.get("collection_key") == key:
+                                accept(src, source)
+                except Exception as e:  # noqa: BLE001 - the rest is reported as missing
+                    log.warning("[%s] %s vector lookup failed: %s", key, source, e)
+                    status[f"{source}_error"] = f"{type(e).__name__}: {e}"[:300]
+
+        status["missing"] = len(needed)
+        status["missing_urls"] = sorted(urls[i] for i in needed)[:_MAX_REPORTED]
+        if needed:
+            raise PublishRefused(
+                "vectors_missing",
+                f"{len(needed)} document(s) have no vectors at their current version in S3, the test index or prod "
+                f"(e.g. {', '.join(status['missing_urls'][:3])}) — re-index to test first; nothing was deleted",
+            )
 
     async def _vectorized_records(self, key: str):
         client, bucket = self.s3.client, self.s3.bucket
@@ -424,8 +421,20 @@ class ProdPublisher:
                 for rec in records:
                     yield rec
 
-    def _normalize(self, rec: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    def _fetch_docs(self, client, key: str, ids: list[str], urls: list[str]) -> list[dict[str, Any]]:
+        """Whole documents (embeddings included) of the collection, by fresh id or by url, so a copy
+        stored under an older id scheme is found too."""
+        r = client.search(index=self.index, body={
+            "size": len(ids) * 5,
+            "query": {"bool": {"filter": [collection_filter(key), {"bool": {
+                "should": [{"terms": {"id": ids}}, {"terms": {"url": urls}}], "minimum_should_match": 1}}]}},
+        })
+        return [h.get("_source") or {} for h in r["hits"]["hits"]]
+
+    def _normalize(self, rec: dict[str, Any], manifest: dict[str, Any], fresh_id: str) -> dict[str, Any]:
         doc = {f: rec.get(f) for f in DOC_FIELDS if f in rec}
+        # always the freshly minted id, never whatever id the source copy carried
+        doc["id"] = fresh_id
         # in prod "modified" is when the document went live, never the test run's stamp on the vectors
         doc["modified_date"] = self.published_at
         # non-content fields follow the validated export, not whenever the vectors were made
@@ -436,48 +445,107 @@ class ProdPublisher:
         doc["executive_order_filter"] = False
         return doc
 
-    def _test_docs(self, key: str, ids: list[str]) -> list[dict[str, Any]]:
-        r = self.test.search(index=self.index, body={
-            "size": len(ids) * 5,
-            "query": {"bool": {"filter": [{"term": {"collection_key": key}}, {"terms": {"id": ids}}]}},
-        })
-        return [h.get("_source") or {} for h in r["hits"]["hits"]]
+    # ── wipe ───────────────────────────────────────────────────────────
 
-    def _aoss_ids(self, key: str, ids: list[str]) -> dict[str, list[str]]:
-        """Every copy (AOSS _id) of each business id inside the collection, hidden ones included."""
-        filters: list[dict[str, Any]] = [collection_filter(key), {"terms": {"id": ids}}]
-        r = self.prod.search(index=self.index, body={"size": min(len(ids) * 5, 10_000), "_source": ["id"],
-                                                     "query": {"bool": {"filter": filters}}})
+    async def _wipe(self, key: str, copies: dict[str, str], status: dict[str, Any]) -> set[str]:
+        """Delete every document of the collection by explicit AOSS _id, then re-scan until the
+        collection reads empty — catching copies a page boundary skipped, the index showed late, or a
+        concurrent writer added. Returns the deleted _ids. Raises (nothing written yet) when a delete
+        keeps failing or the collection does not read empty in time."""
+        wiped: set[str] = set()
+        rounds = max(1, int(self.s.publish_wipe_settle_timeout_s // max(self.s.publish_wipe_poll_s, 0.001))) + 1
+        for attempt in range(1, rounds + 1):
+            targets = sorted(set(copies) - wiped)
+            if targets:
+                failed = await self._delete_copies(copies, targets)
+                wiped.update(a for a in targets if a not in failed)
+                status["wiped"] = len(wiped)
+                if failed:
+                    status["wipe_failed"] = len(failed)
+                    raise PublishRefused(
+                        "wipe_incomplete",
+                        f"{len(failed)} of the collection's prod documents could not be deleted after "
+                        f"{_BULK_ATTEMPTS} attempts ({len(wiped)} were) — nothing was written; publish again",
+                    )
+            if await self._call(count_collection, self.prod, self.index, key) == 0:
+                return wiped
+            if attempt == rounds:
+                break
+            await asyncio.sleep(self.s.publish_wipe_poll_s)
+            copies = await self._call(scan_collection_copies, self.prod, self.index, key)
+        remaining = await self._call(count_collection, self.prod, self.index, key)
+        raise PublishRefused(
+            "wipe_incomplete",
+            f"'{key}' still shows {remaining} document(s) in prod {self.s.publish_wipe_settle_timeout_s:.0f}s after "
+            f"deleting {len(wiped)} — nothing was written; publish again",
+        )
+
+    async def _delete_copies(self, verified: dict[str, str], aids: list[str]) -> set[str]:
+        """Delete these AOSS _ids — each must come from a verified scan of this collection — with
+        retries; returns the ones still failing. Not found counts as deleted."""
+        stray = [a for a in aids if a not in verified]
+        if stray:
+            raise PublishRefused("foreign_documents_in_scan",
+                                 f"delete targets {stray[:5]!r} did not come from the collection scan — refusing")
+        failed: set[str] = set()
+        for part in _chunks(aids, self.s.publish_bulk_docs):
+            pending = list(part)
+            for attempt in range(1, _BULK_ATTEMPTS + 1):
+                try:
+                    bad = await self._bulk([{"delete": {"_index": self.index, "_id": a}} for a in pending], pending,
+                                           not_found_ok=True)
+                except Exception as e:  # noqa: BLE001 - transport error: retry the whole part
+                    log.warning("bulk delete attempt %d/%d failed: %s", attempt, _BULK_ATTEMPTS, e)
+                    bad = set(pending)
+                pending = [a for a in pending if a in bad]
+                if not pending:
+                    break
+                if attempt < _BULK_ATTEMPTS:
+                    await asyncio.sleep(2 ** attempt)
+            failed.update(pending)
+        return failed
+
+    # ── write ──────────────────────────────────────────────────────────
+
+    def _aoss_ids(self, key: str, ids: list[str], exclude: set[str]) -> dict[str, list[str]]:
+        """Every live copy (AOSS _id) of each business id inside the collection, minus `exclude`
+        (copies the wipe removed that the index may still show)."""
+        r = self.prod.search(index=self.index, body={"size": min(len(ids) * 5, _MAX_WINDOW), "_source": ["id"],
+                                                     "query": {"bool": {"filter": [collection_filter(key),
+                                                                                   {"terms": {"id": ids}}]}}})
         out: dict[str, list[str]] = {}
         for h in r["hits"]["hits"]:
             i = (h.get("_source") or {}).get("id")
-            if i:
+            if i and h["_id"] not in exclude:
                 out.setdefault(i, []).append(h["_id"])
         return out
 
-    async def _bulk(self, lines: list[dict[str, Any]], keys: list[str]) -> set[str]:
+    async def _bulk(self, lines: list[dict[str, Any]], keys: list[str], *, not_found_ok: bool = False) -> set[str]:
         """Send one bulk request; returns the keys (one per action) whose item failed."""
         body = "\n".join(json.dumps(x, ensure_ascii=False) for x in lines) + "\n"
         r = await self._call(self.prod.bulk, body=body)
         failed: set[str] = set()
         for k, item in zip(keys, r.get("items") or [], strict=False):
             res = next(iter(item.values()), {})
-            if res.get("error") or int(res.get("status", 500)) >= 300:
+            code = int(res.get("status", 500))
+            if not_found_ok and code == 404 and not res.get("error"):
+                continue
+            if res.get("error") or code >= 300:
                 failed.add(k)
                 log.warning("bulk item failed for %s: %s", k, str(res.get("error"))[:300])
         if len(r.get("items") or []) < len(keys):
             failed.update(keys[len(r.get("items") or []):])
         return failed
 
-    async def _upsert(self, key: str, docs: list[dict[str, Any]]) -> tuple[int, int]:
-        """update existing copies (matched on the business id, hidden ones included so they come
-        back), index the rest. Failed items are re-looked-up and retried, so a lost response to an
-        insert becomes an update rather than a duplicate."""
-        assert_owned(key, [d["id"] for d in docs], "upsert_batch")
+    async def _insert(self, key: str, docs: list[dict[str, Any]], wiped: set[str]) -> tuple[int, int]:
+        """Write fresh documents into the wiped collection. The first attempt only indexes; a retry
+        first looks the failed ids up — a lost response may hide a successful insert — and updates
+        what it finds instead of indexing a duplicate, ignoring copies the wipe removed."""
+        assert_owned(key, [d["id"] for d in docs], "write_batch")
         pending = {d["id"]: d for d in docs}
         for attempt in range(1, _BULK_ATTEMPTS + 1):
             try:
-                existing = await self._call(self._aoss_ids, key, list(pending))
+                existing = {} if attempt == 1 else await self._call(self._aoss_ids, key, list(pending), wiped)
                 lines: list[dict[str, Any]] = []
                 keys: list[str] = []
                 for i, d in pending.items():
@@ -491,7 +559,7 @@ class ProdPublisher:
                         keys.append(i)
                 failed = await self._bulk(lines, keys)
             except Exception as e:  # noqa: BLE001 - transport error: retry the whole batch
-                log.warning("bulk upsert attempt %d/%d failed: %s", attempt, _BULK_ATTEMPTS, e)
+                log.warning("bulk write attempt %d/%d failed: %s", attempt, _BULK_ATTEMPTS, e)
                 failed = set(pending)
             pending = {i: d for i, d in pending.items() if i in failed}
             if not pending:
@@ -499,18 +567,6 @@ class ProdPublisher:
             if attempt < _BULK_ATTEMPTS:
                 await asyncio.sleep(2 ** attempt)
         return len(docs) - len(pending), len(pending)
-
-    async def _delete(self, key: str, ids: list[str]) -> tuple[int, int]:
-        """Really remove every copy of these business ids; returns (copies deleted, copies failed)."""
-        done = failed = 0
-        for chunk in _chunks(ids, _LOOKUP_CHUNK):
-            copies = await self._call(self._aoss_ids, key, chunk)
-            aids = [a for i in chunk for a in copies.get(i, [])]
-            for part in _chunks(aids, self.s.publish_bulk_docs):
-                bad = await self._bulk([{"delete": {"_index": self.index, "_id": a}} for a in part], part)
-                done += len(part) - len(bad)
-                failed += len(bad)
-        return done, failed
 
 
 class _Batch:

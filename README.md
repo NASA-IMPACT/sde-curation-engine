@@ -260,16 +260,22 @@ re-indexing* and the mismatches listed (a failed index is not a curation problem
 flag stays down; the chip is read off the latest test run and only a passing run clears it). **Re-validate** re-runs the check on demand. A prod run
 (`?target=prod`) is refused until the latest test run passed.
 
-**Index to prod publishes vectors, it does not re-index.** The prod job takes the export of the
-latest validated test run and, for every document, the newest record at the same `version` from
-`s3://COSMOS_INDEX_BUCKET/vectorized/<key>/*/` (the indexer only vectorizes changed documents, so
-they are spread over runs), falling back to the test index for anything S3 lacks. It upserts them
-into `OPENSEARCH_ENDPOINT_PROD` / `WEB_INDEX_NAME` (existing copies updated in place, never
-duplicated), stamped `modified_date` = the publish time (`2024-08-22 21:08:32` format, UTC, one stamp per publish —
-never the date the test run put on the vectors; unchanged documents are not rewritten and keep theirs), then **deletes** the collection's prod documents that are no
-longer curated: a real removal, of every document under the `collection_key` the export does not hold,
-including ones from before the indexer (no `version`) and ones an earlier publish had hidden. The indexer's guards are ported and checked before anything is written, and removals
-never follow a failed or incomplete write. The engine then runs **the same gate against prod**
+**Index to prod replaces the collection with the validated vectors; it does not re-index.** Every
+prod publish is a fresh start for the collection: every document carrying its `collection_key` in
+`OPENSEARCH_ENDPOINT_PROD` / `WEB_INDEX_NAME` is deleted — whatever its `id` (older id schemes,
+duplicates, hidden, unversioned) — and the whole export of the latest validated test run is written
+back under freshly minted ids (`/SDE/<key>/|<url>`), stamped `modified_date` = the publish time
+(`2024-08-22 21:08:32` format, UTC, one stamp per publish). For every document it needs a record at the
+same `version`, matched on `url`: the newest one in `s3://COSMOS_INDEX_BUCKET/vectorized/<key>/*/` (the
+indexer only vectorizes changed documents, so they are spread over runs), then the test index, then the
+current prod copy. **Order is the safety net** (there is no backup and no deletion guard): read-only
+checks (the `collection_key` filter isolates exactly one collection; nothing under this collection's
+id prefix belongs to another key) → every vector staged locally → wipe, by explicit AOSS `_id` only,
+each one verified to carry this `collection_key`, re-scanning until the collection reads empty → write.
+A missing vector, a foreign hit in any scan, or a delete that keeps failing stops the run before the
+write; other collections are never deleted from. The collection is empty or partial in prod search
+while a publish runs. Test indexing is unaffected: it still exports and dispatches the indexer, with
+the indexer's own guards. The engine then runs **the same gate against prod**
 (delay, direct poll until visible or `VALIDATION_TIMEOUT_S`, counts equal and titles ≥ threshold):
 pass → `live`; fail → back to `config_generated` (the written documents stay in prod). Prod has no
 indexer to fall back to, so a check that cannot run (403 / no endpoint) fails the job rather than

@@ -1,6 +1,6 @@
 {# One place for "what is this job doing / what did it do" text. Reads job.progress keys written
    by jobs.py (scrape: docs/failed/queued/queue_ahead/reused/attached; index: exported/phase/waiting_s/
-   validation_ok; prod publish: phase/source_test_run/changed/unchanged/indexed/remaining/to_remove; LLM: llm=patterns|metadata|titles, done/total/inflight/retrying/failed, urls/calls/global/
+   validation_ok; prod publish: phase=preflight|stage|wipe|write, source_test_run/changed/wiped/indexed/failed/to_remove; LLM: llm=patterns|metadata|titles, done/total/inflight/retrying/failed, urls/calls/global/
    suggestions, classified, tokens_in/tokens_out; the re-title pass: llm_phase=titles, titles_total (URLs),
    title_groups + title_calls_done/title_calls_failed… (the pool runs over groups), title_calls (calls made,
    a big group takes more than one), title_pass, retitled, disambiguated, still_duplicate, titles_error). #}
@@ -13,9 +13,9 @@
   {%- elif p.phase == 'dispatch' %}exported {{ p.exported }} · starting indexer
   {%- elif p.phase == 'indexing' %}indexing {{ p.exported }} docs{% if p.waiting_s %} · {{ (p.waiting_s // 60)|int }}m{% endif %}
   {%- elif p.phase == 'preflight' %}checking the prod index{% if p.source_test_run %} · publishing test run {{ p.source_test_run }}{% endif %}
-  {%- elif p.phase == 'from_vectorized' %}publishing S3 vectors · {{ p.indexed or 0 }}/{{ p.changed or 0 }} written{% if p.unchanged %} · {{ p.unchanged }} unchanged{% endif %}{% if p.failed %} · {{ p.failed }} failed{% endif %}
-  {%- elif p.phase == 'from_test_index' %}copying {{ p.remaining }} docs without S3 vectors from the test index · {{ p.indexed or 0 }} written
-  {%- elif p.phase == 'delete' %}deleting {{ p.to_remove }} removed docs from prod
+  {%- elif p.phase == 'stage' %}collecting vectors for {{ p.documents_in_export }} docs before wiping prod
+  {%- elif p.phase == 'wipe' %}wiping {{ p.to_remove }} docs of this collection from prod
+  {%- elif p.phase == 'write' %}writing to prod · {{ p.indexed or 0 }}/{{ p.changed or 0 }} written{% if p.wiped %} · {{ p.wiped }} wiped{% endif %}{% if p.failed %} · {{ p.failed }} failed{% endif %}
   {%- elif p.phase == 'validating' %}validating the {{ 'prod' if job.kind in ('index_prod', 'validate_prod') else 'test' }} index{% if p.validation_attempt %} · {{ p.indexed_so_far }}/{{ p.expected_count }} visible so far{% if p.validation_waiting_s %} · waiting {{ p.validation_waiting_s }}s for OpenSearch to refresh{% endif %}{% endif %}
   {%- elif p.phase == 'done' %}{% if p.validation_ok is defined %}validation {{ 'passed' if p.validation_ok else 'failed' }}{% else %}validating the {{ 'prod' if job.kind in ('index_prod', 'validate_prod') else 'test' }} index{% endif %}
   {%- elif p.llm_phase == 'titles' %}regenerating duplicate titles · {{ p.title_calls_done or 0 }}/{{ p.title_groups or '?' }} group{{ 's' if p.title_groups != 1 }}{% if p.titles_total %} · {{ p.titles_total }} URLs{% endif %}{% if p.title_pass %} · pass {{ p.title_pass }}{% endif %}{% if p.title_calls_inflight %} · {{ p.title_calls_inflight }} in flight{% endif %}{% if p.title_calls_retrying %} · {{ p.title_calls_retrying }} to retry{% endif %}{% if p.title_calls_failed %} · {{ p.title_calls_failed }} failed{% endif %}
