@@ -20,7 +20,8 @@
 {% set curate = '/collections/' ~ cid ~ '?tab=curate' %}
 {% macro sugg_href(n) %}{{ curate }}&focus=exclusions&per={{ sugg_paging.per }}&page={{ n }}{% endmacro %}
 {# the review table's filter (?conf= / ?field= / ?dup=title) rides along on its paging and expand links #}
-{% set ai_qs %}{% if ai_conf %}&conf={{ ai_conf }}{% endif %}{% if ai_field %}&field={{ ai_field }}{% endif %}{% if ai_dups_only %}&dup=title{% endif %}{% endset %}
+{% set ai_qs_base %}{% if ai_conf %}&conf={{ ai_conf }}{% endif %}{% if ai_field %}&field={{ ai_field }}{% endif %}{% if ai_dups_only %}&dup=title{% endif %}{% endset %}
+{% set ai_qs %}{{ ai_qs_base }}{% if ai_hide_decided %}&decided=hide{% endif %}{% endset %}
 {% macro ai_href(n) %}{{ curate }}&focus=metadata&per={{ ai_paging.per }}&page={{ n }}{{ ai_qs }}{% endmacro %}
 {# ⤢ Expand one list to its own page / ⤡ Collapse back to the whole workspace #}
 {% macro expand_link(name, total) -%}
@@ -32,7 +33,7 @@
 {% macro focus_pager(name, paging, href) -%}
   <div class="inline pager">
     {{ pager(paging.page, paging.pages, paging.per, paging.total, href) }}
-    <form method="get" action="/collections/{{ cid }}" class="inline"><input type="hidden" name="tab" value="curate"><input type="hidden" name="focus" value="{{ name }}">{% if name == 'metadata' %}{% if ai_conf %}<input type="hidden" name="conf" value="{{ ai_conf }}">{% endif %}{% if ai_field %}<input type="hidden" name="field" value="{{ ai_field }}">{% endif %}{% endif %}
+    <form method="get" action="/collections/{{ cid }}" class="inline"><input type="hidden" name="tab" value="curate"><input type="hidden" name="focus" value="{{ name }}">{% if name == 'metadata' %}{% if ai_conf %}<input type="hidden" name="conf" value="{{ ai_conf }}">{% endif %}{% if ai_field %}<input type="hidden" name="field" value="{{ ai_field }}">{% endif %}{% if ai_dups_only %}<input type="hidden" name="dup" value="title">{% endif %}{% if ai_hide_decided %}<input type="hidden" name="decided" value="hide">{% endif %}{% endif %}
       <select name="per" aria-label="rows per page" onchange="this.form.submit()">{% for n in [25, 50, 100, 250] %}<option {% if paging.per == n %}selected{% endif %}>{{ n }}</option>{% endfor %}</select></form>
   </div>
 {%- endmacro %}
@@ -200,7 +201,9 @@
   {# The review table outlives the suggestions: a row that shares its title + document type with
      another page stays listed until the titles differ, because accepting or dismissing a
      suggestion decides a field, not a collision. #}
-  {% if ai_pending_total or ai_paging.total %}
+  {# `ai_round` keeps the panel up when "Hide decided" has emptied the table, so the toggle
+     that hid the rows is still there to bring them back. #}
+  {% if ai_pending_total or ai_paging.total or ai_round %}
   <div class="suggestions">
     {% if ai_pending_total %}
     <div class="inline bulk-bar">
@@ -236,6 +239,10 @@
       {# The ⚠ badge on a row links here: the same filter, on this table. #}
       {% if dup_counts.delta_urls %}<a class="conf dup {{ 'on' if ai_dups_only }}" href="{{ fbase }}{{ '' if ai_dups_only else '&dup=title' }}#metadata"
          title="{{ 'show every row again' if ai_dups_only else 'show only the rows another page will be indexed under the same title and document type as' }}">⚠ duplicates {{ dup_counts.delta_urls }}</a>{% endif %}
+      {# Decided rows keep their place so the list never renumbers mid-pass; this drops them for a
+         curator who wants only what is left. #}
+      {% if ai_decided %}<a class="conf decided-toggle {{ 'on' if ai_hide_decided }}" href="{{ fbase }}{{ ai_qs_base }}{{ '' if ai_hide_decided else '&decided=hide' }}#metadata"
+         title="{{ 'bring the decided rows back, each in its own place in the list' if ai_hide_decided else 'list only the rows still to decide — the decided ones keep their place until you come back to this view' }}">{{ 'Show decided' if ai_hide_decided else 'Hide decided' }} {{ ai_decided }}</a>{% endif %}
       {% if ai_dups_only %}
       <span class="muted small">{{ ai_paging.total }} delta URL{{ 's' if ai_paging.total != 1 }} sharing a title + document type — listed until the titles differ, whether or not their suggestions are decided.</span>
       <a class="small" href="{{ fbase }}#metadata">clear filter</a>
@@ -249,29 +256,35 @@
       <a class="small" href="{{ fbase }}#metadata">clear filter</a>
       {% endif %}
     </form>
-    {# The review table: one row per delta URL with a pending suggestion. Same cells as the Delta
-       URLs table (✓ accept · ✎ edit then accept · ✕ dismiss per field), plus accept / reject the
-       whole row. Scrolls in place (first rows only); ⤢ Expand pages through all of them. #}
+    {# The review table: one row per delta URL of this metadata pass — every URL the last Suggest
+       metadata run classified, the decided ones included, each keeping its place and its number.
+       Same cells as the Delta URLs table (✓ accept · ✎ edit then accept · ✕ dismiss per field),
+       plus accept / reject the whole row. Scrolls in place (first rows only); ⤢ Expand pages
+       through all of them, and "Hide decided" narrows it to what is left. #}
     {% if focus %}{{ focus_pager('metadata', ai_paging, ai_href) }}{% endif %}
     <div class="{{ 'sugg-page' if focus else 'sugg-scroll' }}">
     <table class="urls ai-review">
       <thead><tr><th class="num">#</th><th>URL</th><th>Title <small class="muted">scraped → effective</small></th><th>Division</th><th>Doc type</th><th title="accept or dismiss every suggestion on this row">Row</th></tr></thead>
-      <tbody>{% if not ai_rows %}<tr><td colspan="6" class="muted">{% if ai_dups_only %}No delta URL shares a title + document type any more.{% else %}No {{ ai_conf ~ '-confidence ' if ai_conf }}{{ ai_field|replace('_', ' ') ~ ' ' if ai_field }}suggestions left to review.{% endif %}</td></tr>{% endif %}{% for r in ai_rows %}
+      <tbody>{% if not ai_rows %}<tr><td colspan="6" class="muted">{% if ai_dups_only %}No delta URL shares a title + document type any more.{% elif ai_hide_decided %}Nothing left to decide{{ ' at ' ~ ai_conf ~ ' confidence' if ai_conf }}{{ ' on ' ~ ai_field|replace('_', ' ') ~ 's' if ai_field }} — <a href="{{ curate }}{{ '&focus=metadata' if focus }}#metadata">show the {{ ai_decided }} decided row{{ 's' if ai_decided != 1 }}</a>.{% else %}No {{ ai_conf ~ '-confidence ' if ai_conf }}{{ ai_field|replace('_', ' ') ~ ' ' if ai_field }}suggestions left to review.{% endif %}</td></tr>{% endif %}{% for r in ai_rows %}
         {% set why = effects.get(r.url, {}) %}
-        <tr class="{% if r.excluded %}excluded{% endif %} row-{{ r.kind }}">
+        {# A row whose suggestions are all decided keeps its place and its number until the curator
+           leaves the step: the list must not renumber under the hand working down it. #}
+        {% set pending = r.title_ai or r.division_ai or r.document_type_ai %}
+        <tr class="{% if r.excluded %}excluded{% endif %}{% if not pending %} decided{% endif %} row-{{ r.kind }}">
           <td class="num muted">{{ ai_paging.offset + loop.index }}</td>
           <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a>{% if r.excluded %}<br><span class="kind k-excluded" title="{{ why.excluded or 'excluded' }}">excluded</span>{% endif %}</td>
           <td>{{ title_cell(r, why, not running) }}</td>
           <td>{{ select_cell(r, why, not running, 'division', curation_divisions) }}</td>
           <td>{{ select_cell(r, why, not running, 'document_type', doc_types) }}</td>
           <td class="inline nowrap actions">
-            <button class="mini ok" title="accept every suggestion on this row" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "accept", "url": r.url}|tojson }}' hx-swap="none">✓ row</button><button class="mini" title="dismiss every suggestion on this row" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "url": r.url}|tojson }}' hx-swap="none">✕</button>
+            {% if pending %}<button class="mini ok" title="accept every suggestion on this row" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "accept", "url": r.url}|tojson }}' hx-swap="none">✓ row</button><button class="mini" title="dismiss every suggestion on this row" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "url": r.url}|tojson }}' hx-swap="none">✕</button>
+            {% else %}<span class="kind k-ok" title="every suggestion on this row is decided — the values shown are what promote writes. The row keeps its place here so the list does not renumber while you work; its cells stay editable.">✓ decided</span>{% endif %}
           </td></tr>
       {% endfor %}</tbody>
     </table>
     </div>
     {% if focus %}{{ focus_pager('metadata', ai_paging, ai_href) }}{% endif %}
-    {{ more_note('metadata', ai_paging, 'URLs sharing a title + document type' if ai_dups_only else 'URLs to review') }}
+    {{ more_note('metadata', ai_paging, 'URLs sharing a title + document type' if ai_dups_only else ('URLs left to decide' if ai_hide_decided else 'URLs in this metadata pass')) }}
   </div>
   {% endif %}
 

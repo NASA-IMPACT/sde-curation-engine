@@ -869,9 +869,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ai_dups_only = lp["dup"] == "title"
         ai_conf = None if ai_dups_only or qp.get("conf") not in ("high", "medium", "low") else qp.get("conf")
         ai_field = None if ai_dups_only or qp.get("field") not in AI_FIELDS else qp.get("field")
+        # A row the curator has finished stays in the table, in its place, marked decided — the list
+        # must not renumber under the hand that is working down it. ?decided=hide drops them.
+        ai_hide_decided = qp.get("decided") == "hide"
         ai_args = {"field": ai_field, "conf": ai_conf, "dups_only": ai_dups_only,
-                   "with_dups": not (ai_conf or ai_field)}
-        _, ai_total = await d.list_delta_ai(cid, limit=0, **ai_args)
+                   "with_dups": not (ai_conf or ai_field), "undecided_only": ai_hide_decided}
+        # the whole round, and how much of it is still to decide: both counted whichever way the
+        # toggle is set, so the toggle can always say how many rows it hides or brings back
+        ai_round, ai_left = await d.count_delta_ai(cid, **{k: v for k, v in ai_args.items() if k != "undecided_only"})
+        ai_total = ai_left if ai_hide_decided else ai_round
         ai_paging = paging("metadata", ai_total)
         ai_rows, _ = await d.list_delta_ai(cid, limit=ai_paging["limit"], offset=ai_paging["offset"], **ai_args)
         step = await step_context(request, c, Status.CURATING)
@@ -893,6 +899,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "ai_accept_counts": accept_counts, "ai_held": held, "ai_held_total": sum(held.values()),
             "ai_accept_total": sum(accept_counts.values()),
             "ai_rows": ai_rows, "ai_conf": ai_conf, "ai_field": ai_field, "ai_dups_only": ai_dups_only,
+            "ai_hide_decided": ai_hide_decided, "ai_left": ai_left, "ai_round": ai_round,
+            "ai_decided": ai_round - ai_left,
             # the ⚠ same-title badge stays on this step instead of jumping to the Delta URLs tab
             "dup_href": f"/collections/{cid}?tab=curate{'&focus=metadata' if focus else ''}&dup=title#metadata",
             "ai_filtered": await d.count_ai_suggestions(cid, field=ai_field, conf=ai_conf) if (ai_conf or ai_field) else 0,

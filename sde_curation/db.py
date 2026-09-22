@@ -121,9 +121,24 @@ DUMP_SORTS: dict[str, tuple[str, ...]] = {
     "depth": ("d.depth",), "text_len": ("text_len",), "excluded": ("excluded",),
     "vs_curated": ("in_deltas", "in_curated"),
 }
+# A delta row is shown with its pending AI suggestions as if they had been accepted (see
+# _projected_titles, pending=True), and a sorted column sorts by exactly what is shown: the
+# projected value, never the stored one. Accepting a suggestion then writes the value the row was
+# already sorted under, so ✓ leaves the row where the curator is looking at it. Sorting on the
+# stored value instead put every undecided row in the NULLS LAST block, tied, and the first accept
+# sent that one row to the top of the list while everything above it shifted down.
+_P_TITLE = "COALESCE(NULLIF(btrim(title), ''), title_ai, scraped_title)"
+_P_DIVISION = "COALESCE(division, division_ai)"
+_P_DOCUMENT_TYPE = "COALESCE(document_type, document_type_ai)"
+# edited_by once the pending suggestions are accepted (models.edited_by_of): a suggestion makes the
+# row 'ai', or 'mixed' where a curator has already set a field of it.
+_P_EDITED_BY = (
+    "CASE WHEN title_ai IS NULL AND division_ai IS NULL AND document_type_ai IS NULL THEN edited_by"
+    " WHEN edited_by IN ('sme', 'mixed') THEN 'mixed' ELSE 'ai' END"
+)
 DELTA_SORTS: dict[str, tuple[str, ...]] = {
-    "kind": ("kind",), "url": url_order(), "excluded": ("excluded",), "title": ("COALESCE(title, scraped_title)",),
-    "division": ("division",), "document_type": ("document_type",), "edited_by": ("edited_by",),
+    "kind": ("kind",), "url": url_order(), "excluded": ("excluded",), "title": (_P_TITLE,),
+    "division": (_P_DIVISION,), "document_type": (_P_DOCUMENT_TYPE,), "edited_by": (_P_EDITED_BY,),
 }
 CURATED_SORTS: dict[str, tuple[str, ...]] = {
     "url": url_order(), "excluded": ("excluded",), "title": ("COALESCE(title, scraped_title)",),
@@ -1369,27 +1384,71 @@ class Database:
         return ("(" + " OR ".join(f"({f}_ai IS NOT NULL AND {f}_ai_conf=%s)" for f in fields) + ")",
                 [conf] * len(fields))
 
+    def _ai_review_where(
+        self, collection_id: str, *, field: str | None, conf: str | None,
+        with_dups: bool, dups_only: bool, undecided_only: bool, dup_cte: bool = False,
+    ) -> tuple[str, list[Any]]:
+        """(WHERE, args) for the metadata review table — what `list_delta_ai` lists, in one place so
+        the table and the counts under it can never drift apart. `dup_cte`: read the duplicate set
+        from a `dup` CTE the caller has already declared, instead of inlining it (and its two args)."""
+        dup = "url IN (SELECT url FROM dup)" if dup_cte else f"url IN (SELECT url FROM ({_DUPLICATE_TITLES}) g WHERE delta)"
+        dup_args: list[Any] = [] if dup_cte else [collection_id] * 2
+        if dups_only:
+            cond, cargs = dup, dup_args
+        else:
+            cond, cargs = self._ai_filter(field, conf)
+            if with_dups:
+                cond, cargs = f"({cond} OR {dup})", [*cargs, *dup_args]
+                if not undecided_only:
+                    cond = f"({cond} OR ai_model IS NOT NULL)"
+        return f"collection_id=%s AND kind!='deleted' AND {cond}", [collection_id, *cargs]
+
+    async def count_delta_ai(
+        self, collection_id: str, *, field: str | None = None, conf: str | None = None,
+        with_dups: bool = False, dups_only: bool = False,
+    ) -> tuple[int, int]:
+        """(rows in the review table, of which still to decide) — the whole metadata round and what
+        is left of it, in one pass, so the page that shows both does not scan for duplicates twice."""
+        kw = {"field": field, "conf": conf, "with_dups": with_dups, "dups_only": dups_only, "dup_cte": True}
+        whole, wargs = self._ai_review_where(collection_id, undecided_only=False, **kw)  # type: ignore[arg-type]
+        left, largs = self._ai_review_where(collection_id, undecided_only=True, **kw)  # type: ignore[arg-type]
+        # The rows still to decide are a subset of the round, so the round is the WHERE (it keeps
+        # the scan off the delta rows no Suggest metadata run has touched) and only the subset is a
+        # FILTER. The duplicate scan is a CTE: it is the expensive half and both conditions read it.
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                f"WITH dup AS (SELECT url FROM ({_DUPLICATE_TITLES}) g WHERE delta)"
+                f" SELECT COUNT(*) AS whole, COUNT(*) FILTER (WHERE {left}) AS few"
+                f" FROM delta_urls WHERE {whole}",
+                [collection_id, collection_id, *largs, *wargs],
+            )
+            r = await cur.fetchone()
+        return r["whole"] or 0, r["few"] or 0
+
     async def list_delta_ai(
         self, collection_id: str, limit: int = 50, offset: int = 0, *,
         field: str | None = None, conf: str | None = None,
-        with_dups: bool = False, dups_only: bool = False,
+        with_dups: bool = False, dups_only: bool = False, undecided_only: bool = False,
     ) -> tuple[list[DeltaUrl], int]:
-        """Pending, non-removed delta URLs that carry at least one AI suggestion (for `field`, of
-        confidence `conf`, when given), by URL — the review table under Curate › Metadata — and how
-        many there are in all.
+        """The non-removed delta URLs of the current metadata round, by URL — the review table under
+        Curate › Metadata — and how many there are in all.
+
+        The round is every row the last Suggest metadata run classified (`ai_model`, which a
+        decision does not clear), not just the rows still carrying a suggestion: a row the curator
+        has finished keeps its place and its number in the list, marked as decided, instead of
+        vanishing and renumbering every row below it on whichever accept happened to be its last.
+        `undecided_only` (the "Hide decided" toggle) drops them again, for a curator who wants only
+        what is left.
 
         `with_dups` also lists the rows another page of the collection will be indexed under the
         same title + document type as: deciding a suggestion does not resolve a collision, so those
         rows have to stay on the page the curator fixes them on until the titles differ.
-        `dups_only` narrows the table to them (the ⚠ badge links here)."""
-        dup = f"url IN (SELECT url FROM ({_DUPLICATE_TITLES}) g WHERE delta)"
-        if dups_only:
-            cond, cargs = dup, [collection_id] * 2
-        else:
-            cond, cargs = self._ai_filter(field, conf)
-            if with_dups:
-                cond, cargs = f"({cond} OR {dup})", [*cargs, *[collection_id] * 2]
-        where, args = f"collection_id=%s AND kind!='deleted' AND {cond}", [collection_id, *cargs]
+        `dups_only` narrows the table to them (the ⚠ badge links here).
+
+        A field / confidence filter is a question about suggestions only, so it lists exactly the
+        rows that still carry one."""
+        where, args = self._ai_review_where(collection_id, field=field, conf=conf, with_dups=with_dups,
+                                            dups_only=dups_only, undecided_only=undecided_only)
         async with self._conn() as conn:
             total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM delta_urls WHERE {where}", args))
             cur = await conn.execute(

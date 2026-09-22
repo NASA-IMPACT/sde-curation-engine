@@ -400,9 +400,12 @@ async def test_a_collision_keeps_the_review_table_open_after_every_suggestion_is
     assert (await client.app.state.db.delta_ai_counts(CID))["title"] == 0
 
     page = (await client.get(f"/collections/{CID}?tab=curate")).text
-    assert review_rows(page) == urls("/a", "/b")  # /c is decided and tells itself apart: gone
+    assert review_rows(page) == urls("/a", "/b", "/c")  # every row of the pass keeps its place
     assert "same title + type ×2" in page and "⚠ duplicates 2" in page
     assert "AI suggestions to review" not in page  # the bulk bar goes with the suggestions
+    # /c is decided and tells itself apart, so hiding the decided rows leaves the collision
+    page = (await client.get(f"/collections/{CID}?tab=curate&decided=hide")).text
+    assert review_rows(page) == urls("/a", "/b")
 
 
 def test_url_distinctions_are_what_one_url_has_and_the_others_do_not():
