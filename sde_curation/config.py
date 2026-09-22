@@ -81,10 +81,12 @@ class Settings(BaseSettings):
     prod_index_role_arn: str | None = None
     publish_bulk_docs: int = Field(default=100, ge=1, le=1000)  # docs per bulk request
     publish_bulk_max_bytes: int = Field(default=8_000_000, ge=100_000)  # AOSS caps a request at 10 MiB
-    # Same guards as the indexer (web/deletion_guard.py): refuse the whole run when tombstoning would
-    # remove more than this share of the collection's prod documents, or more than this many.
-    publish_deletion_abort_ratio: float = Field(default=0.90, ge=0.0, le=1.0)
-    publish_deletion_abort_max: int = Field(default=5000, ge=0)
+    # A prod publish wipes the collection before writing it fresh; after the deletes it re-scans every
+    # `publish_wipe_poll_s`. Deleted-but-still-visible documents (index lag) do not hold it back; it only
+    # waits while documents the scan did not account for remain visible, and gives up (nothing written)
+    # after this long — the same budget validation gives AOSS to catch up.
+    publish_wipe_settle_timeout_s: float = Field(default=600.0, ge=0.0)
+    publish_wipe_poll_s: float = Field(default=10.0, gt=0.0)
     index_stall_timeout_s: float = 4 * 3600
     scrape_poll_interval_s: float = 15.0
 

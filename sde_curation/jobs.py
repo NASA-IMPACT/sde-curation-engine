@@ -694,9 +694,9 @@ class JobManager:
         log.info("%s: indexed as '%s' (%s)", c.collection_id, key, name)
 
     async def _run_publish_prod(self, c: Collection, job: JobRun, run: IndexRun) -> None:
-        """Index to prod: publish the vectors of the latest validated test run straight into the
-        production index (backends/publish.py) — no export, no indexer task, no re-vectorizing —
-        then run the same validation gate as test against prod. The collection only becomes `live`
+        """Index to prod: replace the collection in the production index with the vectors of the
+        latest validated test run (backends/publish.py: wipe everything under the collection_key,
+        write the set back under fresh ids) — no export, no indexer task, no re-vectorizing — then run the same validation gate as test against prod. The collection only becomes `live`
         once that passes; a failed or impossible check sends it back to `config_generated`, flagged
         (the documents that were written stay in prod)."""
         async def body():
@@ -725,16 +725,16 @@ class JobManager:
             if status.state != "succeeded":
                 run.state, run.error, run.finished_at = "failed", status.error or "publish failed", utcnow()
                 await self.db.update_index_run(run)
-                detail = st.get("error_detail") or (f"{st.get('missing')} documents have no vectors in S3 or the test index, "
+                detail = st.get("error_detail") or (f"{st.get('missing')} documents have no vectors in S3, the test index or prod, "
                                                     f"e.g. {', '.join(st.get('missing_urls', [])[:3])}" if st.get("missing") else "")
                 raise IndexError_(f"publish to prod failed: {status.error}{(' — ' + detail) if detail else ''}")
             run.state, run.finished_at = "succeeded", utcnow()
             await self.db.update_index_run(run)
             await self._validate_prod(
                 c, job, run, progress,
-                note=(f"prod publish {run.run_id} from test run {source.run_id}: {status.indexed} written "
-                      f"({st.get('from_vectorized', 0)} from S3, {st.get('from_test_index', 0)} from the test index), "
-                      f"{st.get('unchanged', 0)} unchanged, {status.deleted} removed"),
+                note=(f"prod publish {run.run_id} from test run {source.run_id}: wiped {st.get('wiped', 0)}, "
+                      f"wrote {status.indexed} ({st.get('from_vectorized', 0)} from S3, {st.get('from_test_index', 0)} "
+                      f"from the test index, {st.get('from_prod_index', 0)} from prod)"),
             )
 
         await self._guarded(c, job, body)

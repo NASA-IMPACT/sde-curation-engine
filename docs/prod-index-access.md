@@ -25,17 +25,18 @@ What the engine does in prod, and nothing else:
 | Action | OpenSearch call | Permission |
 |---|---|---|
 | check the index exists (never creates it) | `HEAD sde-web` | `aoss:DescribeIndex` |
-| read one collection's document ids/versions, safety checks, validation | `_search`, `_count` | `aoss:ReadDocument` |
-| add/update that collection's documents; delete the ones no longer curated | `_bulk` (`index`, `update`, `delete`) | `aoss:WriteDocument` |
+| read one collection's documents (ids, embeddings for re-use), safety checks, validation | `_search`, `_count` | `aoss:ReadDocument` |
+| delete that collection's documents, then write it back fresh | `_bulk` (`delete`, `index`, `update`) | `aoss:WriteDocument` |
 
-It never creates, deletes, or remaps indexes. It does delete documents: the ones of the collection
-being published that its SME removed from curation (document deletes are part of
-`aoss:WriteDocument`; no index-level delete permission is asked for). Every write and delete is
-scoped to a single `collection_key`. Before writing, the engine runs the same guards as the
-production indexer. It refuses to run if:
-- ids would collide or duplicate
-- the collection filter does not isolate one collection
-- more than 90% or 5,000 of a collection's documents would be deleted
+It never creates, deletes, or remaps indexes. It does delete documents: every publish is a fresh
+start for the collection being published, so all of that collection's documents are deleted and the
+curated set is written back under fresh ids (document deletes are part of `aoss:WriteDocument`; no
+index-level delete permission is asked for). Every write and delete is scoped to a single
+`collection_key`, deletes go by explicit document id only, and each one is checked to belong to that
+collection. It refuses to run, before deleting anything, if:
+- the collection filter does not isolate exactly one collection
+- a document outside the collection's `collection_key` carries its id prefix
+- any document to be written has no embeddings to re-use
 
 ---
 
@@ -149,8 +150,9 @@ aws opensearchserverless get-security-policy --type network --name <POLICY_NAME>
    `https://o2mxw7n9akk8n7o5oiqb.us-east-1.aoss.amazonaws.com`.
 2. Redeploy the test stack. Its task role already has `sts:AssumeRole` on that parameter's value.
 3. Publish one small collection and confirm three things:
-   - the job reports `N written`, then `N / N visible in prod`
-   - a second publish reports `0 written · N unchanged`
+   - the job reports `… wiped · N written`, then `N / N visible in prod`
+   - a second publish reports `N wiped · N written`, and prod still holds N documents for it
+   - the document counts of other collections are unchanged
    - the documents show up on the prod search front end
 
 ## Revoking access
@@ -164,23 +166,25 @@ then fails "Index to prod" with an access error and writes nothing.
 <details>
 <summary>Reference for the engine team: failure codes shown on a prod run</summary>
 
-Refusals happen before anything is written:
+Refusals before anything is deleted or written:
 
 | error | meaning |
 |---|---|
 | `prod_index_unreachable` | cannot reach or authenticate to the prod collection (role not created yet, placeholder ARN, network policy) |
 | `export_not_found` | the test run's export expired (30 days): re-index to test first |
+| `empty_export` | the test run's export holds no documents |
 | `index_not_found` | prod `sde-web` does not exist |
-| `id_scheme_collision` / `duplicate_business_ids` | prod has this collection under ids the engine would not mint, so updating them would duplicate them |
 | `scope_filter_ineffective` | the collection filter does not isolate the collection |
-| `deletion_threshold_exceeded` / `deletion_budget_exceeded` | more than `PUBLISH_DELETION_ABORT_RATIO` (90%) or `PUBLISH_DELETION_ABORT_MAX` (5000) of the collection's prod documents would be deleted |
+| `orphaned_prefixed_docs` | documents carry this collection's id prefix under another (or no) `collection_key`: outside the wipe, and they would duplicate the fresh documents |
+| `foreign_documents_in_scan` | a scan of the collection returned a document of another collection |
+| `vectors_missing` | documents with no vectors at their current version in S3, the test index or prod; the URLs are listed |
 
-Failures after writing started. Nothing is deleted in these cases:
+After deletes started (the collection may be partial in prod; publish again):
 
 | error | meaning |
 |---|---|
-| `vectors_missing` | documents with no vectors at their current version in S3 or the test index; the URLs are listed |
-| `upsert_failed` | bulk items still failed after 3 attempts |
+| `wipe_incomplete` | deletes still failed after 3 attempts, or documents that were never scanned/deleted were still visible after `PUBLISH_WIPE_SETTLE_TIMEOUT_S` (600 s); deleted documents that only lag do not count; nothing was written |
+| `upsert_failed` | bulk writes still failed after 3 attempts |
 
 Code: `sde_curation/backends/publish.py`. Stack grants: `infra/stacks/engine_stack.py`.
 </details>

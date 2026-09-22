@@ -1,5 +1,7 @@
 """In-memory stand-in for an OpenSearch Serverless index: just the query shapes the publisher and
-validation send (term/terms/prefix/bool, search_after on id, the probe/dups aggregations, bulk)."""
+validation send (term/terms/prefix/exists/bool, search_after on id, the probe/dups aggregations, bulk).
+`visibility_lag` simulates eventual consistency: a deleted document keeps showing in search/count for
+that many count() calls (deleting it again answers 404)."""
 
 from __future__ import annotations
 
@@ -13,6 +15,9 @@ class FakeAoss:
         self.store: dict[str, dict[str, Any]] = {}  # AOSS _id → _source
         self.fail_ids: set[str] = set()  # business ids whose bulk items always fail
         self.bulk_calls: list[list[dict[str, Any]]] = []
+        self.visibility_lag = 0
+        self.lose_response_ids: set[str] = set()  # business ids whose first insert lands but answers 503
+        self.ghosts: dict[str, list] = {}  # AOSS _id → [_source, count() calls left visible]
         self._n = 0
         self.indices = SimpleNamespace(exists=lambda index: exists)
 
@@ -33,8 +38,13 @@ class FakeAoss:
         if "bool" in q:
             b = q["bool"]
             must = [*_list(b.get("filter")), *_list(b.get("must"))]
-            return all(self._match(src, x) for x in must) and not any(self._match(src, x) for x in _list(b.get("must_not")))
+            should = _list(b.get("should"))
+            return (all(self._match(src, x) for x in must)
+                    and not any(self._match(src, x) for x in _list(b.get("must_not")))
+                    and (not should or any(self._match(src, x) for x in should)))
         (kind, spec), = q.items()
+        if kind == "exists":
+            return src.get(spec["field"]) is not None
         (field, value), = spec.items()
         if kind == "term":
             return src.get(field) == value
@@ -45,7 +55,7 @@ class FakeAoss:
         raise NotImplementedError(q)
 
     def search(self, index: str, body: dict[str, Any]) -> dict[str, Any]:
-        hits = sorted(((a, s) for a, s in self.store.items() if self._match(s, body.get("query"))),
+        hits = sorted(((a, s) for a, s in self._visible() if self._match(s, body.get("query"))),
                       key=lambda x: str(x[1].get("id")))
         out: dict[str, Any] = {}
         aggs = body.get("aggs") or {}
@@ -71,8 +81,17 @@ class FakeAoss:
         ]}
         return out
 
+    def _visible(self):
+        # lagging deletes first: with equal sort values they hide live copies behind a page boundary
+        return [*((a, g[0]) for a, g in self.ghosts.items()), *self.store.items()]
+
     def count(self, index: str, body: dict[str, Any]) -> dict[str, int]:
-        return {"count": sum(1 for s in self.store.values() if self._match(s, body.get("query")))}
+        n = sum(1 for _, s in self._visible() if self._match(s, body.get("query")))
+        for a in list(self.ghosts):
+            self.ghosts[a][1] -= 1
+            if self.ghosts[a][1] <= 0:
+                del self.ghosts[a]
+        return {"count": n}
 
     def bulk(self, body: str) -> dict[str, Any]:
         lines = [json.loads(x) for x in body.splitlines() if x.strip()]
@@ -88,11 +107,21 @@ class FakeAoss:
                 items.append({op: {"status": 429, "error": {"type": "too_many_requests"}}})
                 continue
             if op == "delete":
-                found = self.store.pop(meta["_id"], None) is not None
+                gone = self.store.pop(meta["_id"], None)
+                found = gone is not None
+                if found and self.visibility_lag:
+                    self.ghosts[meta["_id"]] = [gone, self.visibility_lag]
                 items.append({op: {"_id": meta["_id"], "status": 200 if found else 404}})
             elif op == "update":
+                if meta["_id"] not in self.store:
+                    items.append({op: {"_id": meta["_id"], "status": 404, "error": {"type": "document_missing_exception"}}})
+                    continue
                 self.store[meta["_id"]].update(payload["doc"])
                 items.append({op: {"_id": meta["_id"], "status": 200}})
+            elif business_id in self.lose_response_ids:
+                self.lose_response_ids.discard(business_id)
+                self.add(payload)
+                items.append({op: {"status": 503, "error": {"type": "response_lost"}}})
             else:
                 items.append({op: {"_id": self.add(payload), "status": 201}})
         return {"errors": any("error" in next(iter(i.values())) for i in items), "items": items}
