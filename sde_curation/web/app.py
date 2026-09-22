@@ -44,6 +44,7 @@ from ..llm.global_excludes import load_global_excludes
 from ..llm.tasks import PATTERN_SYSTEM, TITLE_SIBLINGS, TITLES_SYSTEM, metadata_system
 from ..models import (
     ANONYMOUS_ACTOR,
+    CURATION_DIVISIONS,
     NOT_VISITED,
     Collection,
     CollectionCreate,
@@ -195,9 +196,13 @@ def status_label(st) -> str:
     return STATUS_LABEL.get(Status(st), str(st))
 
 
+# `divisions` (per request) is all six, for the collection's own division and the filters; a page is
+# curated into one of the five — General is the collection's "not assigned yet" placeholder, never an
+# answer for a URL — so everything that sets a division on a URL offers `curation_divisions`.
 templates.env.globals.update(
     next_action=next_action, pipeline_steps=pipeline_steps, status_icon=status_icon, status_label=status_label,
     step_for_kind=lambda kind: STEP_FOR_KIND.get(str(kind)),
+    curation_divisions=list(CURATION_DIVISIONS),
 )
 
 

@@ -20,7 +20,8 @@
                 hx-vals='js:{division: document.getElementById("cdiv").value}'>
             <select id="cdiv" name="division" {% if job and job.state == 'running' %}disabled{% endif %}
                     title="one division for the whole collection, or General to have the AI suggest one per page">
-              {% for d in divisions %}<option {% if c.division == d %}selected{% endif %}>{{ d }}{% if d == 'General' %} — not assigned{% endif %}</option>{% endfor %}
+              {# value="{{ d }}": the label has a suffix, and the form posts the value, not the label. #}
+              {% for d in divisions %}<option value="{{ d }}" {% if c.division == d %}selected{% endif %}>{{ d }}{% if d == 'General' %} — not assigned{% endif %}</option>{% endfor %}
             </select>
             <button class="secondary mini" {% if job and job.state == 'running' %}disabled{% endif %}>Save</button>
           </form>

@@ -52,13 +52,16 @@
 {% macro select_cell(r, why, editable, field, values) -%}
   {% set ai_val = r[field ~ '_ai'] if r[field ~ '_ai'] is defined else none %}
   {% set ai_conf = r[field ~ '_ai_conf'] if r[field ~ '_ai_conf'] is defined else none %}
-  {# A division of General means nobody has decided yet: it is offered like any other value, but
-     promote refuses the row until a real one is set, so the cell says so. #}
+  {# General is the collection's "not assigned yet" placeholder, not a division a page is curated
+     into, so it is not among the values offered here. A row still carrying it — from an older rule,
+     or one written before — keeps it as an option of its own so the cell shows the row's real value
+     rather than a blank, and says that promote refuses it until one of the five is set. #}
   {% set unassigned = field == 'division' and r[field] == 'General' %}
   <select class="cell {{ 'unassigned' if unassigned }}" {% if not editable %}disabled{% endif %} title="{{ why[field] or ('set ' ~ field|replace('_', ' ') ~ ' for this URL (exact-URL rule)') }}"
           onchange='editField({{ cid|tojson }}, {{ r.url|tojson }}, {{ field|tojson }}, this.value, {{ (ai_val is not none)|tojson }})'>
-    <option value="">—</option>{% for v in values %}<option {% if r[field] == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
-  {%- if unassigned %} <span class="held" title="General is a placeholder, not a division: promote refuses this row until one of the five is set">not promotable</span>{% endif %}
+    <option value="">—</option>{% for v in values %}<option {% if r[field] == v %}selected{% endif %}>{{ v }}</option>{% endfor %}
+    {%- if r[field] and r[field] not in values %}<option selected>{{ r[field] }}</option>{% endif %}</select>
+  {%- if unassigned %} <span class="held" title="General is a placeholder, not a division: promote refuses this row until one of the five is set. It is no longer offered here — pick one of the five.">not promotable</span>{% endif %}
   {% if ai_val %}<br><span class="ai conf-{{ ai_conf }}" title="AI suggestion · {{ ai_conf or '?' }} confidence · {{ r.ai_model or '' }}">AI: {{ ai_val }} <small>{{ ai_conf }}</small></span>
     <span class="nowrap"><button class="mini ok" title="accept" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/accept" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✓</button><button class="mini" type="button" title="pick a different value, then it is accepted as edited" {% if not editable %}disabled{% endif %} onclick='pickAi(this, {{ ai_val|tojson }})'>✎</button><button class="mini" title="dismiss" {% if not editable %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/reject" hx-ext="json-enc" hx-vals='{{ {"url": r.url, "field": field}|tojson }}' hx-swap="none">✕</button></span>{{ held_back(r, field) }}{% endif %}
 {%- endmacro %}

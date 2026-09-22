@@ -113,7 +113,7 @@ q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is 
       <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a>{% if r.renamed_from %}<br><small class="muted" title="the curated URL this replaces">was {{ r.renamed_from }}</small>{% endif %}{% if r.kind == 'deleted' %}<br><small class="muted">{{ failure_label(r.crawl_failure) }}</small>{% endif %}{% if r.ai_error %}<br><small class="err" title="{{ r.ai_error }}">AI metadata failed{% if r.ai_failures > 1 %} ({{ r.ai_failures }} runs){% endif %}: {{ r.ai_error|truncate(120) }}</small>{% endif %}</td>
       <td class="nowrap">{% if r.kind != 'deleted' %}{{ toggle_cell(r, why, editable) }}{% else %}<span class="muted small">—</span>{% endif %}</td>
       <td>{{ title_cell(r, why, editable) }}</td>
-      <td>{{ select_cell(r, why, editable, 'division', divisions) }}</td>
+      <td>{{ select_cell(r, why, editable, 'division', curation_divisions) }}</td>
       <td>{{ select_cell(r, why, editable, 'document_type', doc_types) }}</td>
       <td class="nowrap">{{ edited_chip(r, why) }}</td>
     </tr>
@@ -129,7 +129,7 @@ q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is 
         <br><span class="kind k-kept" title="the last crawl could not fetch this URL ({{ failure_label(r.crawl_failure) }}); it is kept as approved, not removed — the index keeps its last text">kept · {{ failure_label(r.crawl_failure) }}</span>{% endif %}</td>
       <td class="nowrap">{{ toggle_cell(e, why, not running) }}</td>
       <td>{{ title_cell(e, why, not running) }}</td>
-      <td>{{ select_cell(e, why, not running, 'division', divisions) }}</td>
+      <td>{{ select_cell(e, why, not running, 'division', curation_divisions) }}</td>
       <td>{{ select_cell(e, why, not running, 'document_type', doc_types) }}</td>
       <td class="num muted small">{% if r.text_len is none %}<span title="no text kept for this row (promoted before the engine stored text on the curated URLs): promote again to fill it">—</span>{% else %}{{ '{:,}'.format(r.text_len) }}{% endif %}</td>
       <td class="nowrap">{{ edited_chip(e, why) }}</td>

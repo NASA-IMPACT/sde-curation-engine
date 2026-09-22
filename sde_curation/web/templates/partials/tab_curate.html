@@ -262,7 +262,7 @@
           <td class="num muted">{{ ai_paging.offset + loop.index }}</td>
           <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a>{% if r.excluded %}<br><span class="kind k-excluded" title="{{ why.excluded or 'excluded' }}">excluded</span>{% endif %}</td>
           <td>{{ title_cell(r, why, not running) }}</td>
-          <td>{{ select_cell(r, why, not running, 'division', divisions) }}</td>
+          <td>{{ select_cell(r, why, not running, 'division', curation_divisions) }}</td>
           <td>{{ select_cell(r, why, not running, 'document_type', doc_types) }}</td>
           <td class="inline nowrap actions">
             <button class="mini ok" title="accept every suggestion on this row" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "accept", "url": r.url}|tojson }}' hx-swap="none">✓ row</button><button class="mini" title="dismiss every suggestion on this row" {% if running %}disabled{% endif %} hx-post="/api/collections/{{ cid }}/ai/bulk" hx-ext="json-enc" hx-vals='{{ {"decision": "reject", "url": r.url}|tojson }}' hx-swap="none">✕</button>
