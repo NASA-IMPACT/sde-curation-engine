@@ -149,25 +149,40 @@ AI_FIELDS = ("title", "division", "document_type")
 
 # ── duplicate titles ──────────────────────────────────────────────────
 # The title and document type each included page of a collection will be indexed with once the
-# delta URLs are promoted: a pending AI suggestion as if accepted, else the effective value; the
-# title falls back to the scraped title (the export's fallback). A curated row that a delta row
-# stands in for (same URL, a rename or a removal) counts once, as the delta row. Two pages are
-# duplicates when BOTH match: the title ignoring case and runs of whitespace, and the document type
-# (two pages with the same title but different types are told apart by the type). Both queries take
-# the collection id twice.
-_PROJECTED_TITLES = """
+# delta URLs are promoted; the title falls back to the scraped title (the export's fallback). A
+# curated row that a delta row stands in for (same URL, a rename or a removal) counts once, as the
+# delta row. Two pages are duplicates when BOTH match: the title ignoring case and runs of
+# whitespace, and the document type (two pages with the same title but different types are told
+# apart by the type). Every query below takes the collection id twice.
+#
+# Two views of the same thing, because a pending suggestion is a proposal, not a value:
+#   pending=True   what the review tables show — every AI suggestion as if it had been accepted
+#                  (that is the collision the curator is deciding about)
+#   pending=False  what promote would actually write, which discards undecided suggestions: the
+#                  set the promote gate refuses on
+def _projected_titles(*, pending: bool) -> str:
+    title = ("COALESCE(d.title_ai, NULLIF(btrim(d.title), ''), d.scraped_title)" if pending
+             else "COALESCE(NULLIF(btrim(d.title), ''), d.scraped_title)")
+    doc = "COALESCE(d.document_type_ai, d.document_type)" if pending else "d.document_type"
+    flags = ("d.title_ai IS NOT NULL AS pending_ai, d.title_ai_before AS shared_before" if pending
+             else "false AS pending_ai, NULL::text AS shared_before")
+    return f"""
 SELECT url, delta, pending_ai, shared_before, title, document_type,
        lower(regexp_replace(btrim(title), '\\s+', ' ', 'g')) || chr(31) || COALESCE(document_type, '') AS k FROM (
-  SELECT d.url, true AS delta, d.title_ai IS NOT NULL AS pending_ai, d.title_ai_before AS shared_before,
-         COALESCE(d.title_ai, d.title, d.scraped_title) AS title,
-         COALESCE(d.document_type_ai, d.document_type) AS document_type
+  SELECT d.url, true AS delta, {flags},
+         {title} AS title,
+         {doc} AS document_type
     FROM delta_urls d WHERE d.collection_id=%s AND d.kind!='deleted' AND NOT d.excluded
   UNION ALL
-  SELECT c.url, false, false, NULL::text, COALESCE(c.title, c.scraped_title), c.document_type
+  SELECT c.url, false, false, NULL::text, COALESCE(NULLIF(btrim(c.title), ''), c.scraped_title), c.document_type
     FROM curated_urls c WHERE c.collection_id=%s AND NOT c.excluded
      AND NOT EXISTS (SELECT 1 FROM delta_urls x WHERE x.collection_id=c.collection_id AND x.url=c.url)
      AND NOT EXISTS (SELECT 1 FROM delta_urls x WHERE x.collection_id=c.collection_id AND x.renamed_from=c.url)
 ) p WHERE btrim(COALESCE(title, '')) != ''"""
+
+
+_PROJECTED_TITLES = _projected_titles(pending=True)
+_EFFECTIVE_TITLES = _projected_titles(pending=False)
 # A delta URL that promote would write into the curated set without a title, a division or a
 # document type (its effective values: rules or the curated row, never a pending suggestion).
 # Removals and excluded rows carry no metadata to the index, so they never count.
@@ -178,12 +193,29 @@ def _no_division(col: str = "division") -> str:
     return f"({col} IS NULL OR {col} = 'General')"
 
 
+# No title at all — not even a scraped one. A row with no title rule is still indexed under the
+# title the crawl read off the page (engine.export.export_lines falls back to it), so it is not
+# blank and promote must not hold it back; only a page the crawler found untitled is.
+def _no_title(title: str = "title", scraped: str = "scraped_title") -> str:
+    return f"btrim(COALESCE(NULLIF(btrim({title}), ''), {scraped}, ''))=''"
+
+
 _NO_DIVISION = _no_division()
+_NO_TITLE = _no_title()
 _INCOMPLETE = ("kind!='deleted' AND NOT excluded"
-               f" AND (btrim(COALESCE(title, ''))='' OR {_NO_DIVISION} OR document_type IS NULL)")
+               f" AND ({_NO_TITLE} OR {_NO_DIVISION} OR document_type IS NULL)")
 
 _DUPLICATE_TITLES = (f"SELECT * FROM (SELECT t.*, COUNT(*) OVER (PARTITION BY k) AS n FROM ({_PROJECTED_TITLES}) t) w"
                      " WHERE n > 1")
+# The delta URLs promote would write into the curated set under a title + document type another
+# page of the collection already has (or would have). Two pages a search cannot tell apart is not
+# something the index may be left holding, so promote refuses these exactly as it refuses a blank
+# — undecided AI titles are not counted, because promote discards them.
+_DUPLICATE_EFFECTIVE = ("SELECT url FROM (SELECT t.*, COUNT(*) OVER (PARTITION BY k) AS n FROM"
+                        f" ({_EFFECTIVE_TITLES}) t) w WHERE n > 1 AND delta")
+# Everything promote refuses, in one predicate: blank fields or a shared title. Takes the
+# collection id twice (the duplicate scan), then whatever the clause it is used in takes.
+_UNPROMOTABLE = f"(({_INCOMPLETE}) OR url IN ({_DUPLICATE_EFFECTIVE}))"
 
 
 def match_clause(match: str, col: str) -> tuple[str, list[Any]]:
@@ -722,16 +754,18 @@ class Database:
     ) -> tuple[list[DeltaUrl], int]:
         """`ai_field`: rows with a pending suggestion for that one field (title / division /
         document_type); `match`: rows a rule's glob or exact URL matches (see match_clause);
-        `dup_title`: rows whose title and document type another page of the collection will also have;
+        `dup_title`: rows whose title and document type another page of the collection will also have
+        (counting pending AI suggestions as accepted);
         `retitled`: rows whose duplicate AI title was regenerated (the title they shared is kept);
-        `incomplete`: rows promote refuses (no title, division or document type yet)."""
+        `incomplete`: rows promote refuses — no title, division or document type yet, or a title
+        another page would be indexed under too."""
         where, args = ["collection_id=%s"], [collection_id]
         if dup_title:
             where.append(f"url IN (SELECT url FROM ({_DUPLICATE_TITLES}) g WHERE delta)"); args += [collection_id] * 2
         if retitled:
             where.append("title_ai IS NOT NULL AND title_ai_before IS NOT NULL")
         if incomplete:
-            where.append(f"({_INCOMPLETE})")
+            where.append(_UNPROMOTABLE); args += [collection_id] * 2
         if ai_field in AI_FIELDS:
             where.append(f"{ai_field}_ai IS NOT NULL")
         if match:
@@ -1434,22 +1468,29 @@ class Database:
             )
 
     async def incomplete_counts(self, collection_id: str, urls: list[str] | None = None) -> dict[str, int]:
-        """Delta URLs promote would refuse (see _INCOMPLETE): how many, and how many lack each field.
-        `general` is the subset of `division` still carrying the retired "General" placeholder — the
-        same problem, but it reads differently to the curator. `urls`: only these rows (a promote of
-        a selection)."""
-        where, args = f"collection_id=%s AND {_INCOMPLETE}", [collection_id]
+        """Delta URLs promote would refuse (see _UNPROMOTABLE): how many, and why.
+        `title` counts only the rows with no title at all: a row with no title rule is indexed under
+        its scraped title, so it is complete. `general` is the subset of `division` still carrying
+        the retired "General" placeholder — the same problem, but it reads differently to the
+        curator. `duplicate` is the rows that would be indexed under a title + document type
+        another page already has (undecided AI titles do not count: promote discards them), and it
+        overlaps the field counts — a row can be short of both. `urls`: only these rows (a promote
+        of a selection). One pass: the duplicate scan is a CTE, read twice, computed once."""
+        where, args = "collection_id=%s AND ((" + _INCOMPLETE + ") OR url IN (SELECT url FROM dup))", [collection_id]
         if urls is not None:
             where += " AND url = ANY(%s)"; args.append(list(urls))
         async with self._conn() as conn:
             cur = await conn.execute(
-                "SELECT COUNT(*) AS urls, COUNT(*) FILTER (WHERE btrim(COALESCE(title, ''))='') AS title,"
+                f"WITH dup AS ({_DUPLICATE_EFFECTIVE})"
+                f" SELECT COUNT(*) AS urls, COUNT(*) FILTER (WHERE {_NO_TITLE}) AS title,"
                 f" COUNT(*) FILTER (WHERE {_NO_DIVISION}) AS division,"
                 " COUNT(*) FILTER (WHERE division = 'General') AS general,"
-                f" COUNT(*) FILTER (WHERE document_type IS NULL) AS document_type FROM delta_urls WHERE {where}", args,
+                " COUNT(*) FILTER (WHERE document_type IS NULL) AS document_type,"
+                " COUNT(*) FILTER (WHERE url IN (SELECT url FROM dup)) AS duplicate"
+                f" FROM delta_urls WHERE {where}", [collection_id, collection_id, *args],
             )
             r = await cur.fetchone()
-        return {k: r[k] or 0 for k in ("urls", "title", "division", "general", "document_type")}
+        return {k: r[k] or 0 for k in ("urls", "title", "division", "general", "document_type", "duplicate")}
 
     async def set_delta_ai_titles(self, collection_id: str, items: list[dict[str, Any]]) -> int:
         """Replace just the AI title suggestion (value, confidence, model) of these rows: the other

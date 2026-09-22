@@ -22,19 +22,30 @@ from .models import (
 
 class IncompleteMetadata(Exception):
     """Promote refused: some delta URLs would reach the curated set without a title, a division or a
-    document type. `counts` is Database.incomplete_counts."""
+    document type, or under a title another page is already indexed under. `counts` is
+    Database.incomplete_counts — a row with no title rule but a scraped title is not blank: the
+    export indexes it under the scraped title. It is refused only if that title is shared."""
 
     def __init__(self, counts: dict[str, int]):
         self.counts = counts
         general = counts.get("general", 0)
-        missing = ", ".join(f"{counts[f]} without a {label}" for f, label in
-                            (("title", "title"), ("division", "division"), ("document_type", "document type"))
-                            if counts[f])
-        if general:  # the same rows as `division`, but they read as set until you look
-            missing += f" (of those, {general} still on the General placeholder)"
+        # the General note belongs to the division clause: those rows read as set until you look
+        parts = [f"{counts[f]} without a {label}"
+                 + (f" (of those, {general} still on the General placeholder)" if f == "division" and general else "")
+                 for f, label in (("title", "title"), ("division", "division"), ("document_type", "document type"))
+                 if counts[f]]
+        dup = counts.get("duplicate", 0)
+        blank, fix = bool(parts), []
+        if dup:
+            parts.append(f"{dup} sharing a title and document type with another page")
+        if blank:
+            fix.append("accept the AI suggestions or set the values by hand first")
+        if dup:
+            fix.append("Regenerate duplicate titles gives the shared ones a title of their own"
+                       if blank else "run Regenerate duplicate titles, or give them a title of their own by hand")
         n = counts["urls"]
-        super().__init__(f"{n} delta URL{'s' if n != 1 else ''} cannot be promoted yet ({missing}):"
-                         " accept the AI suggestions or set the values by hand first")
+        super().__init__(f"{n} delta URL{'s' if n != 1 else ''} cannot be promoted yet"
+                         f" ({', '.join(parts)}): {'; '.join(fix)}")
 
 
 class CurationService:

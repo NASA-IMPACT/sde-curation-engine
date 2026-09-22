@@ -3,6 +3,7 @@ counted, flagged per row, filterable, and sent back to the LLM (fake provider) f
 
 import re
 
+from sde_curation.engine.export import export_lines
 from sde_curation.llm.base import LLMError
 from sde_curation.llm.fake import FakeProvider
 from sde_curation.llm.tasks import disambiguate, title_siblings, url_distinctions
@@ -53,27 +54,78 @@ async def test_duplicates_are_counted_as_the_pages_would_be_indexed(client):
     await db.set_delta_ai_titles(CID, [{"url": urls("/d")[0], "title": "Mission data", "title_conf": "high"}])
     assert (await db.duplicate_title_counts(CID))["urls"] == 3
 
-    # promoted: the curated rows count too, and a new delta URL that collides with them is flagged
+    # promote refuses a collision outright: two pages a search cannot tell apart may not be indexed
     await client.post(f"/api/collections/{CID}/ai/reject", json={"url": urls("/d")[0], "field": "title"})
+    r = await client.post(f"/api/collections/{CID}/promote")
+    assert r.status_code == 409 and "2 sharing a title and document type with another page" in r.json()["detail"]
+    assert await db.incomplete_counts(CID) == {"urls": 2, "title": 0, "division": 0, "general": 0,
+                                               "document_type": 0, "duplicate": 2}
+    assert sorted(d.url for d in (await db.list_deltas(CID, incomplete=True))[0]) == urls("/a", "/c")
+    assert "2 sharing a title + document type with another page" in (await client.get(f"/collections/{CID}?tab=curate")).text
+
+    # a title of its own for one of them settles it (the curator's per-URL edit wins), and it promotes
+    r = await client.post(f"/api/collections/{CID}/urls",
+                          json={"url": urls("/c")[0], "type": "title", "value": "Other Mission Data"})
+    assert r.status_code in (200, 201), r.text
+    assert await db.duplicate_title_counts(CID) == {"urls": 0, "titles": 0, "delta_urls": 0}
     assert (await client.post(f"/api/collections/{CID}/promote")).status_code == 200
-    assert await db.duplicate_title_counts(CID) == {"urls": 2, "titles": 1, "delta_urls": 0}
+
+    # promoted: the curated rows count too, and a new delta URL that collides with them is flagged
     await make(client, {"/a": "Mission Data", "/b": "mission data", "/c": "Other", "/d": "Solo", "/e": "MISSION DATA"})
-    assert await db.duplicate_title_counts(CID) == {"urls": 3, "titles": 1, "delta_urls": 1}
+    assert await db.duplicate_title_counts(CID) == {"urls": 2, "titles": 1, "delta_urls": 1}
     rows = (await db.list_deltas(CID, dup_title=True))[0]
     assert [r.url for r in rows] == urls("/e")
-    assert sorted(r.url for r in (await db.list_curated(CID, dup_title=True))[0]) == urls("/a", "/c")
+    assert [r.url for r in (await db.list_curated(CID, dup_title=True))[0]] == urls("/a")
     info = await db.duplicate_titles_for(CID, urls("/e", "/d"))
-    assert set(info) == set(urls("/e")) and info[urls("/e")[0]]["others"] == 2
-    assert info[urls("/e")[0]]["sample"] == urls("/a", "/c")
+    assert set(info) == set(urls("/e")) and info[urls("/e")[0]]["others"] == 1
+    assert info[urls("/e")[0]]["sample"] == urls("/a")
+    # and it is the delta row, not the curated one it collides with, that promote holds back —
+    # promoting it on its own does not get it past the gate either
+    assert (await db.incomplete_counts(CID))["duplicate"] == 1
+    assert [d.url for d in (await db.list_deltas(CID, incomplete=True))[0]] == urls("/e")
+    r = await client.post(f"/api/collections/{CID}/promote/urls", json={"urls": urls("/e")})
+    assert r.status_code == 409 and "1 sharing a title and document type with another page" in r.json()["detail"]
 
     # the tables flag the row and filter on it; the Curate page says how many and offers the fix
     page = (await client.get(f"/collections/{CID}?tab=delta&dup=title")).text
-    assert "⚠ same title + type ×3" in page and "https://ex.org/e" in page and "https://ex.org/d" not in page
-    assert "same title + type ×3" in (await client.get(f"/collections/{CID}?tab=curated")).text
+    assert "⚠ same title + type ×2" in page and "https://ex.org/e" in page and "https://ex.org/d" not in page
+    assert "same title + type ×2" in (await client.get(f"/collections/{CID}?tab=curated")).text
     curate = (await client.get(f"/collections/{CID}?tab=curate")).text
-    assert "3 URLs share 1 title + document type combination" in curate and "Regenerate duplicate titles" in curate and "suggest/titles" in curate
+    assert "2 URLs share 1 title + document type combination" in curate and "Regenerate duplicate titles" in curate and "suggest/titles" in curate
     csv = (await client.get(f"/collections/{CID}/urls/delta?format=csv&dup=title")).text
     assert csv.count("\n") == 2  # header + /e
+
+
+async def test_a_shared_scraped_title_blocks_promote_until_the_pages_are_told_apart(client):
+    """A site that puts one <title> on every page. The scraped title counts as a title — nothing
+    here is blank — but not as one that tells the pages apart, so promote refuses the lot. The fix
+    is the regenerate pass, and a suggestion only lifts the gate once it is accepted: promote
+    discards undecided ones, so they are not values yet."""
+    db = client.app.state.db
+    await make(client, {"/a": "Solar Data - NASA", "/b": "Solar Data - NASA", "/c": "Solar Data - NASA"})
+    for t, v in (("division", "Heliophysics"), ("document_type", "Data")):
+        await client.post(f"/api/collections/{CID}/patterns", json={"type": t, "match": "*", "value": v})
+    # every field is filled — and all three pages would be one row in a search
+    assert await db.incomplete_counts(CID) == {"urls": 3, "title": 0, "division": 0, "general": 0,
+                                               "document_type": 0, "duplicate": 3}
+    r = await client.post(f"/api/collections/{CID}/promote")
+    assert r.status_code == 409 and "3 sharing a title and document type with another page" in r.json()["detail"]
+    assert "Regenerate duplicate titles" in r.json()["detail"]
+    # the metadata pass does not settle it by itself: it strips the site suffix and lands on one title
+    await client.post(f"/api/collections/{CID}/suggest/metadata"); await wait_job(client, CID)
+    await client.post(f"/api/collections/{CID}/ai/bulk", json={"decision": "accept"})
+    assert (await db.incomplete_counts(CID))["duplicate"] == 3
+
+    # ↻ Regenerate duplicate titles answers it, but only an accepted answer is a value
+    await client.post(f"/api/collections/{CID}/suggest/titles"); await wait_job(client, CID)
+    assert await db.duplicate_title_counts(CID) == {"urls": 0, "titles": 0, "delta_urls": 0}  # as if accepted
+    assert (await db.incomplete_counts(CID))["duplicate"] == 3                                # as they stand
+    assert (await client.post(f"/api/collections/{CID}/promote")).status_code == 409
+    await client.post(f"/api/collections/{CID}/ai/bulk", json={"decision": "accept", "field": "title"})
+    assert (await db.incomplete_counts(CID))["duplicate"] == 0
+    assert (await client.post(f"/api/collections/{CID}/promote")).status_code == 200
+    titles = [x.title for x in export_lines(await db.load_curated(CID))]
+    assert len(set(titles)) == 3, titles
 
 
 async def test_suggest_metadata_tells_the_titles_it_generated_apart(client):

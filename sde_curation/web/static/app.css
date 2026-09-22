@@ -66,6 +66,8 @@ details.advanced .inline { margin-top:.6rem; gap:1.2rem; }
 @media (prefers-color-scheme: dark) { .banner.err { background:#450a0a; color:#fecaca; } }
 button.linkish { background:none; border:none; padding:0; color:var(--fg); text-align:left; cursor:text; border-bottom:1px dashed var(--muted); }
 button.linkish:disabled { border-bottom:none; cursor:default; }
+/* no title rule: the cell shows the scraped title, the one the index would get */
+button.linkish.scraped { color:var(--muted); }
 select.cell { font-size:.8rem; padding:.1rem .2rem; max-width:11rem; }
 .pipeline li:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 button.mini.ok { color:#16a34a; } .suggestions { border:1px dashed #7c3aed; border-radius:6px; padding:.4rem .8rem; margin:1rem 0; }

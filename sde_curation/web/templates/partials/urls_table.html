@@ -39,7 +39,7 @@ q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is 
   <select name="division" aria-label="division"><option value="">any division</option>{% for v in divisions %}<option {% if division == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
   <select name="document_type" aria-label="document type"><option value="">any type</option>{% for v in doc_types %}<option {% if document_type == v %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
   <select name="ai" aria-label="AI suggestions"><option value="">with or without AI suggestions</option><option value="pending" {% if ai == 'pending' %}selected{% endif %}>has AI suggestions</option><option value="high" {% if ai == 'high' %}selected{% endif %}>AI · high confidence</option><option value="medium" {% if ai == 'medium' %}selected{% endif %}>AI · medium confidence</option><option value="low" {% if ai == 'low' %}selected{% endif %}>AI · low confidence</option><option value="title" {% if ai == 'title' %}selected{% endif %}>AI title pending</option><option value="division" {% if ai == 'division' %}selected{% endif %}>AI division pending</option><option value="document_type" {% if ai == 'document_type' %}selected{% endif %}>AI doc type pending</option></select>
-  <select name="missing" aria-label="metadata"><option value="">any metadata</option><option value="true" {% if missing == 'true' %}selected{% endif %}>missing title, division or doc type</option></select>
+  <select name="missing" aria-label="metadata"><option value="">any metadata</option><option value="true" {% if missing == 'true' %}selected{% endif %}>cannot be promoted yet</option></select>
   <select name="changed" aria-label="page text"><option value="">any page text</option><option value="true" {% if changed == 'true' %}selected{% endif %}>text changed since promotion</option></select>
   <select name="renamed" aria-label="URL spelling"><option value="">any URL</option><option value="true" {% if renamed == 'true' %}selected{% endif %}>URL spelling changed (renamed)</option></select>
   {% endif %}
@@ -66,7 +66,7 @@ q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is 
 {% set then_url %}{{ base }}&{{ filters_qs() }}&sort={{ sort or '' }}&dir={{ dir or '' }}&per={{ per }}&page={{ page }}{% endset %}
 <div class="inline bulk-bar promote-bar" id="promote-bar">
   <b><span id="pick-n">0</span> selected on this page</b>
-  {% if incomplete and incomplete.urls %}<a class="small" href="{{ base }}&missing=true" title="promote refuses delta URLs without a title, division or document type">⛔ {{ incomplete.urls }} cannot be promoted yet</a>{% endif %}
+  {% if incomplete and incomplete.urls %}<a class="small" href="{{ base }}&missing=true" title="promote refuses delta URLs without a division, a document type, or any title at all (a page with no title rule is indexed under its scraped title) — and any URL that would be indexed under a title + document type another page already has">⛔ {{ incomplete.urls }} cannot be promoted yet</a>{% endif %}
   <span class="muted small" id="pick-warn"></span>
   <span class="grow"></span>
   <button class="primary mini" disabled {% if c.status != 'curating' %}title="promote requires status curating"{% endif %}

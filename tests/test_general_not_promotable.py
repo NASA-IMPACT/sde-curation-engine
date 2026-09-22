@@ -63,7 +63,7 @@ async def test_general_can_never_be_promoted(crawler_client):
     rows = {d["url"]: d for d in (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]}
     assert rows["https://ex.org/p2"]["division"] == "General"
     assert await c.app.state.db.incomplete_counts("ex.org") == {
-        "urls": 1, "title": 0, "division": 1, "general": 1, "document_type": 0}
+        "urls": 1, "title": 0, "division": 1, "general": 1, "document_type": 0, "duplicate": 0}
 
     r = await c.post("/api/collections/ex.org/promote")
     assert r.status_code == 409 and "General placeholder" in r.text
@@ -75,7 +75,7 @@ async def test_general_can_never_be_promoted(crawler_client):
     await c.post("/api/collections/ex.org/urls",
                  json={"url": "https://ex.org/p2", "type": "division", "value": "Earth Science"})
     assert await c.app.state.db.incomplete_counts("ex.org") == {
-        "urls": 0, "title": 0, "division": 0, "general": 0, "document_type": 0}
+        "urls": 0, "title": 0, "division": 0, "general": 0, "document_type": 0, "duplicate": 0}
     assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
     curated = (await c.get("/api/collections/ex.org/curated?limit=100")).json()["items"]
     assert all(r["division"] != "General" for r in curated)
