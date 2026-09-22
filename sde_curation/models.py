@@ -380,7 +380,15 @@ class User(BaseModel):
 class DumpUrl(BaseModel):
     collection_id: str
     url: str
+    # Where the request ended up after redirects, when the crawler recorded one. Not a column
+    # either: `Database.replace_dump` uses it to decide which spellings of a page are the same
+    # page (`engine.urls.duplicate_docs`) and keeps only the survivor.
+    final_url: str | None = None
     scraped_title: str | None = None
+    # The page text. Not a column of `dump_urls`: it is stored once per distinct hash in
+    # `page_text` (schema V9) and `content_hash` is the row's handle on it, so the dump and the
+    # curated rows approved with the same crawl share one copy. Carried on the model because
+    # ingest produces it and `Database.replace_dump` is what files it away.
     full_text: str | None = None
     content_type: str | None = None
     depth: int | None = None
@@ -451,9 +459,13 @@ class CuratedUrl(BaseModel):
     division: Division | None = None
     document_type: DocumentType | None = None
     excluded: bool = False
-    content_hash: str | None = None  # hash of the text that was promoted (NULL = before hashing existed)
-    full_text: str | None = None  # the text the row was approved with (promote copies it from the dump);
-    # the export ships this, never the dump. Listing queries leave it out and fill `text_len`.
+    # The hash of the text this row was promoted with (NULL = empty page, or before hashing
+    # existed) — and, since schema V9, how the row holds that text: `page_text` keys the page text
+    # by it, and the blob outlives the crawl it came from for as long as a row points at it.
+    content_hash: str | None = None
+    full_text: str | None = None  # the text the row was approved with, read through `content_hash`;
+    # the export ships this, never the dump's current text. Listing queries leave it out and fill
+    # `text_len` instead — it is most of the bytes.
     text_len: int | None = None
     edited_by: EditedBy | None = None  # carried over from the delta row at promote time
     # set by recompute: the current dump lacks this URL but the crawl does not prove it gone

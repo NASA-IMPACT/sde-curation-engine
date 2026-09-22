@@ -18,6 +18,13 @@ from sde_curation.backends.scrape import (
 )
 from sde_curation.config import Settings
 from sde_curation.models import Collection, Division
+
+
+def _docs_text(res) -> str:
+    """The crawl a ScrapeResult points at, read back. A source is a file (local backend) or the
+    S3 object itself (remote): either way it is opened, not copied to disk."""
+    with res.documents.open() as fh:
+        return fh.read().decode()
 from tests.conftest import FAKE_RUN_PY
 
 
@@ -100,7 +107,7 @@ async def test_local_success_with_progress(settings, crawler_root):
         seen.append(dict(p))
 
     res = await LocalSubprocessScraper(settings).run(coll(10), cb)
-    docs = json.loads(res.documents_path.read_text())
+    docs = json.loads(_docs_text(res))
     assert len(docs) == 8 and docs[0]["url"] == "https://ex.org/p1"
     assert seen[0]["pid"] and seen[-1] == {"processed": 10, "docs": 8, "failed": 2}
     assert any(0 < s.get("processed", 0) < 10 for s in seen), "no intermediate progress seen"
@@ -262,7 +269,7 @@ async def test_ssm_queued_behind_batch_then_runs(ssm_env):
     seen, cb = await progress_recorder()
     res = await backend.run(coll(5), cb)
 
-    assert json.loads(res.documents_path.read_text())[0]["url"] == "https://ex.org/a"
+    assert json.loads(_docs_text(res))[0]["url"] == "https://ex.org/a"
     assert res.summary["documents_scraped"] == 1
     assert seen[0]["ssm_command"] == "cmd-2" and seen[0]["queued"] is True  # cmd-1 checked the inbox
     assert {"queued": True, "queue_ahead": 2} in seen, seen
@@ -331,7 +338,7 @@ async def test_ssm_mid_run_checkpoint_upload_does_not_end_the_crawl(ssm_env):
     host.on_poll = on_poll
     res = await make().run(coll(5), lambda p: asyncio.sleep(0))
     assert host.polls >= 4, "returned before the crawler wrote exit=0"
-    assert [d["url"] for d in json.loads(res.documents_path.read_text())] == ["https://ex.org/a", "https://ex.org/b"]
+    assert [d["url"] for d in json.loads(_docs_text(res))] == ["https://ex.org/a", "https://ex.org/b"]
 
 
 async def test_ssm_exit_zero_without_upload(ssm_env):
@@ -362,7 +369,7 @@ async def test_ssm_attaches_to_a_job_already_in_the_inbox(ssm_env):
     drops = [c for c in s.ssm.commands if "cat >" in c["Parameters"]["commands"][0]]
     assert drops == [], "dropped a duplicate job file"
     assert seen[0] == {"attached": True, "processed": 0, "docs": 0, "failed": 0, "queued": True}
-    assert res.external_ref == "attached" and json.loads(res.documents_path.read_text())[0]["url"] == "https://ex.org/a"
+    assert res.external_ref == "attached" and json.loads(_docs_text(res))[0]["url"] == "https://ex.org/a"
 
 
 async def test_ssm_drops_the_job_when_the_inbox_has_no_file_for_it(ssm_env):

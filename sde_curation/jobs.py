@@ -15,7 +15,7 @@ from typing import Any
 from .backends.index import Dispatch, IndexBackend, IndexError_, wait_for_status
 from .backends.publish import ProdPublisher
 from .backends.s3 import S3
-from .backends.scrape import ScrapeBackend, ScrapeError, iter_documents
+from .backends.scrape import DocumentSource, ScrapeBackend, ScrapeError, iter_documents
 from .backends.validate import NoIndexAccess, validate_direct
 from .config import Settings
 from .db import Database
@@ -29,7 +29,7 @@ from .engine.export import (
 )
 from .engine.patterns import match_counts
 from .engine.text import content_hash
-from .engine.urls import batches, dedupe_variants, duplicate_docs
+from .engine.urls import batches, dedupe_variants
 from .events import EventBus
 from .llm.base import LLMError, LLMProvider
 from .llm.global_excludes import global_exclude_hits, load_global_excludes
@@ -203,8 +203,8 @@ class JobManager:
                     result = await self.scraper.fetch_existing(c, on_progress)
                 else:
                     result = await self.scraper.run(c, on_progress)
-                failures = result.failures()
-                n = await self.ingest_dump(c.collection_id, result.documents_path, failures)
+                failures = await asyncio.to_thread(result.failures)
+                n = await self.ingest_dump(c.collection_id, result.documents, failures)
                 crawled_at = result.crawled_at or utcnow()
                 capped = result.capped(n, c.max_pages)
                 await self.db.set_last_scraped(c.collection_id, crawled_at, capped=capped)
@@ -922,44 +922,39 @@ class JobManager:
         await self._guarded(c, job, body)
 
     async def ingest_dump(
-        self, collection_id: str, docs: list[dict[str, Any]] | Path, failures: list[dict[str, Any]] | None = None,
+        self, collection_id: str, docs: DocumentSource | list[dict[str, Any]],
+        failures: list[dict[str, Any]] | None = None,
     ) -> int:
-        """Store the crawl as the collection's dump. A site that links to the same page as http and
-        https, with and without a trailing slash, with a #fragment, or under two paths that
-        redirect to one (`/map`, `/maps`) gets it crawled once per spelling; only the preferred
-        spelling is kept (a URL alone on its page stays), so the dump curators work from lists
-        each page once. Redirects are known from the crawler's `final_url`.
+        """Store the crawl as the collection's dump.
 
-        `docs` is the crawler's documents file (streamed: once for the URLs, to find the duplicates,
-        once into the table — the page text is never held for more than a few hundred documents) or
-        documents already in memory."""
+        `docs` is the crawl — a `DocumentSource`, which for a remote scrape is the S3 object
+        itself — or documents already in memory. It is read exactly once, forwards, a few hundred
+        pages at a time, and every page goes straight into the COPY that `replace_dump` is
+        streaming: the crawl is never written to this host's disk and never held whole in memory.
+
+        Which spellings of a page survive is decided there too, from the URL columns of the
+        staging table (`engine.urls.duplicate_docs`) — it used to be a second pass over this
+        stream, which meant the crawl could not be a stream at all."""
         def source() -> Iterator[dict[str, Any]]:
-            return iter_documents(docs) if isinstance(docs, Path) else iter(docs)
+            return iter(docs) if isinstance(docs, list) else iter_documents(docs)
 
-        def urls_only() -> set[int]:
-            return duplicate_docs([{"url": d.get("url"), "final_url": d.get("final_url")} for d in source()])
-
-        drop = await asyncio.to_thread(urls_only)
-        if drop:
-            log.info("dump %s: dropping %d documents that are another URL of a page also present",
-                     collection_id, len(drop))
-
-        def take(it: Iterator[tuple[int, dict[str, Any]]], size: int) -> tuple[int, list[DumpUrl]]:
+        def take(it: Iterator[dict[str, Any]], size: int) -> tuple[int, list[DumpUrl]]:
             """The next `size` documents as rows (parsing and hashing happen here, off the event loop)."""
             seen, rows = 0, []
-            for i, d in itertools.islice(it, size):
+            for d in itertools.islice(it, size):
                 seen += 1
-                if d.get("url") and i not in drop:
+                if d.get("url"):
                     text = _no_nul(d.get("full_text"))
                     rows.append(DumpUrl(
-                        collection_id=collection_id, url=_no_nul(d["url"]), scraped_title=_no_nul(d.get("title")),
+                        collection_id=collection_id, url=_no_nul(d["url"]),
+                        final_url=_no_nul(d.get("final_url")), scraped_title=_no_nul(d.get("title")),
                         full_text=text, content_type=_no_nul(d.get("content_type")), depth=d.get("depth"),
                         content_hash=content_hash(text),
                     ))
             return seen, rows
 
         async def rows() -> AsyncIterator[DumpUrl]:
-            it = enumerate(source())
+            it = source()
             while True:
                 seen, chunk = await asyncio.to_thread(take, it, 500)
                 for r in chunk:
@@ -975,7 +970,7 @@ class JobManager:
             )
             for f in failures or []
         ]
-        return await self.db.replace_dump(collection_id, rows(), fails)
+        return await self.db.replace_dump(collection_id, rows(), fails, dedupe_spellings=True)
 
 
 def _add_tokens(job: JobRun, row: dict[str, Any]) -> None:

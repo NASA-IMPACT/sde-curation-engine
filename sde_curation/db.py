@@ -4,6 +4,7 @@ The schema lives in `schema.py` as numbered migrations applied at connect()."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from collections.abc import AsyncIterable, AsyncIterator, Iterable
@@ -18,7 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from .engine.patterns import glob_to_like, is_exact
 from .engine.text import content_hash
-from .engine.urls import canonical_key, spellings
+from .engine.urls import canonical_key, duplicate_docs, spellings
 from .models import (
     Collection,
     CuratedUrl,
@@ -74,10 +75,26 @@ async def _scalar(cur: psycopg.AsyncCursor) -> Any:
     return None if row is None else next(iter(row.values()))
 
 
-# Every curated column except the page text (most of the bytes; only the export reads it).
+# Every curated column. The page text is not one of them: since V9 it lives once in `page_text`,
+# keyed by the `content_hash` the dump and the curated set both carry, and is fetched by
+# `_page_text` only where it is actually wanted (the export) — it is most of the bytes.
 _CURATED_COLS = ("collection_id,url,scraped_title,title,division,document_type,excluded,content_hash,edited_by,"
                  "crawl_failure")
 
+
+def _page_text(table: str, expr: str = "p.full_text", alias: str = "full_text") -> str:
+    """The page text `table`'s content hash points at, as a scalar subquery. A subquery and not a
+    join so a caller can keep writing its WHERE and ORDER BY against the single table it selects
+    from; `page_text`'s primary key makes it one index lookup per row, and every caller either
+    paginates or streams in chunks. NULL hash (an empty page) gives NULL, as the column did."""
+    return (f"(SELECT {expr} FROM page_text p WHERE p.collection_id={table}.collection_id"
+            f" AND p.content_hash={table}.content_hash) AS {alias}")
+
+
+# The dump text joined onto a query that already has `dump_urls u` — the LLM queries, which are
+# fully qualified and want the text of a delta URL's dump row.
+_TEXT_JOIN = (" LEFT JOIN page_text p ON p.collection_id=u.collection_id"
+              " AND p.content_hash=u.content_hash")
 
 
 # ── column sorting ────────────────────────────────────────────────────
@@ -403,11 +420,17 @@ class Database:
 
     async def replace_dump(
         self, collection_id: str, rows: Iterable[DumpUrl] | AsyncIterable[DumpUrl],
-        failures: list[DumpFailure] | None = None,
+        failures: list[DumpFailure] | None = None, *, dedupe_spellings: bool = False,
     ) -> int:
         """Bulk-replace the dump for a collection in one transaction; returns row count. `failures`
         are the URLs the crawler tried and could not fetch (replaced along with the dump: the two
-        together are what one crawl found out)."""
+        together are what one crawl found out).
+
+        `dedupe_spellings` keeps one row per page where the crawl found several spellings of it
+        (`engine.urls.duplicate_docs`). That is a judgement about crawler output, so only the
+        ingest asks for it — `JobRunner.ingest_dump`, which needs it done here because the decision
+        wants every URL of the crawl and the crawl is a forward-only stream. A caller that has
+        already decided what the dump is writes it as given."""
         async with self._conn() as conn:
             await conn.execute("DELETE FROM dump_urls WHERE collection_id=%s", (collection_id,))
             await conn.execute("DELETE FROM dump_failures WHERE collection_id=%s", (collection_id,))
@@ -421,29 +444,95 @@ class Database:
                             continue
                         seen_f.add(f.url)
                         await copy.write_row((collection_id, f.url, f.reason, f.status, f.detail))
+            # The crawl arrives in one COPY, into a temp table (not WAL-logged, dropped on commit),
+            # because it has to reach two places and be filtered on the way: `page_text` once per
+            # distinct content hash, `dump_urls` as the hash alone, and only for the URLs that
+            # survive `duplicate_docs`. Staging it here is what lets the caller stream the crawl
+            # from S3 exactly once — the duplicate pass used to be a second read of the whole
+            # file, for two fields it can just as well read back from this table.
+            await conn.execute(
+                "CREATE TEMP TABLE dump_in (seq bigint, url text, final_url text, scraped_title text,"
+                " full_text text, content_type text, depth integer, content_hash text) ON COMMIT DROP"
+            )
             async with conn.cursor() as cur, cur.copy(
-                "COPY dump_urls (collection_id,url,scraped_title,full_text,content_type,depth,content_hash)"
+                "COPY dump_in (seq,url,final_url,scraped_title,full_text,content_type,depth,content_hash)"
                 " FROM STDIN"
             ) as copy:
                 seen: set[str] = set()
+                seq = 0
                 async for r in _aiter(rows):
                     if r.url in seen:  # the SQLite version did INSERT OR REPLACE
                         continue
                     seen.add(r.url)
                     await copy.write_row((
-                        r.collection_id, r.url, r.scraped_title, r.full_text, r.content_type, r.depth,
+                        seq, r.url, r.final_url, r.scraped_title, r.full_text, r.content_type, r.depth,
                         r.content_hash or content_hash(r.full_text),
                     ))
+                    seq += 1
+            # One row per page: a site that links the same page as http and https, with and without
+            # a trailing slash, with a #fragment, or under two paths that redirect to one gets it
+            # crawled once per spelling, and only the preferred spelling is kept. Reading the two
+            # URL columns back costs a scan of the narrow columns; re-reading the crawl cost a
+            # second pass over every page's text.
+            drop: list[int] = []
+            if dedupe_spellings:
+                cur = await conn.execute("SELECT seq, url, final_url FROM dump_in ORDER BY seq")
+                seen_urls = [(r["seq"], r["url"], r["final_url"]) for r in await cur.fetchall()]
+                dupes = await asyncio.to_thread(
+                    duplicate_docs, [{"url": u, "final_url": f} for _, u, f in seen_urls]
+                )
+                drop = [seen_urls[i][0] for i in sorted(dupes)]
+                if drop:
+                    log.info("dump %s: dropping %d documents that are another URL of a page also present",
+                             collection_id, len(drop))
+            # Filtered on the way out rather than deleted first: both statements scan the staging
+            # table anyway, so the duplicates cost nothing extra to leave behind.
+            keep = " AND NOT (seq = ANY(%s))"
+            # Pages that share their text share one blob, here and with whatever the curated set
+            # already holds (DO NOTHING: same hash, same normalised text, so the copy on disk is
+            # as good as this one).
+            await conn.execute(
+                "INSERT INTO page_text (collection_id, content_hash, full_text)"
+                " SELECT %s, content_hash, full_text FROM dump_in"
+                " WHERE content_hash IS NOT NULL AND full_text IS NOT NULL" + keep +
+                " ON CONFLICT (collection_id, content_hash) DO NOTHING",
+                (collection_id, drop),
+            )
+            await conn.execute(
+                "INSERT INTO dump_urls (collection_id,url,scraped_title,content_type,depth,content_hash)"
+                " SELECT %s,url,scraped_title,content_type,depth,content_hash FROM dump_in"
+                " WHERE true" + keep,
+                (collection_id, drop),
+            )
             n = await _scalar(await conn.execute(
                 "SELECT COUNT(*) FROM dump_urls WHERE collection_id=%s", (collection_id,)
             ))
             if n >= _BULK_ROWS:
                 await conn.execute("ANALYZE dump_urls (collection_id, url, content_hash)")
+            # the crawl this replaced may have been the only holder of some pages' text
+            await self._gc_page_text(conn, collection_id)
             await conn.execute(
                 "UPDATE collections SET dump_count=%s, updated_at=%s WHERE collection_id=%s",
                 (n, utcnow(), collection_id),
             )
             return n
+
+    @staticmethod
+    async def _gc_page_text(conn, collection_id: str) -> int:
+        """Drop the collection's page text that neither its dump nor its curated set points at any
+        more, and return how many blobs went. Runs inside the transaction that dropped the last
+        reference, so the text of a page is never visible as missing to a row that still wants it:
+        a curated row keeps the text it was approved with for exactly as long as it holds the hash
+        (`engine.diff.promote`), whatever the newest crawl says about that URL."""
+        return await _scalar(await conn.execute(
+            "WITH gone AS (DELETE FROM page_text p WHERE p.collection_id=%s"
+            " AND NOT EXISTS (SELECT 1 FROM dump_urls d"
+            "                 WHERE d.collection_id=p.collection_id AND d.content_hash=p.content_hash)"
+            " AND NOT EXISTS (SELECT 1 FROM curated_urls c"
+            "                 WHERE c.collection_id=p.collection_id AND c.content_hash=p.content_hash)"
+            " RETURNING 1) SELECT COUNT(*) FROM gone",
+            (collection_id,),
+        ))
 
     async def list_dump(
         self, collection_id: str, limit: int = 100, offset: int = 0, q: str | None = None,
@@ -471,7 +560,8 @@ class Database:
                 f"SELECT COUNT(*) FROM dump_urls d {joins if excluded is not None else ''} WHERE {w}", args))
             cur = await conn.execute(
                 f"""SELECT d.collection_id, d.url, d.scraped_title, d.content_type, d.depth,
-                           length(d.full_text) AS text_len,
+                           (SELECT length(p.full_text) FROM page_text p
+                            WHERE p.collection_id=d.collection_id AND p.content_hash=d.content_hash) AS text_len,
                            (c.url IS NOT NULL)::int AS in_curated, (x.url IS NOT NULL)::int AS in_deltas,
                            {excl} AS excluded,
                            COALESCE(x.edited_by, c.edited_by) AS edited_by
@@ -545,7 +635,8 @@ class Database:
         async with self._conn() as conn:
             total = await _scalar(await conn.execute(f"SELECT COUNT(*) FROM curated_urls WHERE {w}", args))
             cur = await conn.execute(
-                f"SELECT {_CURATED_COLS}, length(full_text) AS text_len FROM curated_urls WHERE {w}"
+                f"SELECT {_CURATED_COLS}, {_page_text('curated_urls', 'length(p.full_text)', 'text_len')}"
+                f" FROM curated_urls WHERE {w}"
                 f"{order_by(CURATED_SORTS, sort, desc, url_order_sql())} LIMIT %s OFFSET %s", [*args, limit, offset]
             )
             return [CuratedUrl(**r) for r in await cur.fetchall()], total
@@ -817,7 +908,7 @@ class Database:
     async def load_curated(self, collection_id: str, *, with_text: bool = False) -> list[CuratedUrl]:
         """The whole curated set. `with_text` also loads the approved page text (the export needs
         it; the diff and the pages do not, and it is most of the bytes)."""
-        cols = "*" if with_text else _CURATED_COLS
+        cols = f"{_CURATED_COLS}, {_page_text('curated_urls')}" if with_text else _CURATED_COLS
         async with self._conn() as conn:
             cur = await conn.execute(f"SELECT {cols} FROM curated_urls WHERE collection_id=%s", (collection_id,))
             return [CuratedUrl(**r) for r in await cur.fetchall()]
@@ -837,7 +928,8 @@ class Database:
             page = urls[i:i + chunk]
             async with self._conn() as conn:
                 cur = await conn.execute(
-                    "SELECT * FROM curated_urls WHERE collection_id=%s AND url = ANY(%s)", (collection_id, page)
+                    f"SELECT {_CURATED_COLS}, {_page_text('curated_urls')} FROM curated_urls"
+                    " WHERE collection_id=%s AND url = ANY(%s)", (collection_id, page)
                 )
                 rows = {r["url"]: r for r in await cur.fetchall()}
             yield [CuratedUrl(**rows[u]) for u in page if u in rows]
@@ -901,34 +993,45 @@ class Database:
                 (collection_id,),
             ))
 
-    async def replace_curated(
-        self, collection_id: str, rows: list[CuratedUrl], *, text_from_dump: bool = True,
-        text_urls: list[str] | None = None, changed: bool = True,
-    ) -> int:
+    async def replace_curated(self, collection_id: str, rows: list[CuratedUrl], *, changed: bool = True) -> int:
         """Bulk-replace the curated set in one transaction; returns the included count (what
         `curated_count` holds — excluded rows are written but not counted). `changed` stamps
         `curated_changed_at`: a promote that moved nothing (the "mark curated" shortcut) leaves the
-        index as up to date as it was. With `text_from_dump`
-        (a promote) every row that is in the dump takes the dump's current page text — copied inside
-        PostgreSQL, so the text never travels through the app; `text_urls` limits that to the rows
-        just promoted (a partial promote: a row still under review keeps the text its curated
-        metadata was approved with). A row's own `full_text` is written first; a row written
-        without text keeps the text it already had in the table (a promote loads the curated set
-        without text, and a row the dump lacks — kept through a crawl failure — must not lose the
-        text the index holds for it)."""
+        index as up to date as it was.
+
+        A row carries the page text it was approved with as its `content_hash`, which `page_text`
+        resolves: `engine.diff.promote` gives each promoted row the dump's current hash and leaves
+        every other row — one still under review in a partial promote, one the dump lacks because
+        the crawl could not fetch it — on the hash it already had. So the text follows the hash on
+        its own, and the pair of copy-the-text-from-the-dump steps this used to need (`text_from_dump`,
+        `text_urls`) are gone with the second copy of the text itself.
+
+        Blobs the rows this replaced were the last holders of are collected before the commit."""
         async with self._conn() as conn:
             await conn.execute(
                 "CREATE TEMP TABLE curated_in (LIKE curated_urls INCLUDING DEFAULTS) ON COMMIT DROP"
             )
+            await conn.execute("ALTER TABLE curated_in ADD COLUMN full_text text")
             async with conn.cursor() as cur, cur.copy(
                 "COPY curated_in (collection_id,url,scraped_title,title,division,document_type,excluded,"
-                "content_hash,edited_by,full_text,crawl_failure) FROM STDIN"
+                "content_hash,edited_by,crawl_failure,full_text) FROM STDIN"
             ) as copy:
                 for r in rows:
                     await copy.write_row((
                         r.collection_id, r.url, r.scraped_title, r.title, r.division, r.document_type,
-                        r.excluded, r.content_hash, r.edited_by, r.full_text, r.crawl_failure,
+                        r.excluded, r.content_hash or content_hash(r.full_text), r.edited_by,
+                        r.crawl_failure, r.full_text,
                     ))
+            # A row handed to us with its own text keeps it: file the blob under the hash that
+            # fingerprints it, exactly as `replace_dump` does. A promote loads the curated set
+            # without text and this does nothing — the row's hash already points at a blob the
+            # dump filed — but it keeps the contract of this method self-contained.
+            await conn.execute(
+                "INSERT INTO page_text (collection_id, content_hash, full_text)"
+                " SELECT collection_id, content_hash, full_text FROM curated_in"
+                " WHERE content_hash IS NOT NULL AND full_text IS NOT NULL"
+                " ON CONFLICT (collection_id, content_hash) DO NOTHING"
+            )
             await conn.execute("CREATE INDEX ON curated_in (url)")
             await conn.execute("ANALYZE curated_in")
             await conn.execute(
@@ -938,23 +1041,17 @@ class Database:
             )
             await conn.execute(
                 "INSERT INTO curated_urls (collection_id,url,scraped_title,title,division,document_type,excluded,"
-                "content_hash,edited_by,full_text,crawl_failure)"
+                "content_hash,edited_by,crawl_failure)"
                 " SELECT collection_id,url,scraped_title,title,division,document_type,excluded,content_hash,"
-                "edited_by,full_text,crawl_failure FROM curated_in"
+                "edited_by,crawl_failure FROM curated_in"
                 " ON CONFLICT (collection_id, url) DO UPDATE SET scraped_title=EXCLUDED.scraped_title,"
                 " title=EXCLUDED.title, division=EXCLUDED.division, document_type=EXCLUDED.document_type,"
                 " excluded=EXCLUDED.excluded, content_hash=EXCLUDED.content_hash, edited_by=EXCLUDED.edited_by,"
-                " full_text=COALESCE(EXCLUDED.full_text, curated_urls.full_text), crawl_failure=EXCLUDED.crawl_failure"
+                " crawl_failure=EXCLUDED.crawl_failure"
             )
-            if text_from_dump:
-                await conn.execute(
-                    "UPDATE curated_urls c SET full_text = d.full_text FROM dump_urls d"
-                    " WHERE c.collection_id=%s AND d.collection_id=c.collection_id AND d.url=c.url"
-                    + ("" if text_urls is None else " AND c.url = ANY(%s)"),
-                    (collection_id,) if text_urls is None else (collection_id, list(text_urls)),
-                )
             if len(rows) >= _BULK_ROWS:
                 await conn.execute("ANALYZE curated_urls (collection_id, url, excluded)")
+            await self._gc_page_text(conn, collection_id)
             return await self._recount_curated(conn, collection_id, changed=changed)
 
     # ── index runs ─────────────────────────────────────────────────────
@@ -1164,9 +1261,9 @@ class Database:
         chunks so a 100k-URL collection never sits in memory at once. Each chunk is its own short
         transaction, and rows written by the running job are always behind the cursor, so
         concurrent set_delta_ai calls are safe."""
-        q = (f"SELECT d.url, d.scraped_title AS title, u.full_text AS text, u.content_hash"
+        q = (f"SELECT d.url, d.scraped_title AS title, p.full_text AS text, u.content_hash"
              f" FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id AND u.url=d.url"
-             f" WHERE {self._LLM_WHERE}") + (self._LLM_MISSING if only_missing else "")
+             f"{_TEXT_JOIN} WHERE {self._LLM_WHERE}") + (self._LLM_MISSING if only_missing else "")
         last = ""
         while True:
             async with self._conn() as conn:
@@ -1387,8 +1484,9 @@ class Database:
             return {}
         async with self._conn() as conn:
             cur = await conn.execute(
-                "SELECT d.url, COALESCE(length(u.full_text), 0) AS n FROM delta_urls d"
+                "SELECT d.url, COALESCE(length(p.full_text), 0) AS n FROM delta_urls d"
                 " LEFT JOIN dump_urls u ON u.collection_id=d.collection_id AND u.url=d.url"
+                + _TEXT_JOIN +
                 " WHERE d.collection_id=%s AND d.url = ANY(%s)", (collection_id, list(urls)),
             )
             return {r["url"]: r["n"] for r in await cur.fetchall()}
@@ -1399,8 +1497,9 @@ class Database:
             return []
         async with self._conn() as conn:
             cur = await conn.execute(
-                "SELECT d.url, d.scraped_title AS title, u.full_text AS text, u.content_hash"
+                "SELECT d.url, d.scraped_title AS title, p.full_text AS text, u.content_hash"
                 " FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id AND u.url=d.url"
+                + _TEXT_JOIN +
                 " WHERE d.collection_id=%s AND d.url = ANY(%s) ORDER BY d.url",
                 (collection_id, list(urls)),
             )

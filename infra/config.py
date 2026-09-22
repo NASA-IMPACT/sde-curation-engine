@@ -71,11 +71,16 @@ class EnvConfig:
     cpu: int = 1024
     memory_mib: int = 2048
     waf_rate_limit_per_5min: int = 1000
-    # RDS PostgreSQL (the state store). Storage starts at 20 GB gp3 and autoscales to 100 GB.
+    # RDS PostgreSQL (the state store). Storage starts at 20 GB gp3 and autoscales to
+    # `db_max_storage_gib`, which is a hard stop: past it writes fail, mid-ingest, with a disk-full
+    # error. The page text is what fills it — schema V9 made a collection cost one copy of its
+    # crawl rather than two (the dump and the curated set share it), but a 100k-page site is still
+    # GBs, and the V9 migration itself needs room for one extra copy of the text while it runs.
     # x86 dedicated compute, 2 vCPU / 8 GiB, no CPU-credit model. Graviton burstable (t4g) was
     # the first choice but hit "insufficient-capacity" twice in us-east-1 on 2026-09-11; the m6i
     # pools are far larger. Same class in every environment.
     db_instance_class: str = "m6i.large"
+    db_max_storage_gib: int = 200
     # The DB subnet group spans every AZ where the class is orderable (not just `azs`, which is
     # limited by Fargate): RDS picks one with free capacity at create time, so more AZs = fewer
     # "insufficient-capacity" failures. us-east-1e offers no db.t3/t4g classes.
@@ -108,8 +113,12 @@ CONFIGS: dict[Environment, EnvConfig] = {
     # ~5 concurrent curators on 100k-URL collections, whose scrape ingest and test export hold the
     # full page text in memory; four of them peaked at 6.5 GB before the 2026-09-18 scale fixes
     # (docs/scale-audit-2026-09-18.md); re-measure before sizing down.
+    # 500 GB: test holds every collection's crawl text at once and is where the big sites land
+    # (ascl.net alone crawls to 6.7 GB of JSON). Autoscaling only ever raises the volume, and
+    # gp3 is billed on what is allocated, not on the ceiling.
     Environment.TEST: EnvConfig(env=Environment.TEST, web_index_name="sde-web", crawler_s3_prefix="",
-                                prod_publish_via_role=True, cpu=4096, memory_mib=16384),
+                                prod_publish_via_role=True, cpu=4096, memory_mib=16384,
+                                db_max_storage_gib=500),
     Environment.PROD: EnvConfig(
         env=Environment.PROD, web_index_name="sde-web", cpu=2048, memory_mib=4096,
         db_multi_az=True, db_backup_days=35, db_deletion_protection=True,

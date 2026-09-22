@@ -81,7 +81,7 @@ def test_rds_postgres_is_private_encrypted_and_backed_up(template):
     template.has_resource_properties("AWS::RDS::DBInstance", {
         "Engine": "postgres", "EngineVersion": Match.string_like_regexp("^17"), "DBName": "engine",
         "DBInstanceClass": "db.m6i.large", "PubliclyAccessible": False, "StorageEncrypted": True,
-        "StorageType": "gp3", "AllocatedStorage": "20", "MaxAllocatedStorage": 100,
+        "StorageType": "gp3", "AllocatedStorage": "20", "MaxAllocatedStorage": 200,
         "MultiAZ": False, "BackupRetentionPeriod": 7, "DeletionProtection": False,
         "EnablePerformanceInsights": True, "EnableCloudwatchLogsExports": ["postgresql"],
     })
@@ -107,8 +107,11 @@ def test_prod_database_is_multi_az_and_protected():
     synth("prod").has_resource_properties("AWS::RDS::DBInstance", {
         "DBInstanceClass": "db.m6i.large", "MultiAZ": True, "BackupRetentionPeriod": 35, "DeletionProtection": True,
     })
+    # test carries every collection's page text and is where the big crawls land, so it autoscales
+    # further than the others; the volume is billed on what is allocated, not on this ceiling
     synth("test").has_resource_properties("AWS::RDS::DBInstance", {
         "DBInstanceClass": "db.m6i.large", "MultiAZ": False, "BackupRetentionPeriod": 7, "DeletionProtection": False,
+        "MaxAllocatedStorage": 500,
     })
 
 

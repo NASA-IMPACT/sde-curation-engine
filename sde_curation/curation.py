@@ -253,7 +253,7 @@ class CurationService:
                 content_hashes={u: h for u, h in hashes.items() if u in wanted},
             )
             picked_urls = [d.url for d in picked]
-            n = await self.db.replace_curated(c.collection_id, curated, text_urls=picked_urls)
+            n = await self.db.replace_curated(c.collection_id, curated)
             await self.db.delete_deltas(c.collection_id, picked_urls)
             await self.db.delete_effects(c.collection_id, [d.url for d in picked if d.kind is DeltaKind.DELETED])
             if not left:  # the whole queue is through: the re-curation flag comes down, as in _promote

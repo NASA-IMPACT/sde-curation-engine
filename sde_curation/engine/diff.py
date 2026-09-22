@@ -243,10 +243,10 @@ def promote(
     curated: list[CuratedUrl], deltas: list[DeltaUrl], content_hashes: dict[str, str | None] | None = None
 ) -> list[CuratedUrl]:
     """Apply deltas to the curated set: tombstones remove, renames move, everything else upserts.
-    Every row the dump has takes the current dump text hash (`content_hashes`); the store copies
-    the matching dump text onto the row at the same time (`Database.replace_curated`), so the
-    curated set carries exactly the text its hash fingerprints and the export ships that. Rows
-    the dump lacks (kept through a crawl failure) keep their hash, text and flag."""
+    Every row the dump has takes the current dump text hash (`content_hashes`), and the hash is how
+    a row holds its text: `page_text` keys the page text by it, so a row carries exactly the text
+    its hash fingerprints and the export ships that. Rows the dump lacks (kept through a crawl
+    failure) keep their hash — and with it their text — and their flag."""
     hashes = content_hashes or {}
     by = {c.url: c for c in curated}
     for d in deltas:

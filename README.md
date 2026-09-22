@@ -180,13 +180,16 @@ are covered together). The worker pool (`llm/pool.py`) retries nothing itself �
 retries 429 / 5xx / timeouts `LLM_MAX_RETRIES` times with backoff — but it keeps going past
 per-URL failures and aborts only after ten consecutive non-retryable errors (bad key, bad model).
 
-**The curated set is self-contained**: a promote copies each page's current dump text onto its
-curated row (`curated_urls.full_text`, copied inside PostgreSQL) along with the hash of that text,
-and **Index** exports the curated rows alone — the dump is never consulted at export time. So the
-approved set stays exportable exactly as approved even after a later crawl has replaced the dump,
-and the next cycle diffs the new crawl against it as the source of truth. Rows promoted before the
-engine kept text (the migration backfills them from the dump, which is what the export shipped
-for them anyway) show an empty *Text* size on the Curated URLs table until the next promote.
+**The curated set is self-contained**: a promote stamps each row with the hash of the page text it
+was approved with, and that hash *is* how the row holds the text — the text lives once per
+`(collection, content_hash)` in `page_text`, shared with the dump row it came from, and is kept
+until no row points at it any more (schema V9; before that the dump and the curated set each
+stored their own copy of every page, so a collection cost two copies of its crawl). **Index**
+exports the curated rows alone — the dump is never consulted at export time. So the approved set
+stays exportable exactly as approved even after a later crawl has replaced the dump, and the next
+cycle diffs the new crawl against it as the source of truth. Rows promoted before the engine kept
+text (the migration backfills them from the dump, which is what the export shipped for them
+anyway) show an empty *Text* size on the Curated URLs table until the next promote.
 
 **Content-aware deltas**: every crawled page gets a `content_hash` (sha256 of its
 whitespace-normalised text) at ingest; a promote carries the current hash onto the curated rows.
