@@ -235,8 +235,15 @@ def test_stress_context_is_dev_only_and_sizes_the_task():
     from config import Environment, get_config, stress_config
 
     cfg = stress_config(get_config("dev"))
-    assert (cfg.cpu, cfg.memory_mib, cfg.llm_provider) == (2048, 8192, "fake") and cfg.env is Environment.DEV
-    assert get_config("dev").llm_provider == "openai" and get_config("dev").cpu == 1024  # a plain deploy undoes it
+    assert (cfg.cpu, cfg.memory_mib, cfg.llm_provider) == (4096, 16384, "fake") and cfg.env is Environment.DEV
+    assert get_config("dev").llm_provider == "openai"  # a plain deploy undoes it
     for env in ("test", "prod"):
         with pytest.raises(ValueError):
             stress_config(get_config(env))
+
+
+def test_dev_task_is_sized_like_test():
+    from config import get_config
+
+    dev, test = get_config("dev"), get_config("test")
+    assert (dev.cpu, dev.memory_mib) == (test.cpu, test.memory_mib)

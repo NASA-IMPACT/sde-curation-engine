@@ -107,7 +107,9 @@ class EnvConfig:
 
 
 CONFIGS: dict[Environment, EnvConfig] = {
-    Environment.DEV: EnvConfig(env=Environment.DEV),
+    # Same task size as test, so a change that works on dev will not run out of memory on test
+    # (2 GB OOM-killed the ascl.net load on 2026-09-22 while test would have held it).
+    Environment.DEV: EnvConfig(env=Environment.DEV, cpu=4096, memory_mib=16384),
     # The test crawler (SdeCrawlerStack in 119417011911) writes scraped_collections/ at the bucket root.
     # 4 vCPU / 16 GB: test is the engine that does the real curation and publishes to prod. Sized for
     # ~5 concurrent curators on 100k-URL collections, whose scrape ingest and test export hold the
@@ -131,10 +133,10 @@ def get_config(env_name: str) -> EnvConfig:
 
 
 def stress_config(cfg: EnvConfig) -> EnvConfig:
-    """`cdk deploy -c stress=true` (dev only): the environment as a load test needs it. The task at
-    the size test runs with, the fake LLM (a 100k-URL Suggest metadata is 100k paid API calls
-    otherwise) and a WAF limit the test client's polling from one IP stays under. A plain deploy
-    puts everything back."""
+    """`cdk deploy -c stress=true` (dev only): the environment as a load test needs it: the fake
+    LLM (a 100k-URL Suggest metadata is 100k paid API calls otherwise) and a WAF limit the test
+    client's polling from one IP stays under. The task is already test's size. A plain deploy puts
+    everything back."""
     if cfg.env is not Environment.DEV:
         raise ValueError("stress=true is for the dev environment only")
-    return replace(cfg, cpu=2048, memory_mib=8192, llm_provider="fake", waf_rate_limit_per_5min=20_000)
+    return replace(cfg, llm_provider="fake", waf_rate_limit_per_5min=20_000)
