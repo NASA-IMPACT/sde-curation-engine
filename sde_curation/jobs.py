@@ -4,17 +4,18 @@ records explicit success/failure in job_runs, and publishes SSE events."""
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 from .backends.index import Dispatch, IndexBackend, IndexError_, wait_for_status
 from .backends.publish import ProdPublisher
 from .backends.s3 import S3
-from .backends.scrape import ScrapeBackend, ScrapeError, parse_documents
+from .backends.scrape import ScrapeBackend, ScrapeError, iter_documents
 from .backends.validate import NoIndexAccess, validate_direct
 from .config import Settings
 from .db import Database
@@ -27,6 +28,7 @@ from .engine.export import (
     write_jsonl,
 )
 from .engine.patterns import match_counts
+from .engine.text import content_hash
 from .engine.urls import batches, dedupe_variants, duplicate_docs
 from .events import EventBus
 from .llm.base import LLMError, LLMProvider
@@ -145,10 +147,29 @@ class JobManager:
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
     async def recover(self) -> None:
-        """Startup: jobs left 'running' by a previous process are dead — say so explicitly."""
+        """Startup: jobs left 'running' by a previous process are dead — say so explicitly. A
+        Suggest-metadata job the restart interrupted (killed under it, or cancelled by the shutdown
+        of a deploy) is started again for the URLs still without an answer: what it had already
+        been told is in the table, so nothing is asked or paid for twice."""
+        interrupted = await self.db.jobs_ended_by_shutdown()
         for j in await self.db.active_jobs():
             await self.db.finish_job(j, JobState.FAILED, error="engine restarted while job was running")
             self._emit(j.collection_id, j)
+            interrupted.append(j)
+        for j in interrupted:
+            resumed = int(j.progress.get("resumed", 0))
+            if j.kind != JobKind.LLM_METADATA or resumed >= self.s.llm_resume_after_restart:
+                continue
+            c = await self.db.get_collection(j.collection_id)
+            if not c or not await self.db.count_deltas_for_llm(c.collection_id, only_missing=True):
+                continue
+            try:
+                new = await self.start_llm_metadata(c, only_missing=True, actor=j.started_by)
+            except JobConflict:
+                continue
+            new.progress = {**new.progress, "resumed": resumed + 1, "resumed_from": j.id}
+            await self.db.update_job(new)
+            log.info("resumed %s for %s as job %s (after job %s)", j.kind, c.collection_id, new.id, j.id)
 
     # ── scrape ─────────────────────────────────────────────────────────
 
@@ -182,9 +203,8 @@ class JobManager:
                     result = await self.scraper.fetch_existing(c, on_progress)
                 else:
                     result = await self.scraper.run(c, on_progress)
-                docs = parse_documents(result.documents_path)
                 failures = result.failures()
-                n = await self.ingest_dump(c.collection_id, docs, failures)
+                n = await self.ingest_dump(c.collection_id, result.documents_path, failures)
                 crawled_at = result.crawled_at or utcnow()
                 capped = result.capped(n, c.max_pages)
                 await self.db.set_last_scraped(c.collection_id, crawled_at, capped=capped)
@@ -241,6 +261,32 @@ class JobManager:
             return await self._spawn(job, coro_factory(job))
         finally:
             self._starting.discard(cid)
+
+    async def start_curation(self, c: Collection, kind: JobKind, work: Callable[[], Awaitable[Any]], what: str,
+                             *, actor: str | None = None) -> JobRun:
+        """Run a bulk curation change (`work`: the same coroutine the request would have awaited) as
+        a job. Other edits on the collection are refused while it runs (ensure_idle), as for any job."""
+        return await self._start(c, kind, lambda job: self._run_curation(c, job, work, what), actor=actor)
+
+    async def _run_curation(self, c: Collection, job: JobRun, work: Callable[[], Awaitable[Any]], what: str) -> None:
+        # not under the collection lock: the curation service takes it for each of its writes, and an
+        # asyncio.Lock is not re-entrant
+        try:
+            await self._progress_cb(c, job)({"curation": what})
+            result = await work()
+            if isinstance(result, dict):
+                job.progress = {**job.progress, "result": {k: v for k, v in result.items() if isinstance(v, int | str | bool)}}
+                await self.db.update_job(job)
+            await self.db.finish_job(job, JobState.SUCCEEDED)
+            self._emit(await self.db.get_collection(c.collection_id) or c, job)
+        except asyncio.CancelledError:
+            await self.db.finish_job(job, JobState.FAILED, error=f"cancelled by {self._cancel_actor.pop(job.id, None) or 'shutdown'}")
+            self._emit(c, job)
+            raise
+        except Exception as e:
+            log.exception("%s %s failed", job.kind, c.collection_id)
+            await self.db.finish_job(job, JobState.FAILED, error=str(getattr(e, "detail", None) or f"{type(e).__name__}: {e}")[:2000])
+            self._emit(c, job)
 
     async def start_llm_patterns(self, c: Collection, *, actor: str | None = None) -> JobRun:
         return await self._start(c, JobKind.LLM_PATTERNS, lambda job: self._run_llm_patterns(c, job), actor=actor)
@@ -324,7 +370,8 @@ class JobManager:
 
             async def on_result(item, result):
                 kept, done = result
-                counts = match_counts(
+                counts = await asyncio.to_thread(
+                    match_counts,
                     [Pattern(id=i, collection_id=cid, type=s.type, match=s.match) for i, s in enumerate(kept)],
                     all_urls)
                 rows = [{"type": s.type, "match": s.match, "rationale": s.rationale, "matches": counts.get(i, 0)}
@@ -626,10 +673,13 @@ class JobManager:
             #    (non-excluded) rows — with the text they were approved with — to a temp jsonl,
             #    upload, THEN the manifest
             await self._pin_index_key(c, progress)
-            curated = await self.db.load_curated(c.collection_id, with_text=True)
+            # (a server-side cursor, a few hundred rows at a time: the approved text of 100k pages is
+            # never in memory at once, and each batch is serialised off the event loop)
+            n = 0
             with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as fh:
-                n = write_jsonl(export_lines(curated), fh)
                 tmp = Path(fh.name)
+                async for rows in self.db.iter_curated_for_export(c.collection_id):
+                    n += await asyncio.to_thread(write_jsonl, export_lines(rows), fh)
             try:
                 if n == 0:
                     raise IndexError_("nothing to export: every curated URL is excluded")
@@ -872,29 +922,51 @@ class JobManager:
         await self._guarded(c, job, body)
 
     async def ingest_dump(
-        self, collection_id: str, docs: list[dict[str, Any]], failures: list[dict[str, Any]] | None = None,
+        self, collection_id: str, docs: list[dict[str, Any]] | Path, failures: list[dict[str, Any]] | None = None,
     ) -> int:
         """Store the crawl as the collection's dump. A site that links to the same page as http and
         https, with and without a trailing slash, with a #fragment, or under two paths that
         redirect to one (`/map`, `/maps`) gets it crawled once per spelling; only the preferred
         spelling is kept (a URL alone on its page stays), so the dump curators work from lists
-        each page once. Redirects are known from the crawler's `final_url`."""
-        drop = duplicate_docs(docs)
+        each page once. Redirects are known from the crawler's `final_url`.
+
+        `docs` is the crawler's documents file (streamed: once for the URLs, to find the duplicates,
+        once into the table — the page text is never held for more than a few hundred documents) or
+        documents already in memory."""
+        def source() -> Iterator[dict[str, Any]]:
+            return iter_documents(docs) if isinstance(docs, Path) else iter(docs)
+
+        def urls_only() -> set[int]:
+            return duplicate_docs([{"url": d.get("url"), "final_url": d.get("final_url")} for d in source()])
+
+        drop = await asyncio.to_thread(urls_only)
         if drop:
             log.info("dump %s: dropping %d documents that are another URL of a page also present",
                      collection_id, len(drop))
-        rows = [
-            DumpUrl(
-                collection_id=collection_id,
-                url=_no_nul(d["url"]),
-                scraped_title=_no_nul(d.get("title")),
-                full_text=_no_nul(d.get("full_text")),
-                content_type=_no_nul(d.get("content_type")),
-                depth=d.get("depth"),
-            )
-            for i, d in enumerate(docs)
-            if d.get("url") and i not in drop
-        ]
+
+        def take(it: Iterator[tuple[int, dict[str, Any]]], size: int) -> tuple[int, list[DumpUrl]]:
+            """The next `size` documents as rows (parsing and hashing happen here, off the event loop)."""
+            seen, rows = 0, []
+            for i, d in itertools.islice(it, size):
+                seen += 1
+                if d.get("url") and i not in drop:
+                    text = _no_nul(d.get("full_text"))
+                    rows.append(DumpUrl(
+                        collection_id=collection_id, url=_no_nul(d["url"]), scraped_title=_no_nul(d.get("title")),
+                        full_text=text, content_type=_no_nul(d.get("content_type")), depth=d.get("depth"),
+                        content_hash=content_hash(text),
+                    ))
+            return seen, rows
+
+        async def rows() -> AsyncIterator[DumpUrl]:
+            it = enumerate(source())
+            while True:
+                seen, chunk = await asyncio.to_thread(take, it, 500)
+                for r in chunk:
+                    yield r
+                if not seen:
+                    return
+
         fails = [
             DumpFailure(
                 collection_id=collection_id, url=_no_nul(f["url"]), reason=_no_nul(str(f["reason"])),
@@ -903,8 +975,7 @@ class JobManager:
             )
             for f in failures or []
         ]
-        n = await self.db.replace_dump(collection_id, rows, fails)
-        return n
+        return await self.db.replace_dump(collection_id, rows(), fails)
 
 
 def _add_tokens(job: JobRun, row: dict[str, Any]) -> None:

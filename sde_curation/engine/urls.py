@@ -8,10 +8,12 @@ order."""
 from __future__ import annotations
 
 from collections.abc import Iterable
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
 
 
+@lru_cache(maxsize=1 << 19)  # every recompute asks for the same URLs again; urlsplit is the cost
 def canonical_key(url: str) -> str:
     """host + path (+ query): lower-cased host without a leading www., no scheme, no fragment,
     no trailing slash. www. and the apex host are one site everywhere else in the app too

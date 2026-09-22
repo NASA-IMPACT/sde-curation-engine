@@ -109,6 +109,9 @@
     document.addEventListener('click', (e) => { const m = document.getElementById('menu'); if (m && m.open && !m.contains(e.target)) m.open = false; });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { const m = document.getElementById('menu'); if (m) m.open = false; } });
     // Connection indicator: green when the SSE stream is open.
+    // Polling is the safety net for a live job only: `every Ns [jobLive()]` on the pollers. The header
+    // and the jobs strip carry data-job-live while something is queued or running.
+    function jobLive(scope) { return !!document.querySelector((scope ? scope + ' ' : '') + '[data-job-live]'); }
     // A reconnect after a drop fires `sseReopen`: events sent meanwhile are gone, so lists that rely
     // on them (the dashboard table) re-fetch once instead of polling all the time.
     let sseDropped = false;

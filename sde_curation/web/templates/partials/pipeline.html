@@ -1,4 +1,5 @@
-{# Stable wrapper owns the SSE trigger + polling timer; only its contents are swapped, so a
+{# (The timer fires only while a job is live — jobLive() in base.html — see collection.html.)
+   Stable wrapper owns the SSE trigger + polling timer; only its contents are swapped, so a
    burst of events can never lose the listener/timer. The poll sends the step from the address bar
    so a refresh keeps the curator's selection lit. That is done in the config-request hook, guarded
    to this element's own request: an hx-vals here would be inherited by the step links inside and
@@ -6,7 +7,7 @@
 <div id="pipeline-{{ c.collection_id|dom_id }}" class="pipeline-wrap"
      hx-get="/collections/{{ c.collection_id }}/pipeline"
      hx-on::config-request="if (event.detail.elt === this) event.detail.parameters.step = new URLSearchParams(location.search).get('step') || ''"
-     hx-trigger="sse:collection[detail.data.includes('&quot;{{ c.collection_id }}&quot;')], every 5s"
+     hx-trigger="sse:collection[detail.data.includes('&quot;{{ c.collection_id }}&quot;')], every 5s [jobLive()], sseReopen from:body"
      hx-sync="this:replace" hx-swap="innerHTML">
 {% include "partials/pipeline_inner.html" %}
 </div>

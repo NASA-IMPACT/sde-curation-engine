@@ -11,11 +11,13 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
+
+import ijson
 
 from ..config import Settings
 from ..models import Collection, crawl_file_stem
@@ -140,11 +142,18 @@ class LogProgress:
         return {"processed": self.processed, "docs": self.ok, "failed": self.failed}
 
 
-def parse_documents(path: Path) -> list[dict[str, Any]]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, list):
-        raise ScrapeError(f"documents file is not a JSON array: {path}")
-    return data
+def iter_documents(path: Path) -> Iterator[dict[str, Any]]:
+    """The crawl's documents, one at a time. The file is a single JSON array with the full text of
+    up to 100k pages; read whole and parsed whole it was held in memory three times over during
+    ingest, which is what decided the engine's memory size."""
+    with path.open("rb") as fh:
+        if not fh.read(256).lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"["):
+            raise ScrapeError(f"documents file is not a JSON array: {path}")
+        fh.seek(0)
+        try:
+            yield from ijson.items(fh, "item", use_float=True)
+        except ijson.JSONError as e:
+            raise ScrapeError(f"documents file is not valid JSON: {path} ({e})") from e
 
 
 def parse_failures(path: Path) -> list[dict[str, Any]]:

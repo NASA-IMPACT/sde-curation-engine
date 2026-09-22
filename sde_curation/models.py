@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -118,6 +119,10 @@ class JobKind(StrEnum):
     LLM_PATTERNS = "llm_patterns"
     LLM_METADATA = "llm_metadata"
     LLM_TITLES = "llm_titles"
+    # bulk curation changes on a big collection: minutes of work, so a job with progress, not a request
+    RECOMPUTE = "recompute"
+    BULK_ACCEPT = "bulk_accept"
+    BULK_SUGGESTIONS = "bulk_suggestions"
 
 
 class JobState(StrEnum):
@@ -483,6 +488,19 @@ class Pattern(PatternCreate):
     created_at: datetime = Field(default_factory=utcnow)
     created_by: str | None = None
     source: RuleSource = RuleSource.SME  # never settable through the API body (PatternCreate)
+
+
+@dataclass(slots=True, frozen=True)
+class Rule:
+    """What the engine needs of a rule, and nothing else. A collection can hold three per-URL rules
+    for every URL (300k on a 100k collection) and every recompute loads them all: as Pattern models
+    that was ~1.4 KB each — 420 MB per recompute, per curator; as this, a tenth of it."""
+
+    id: int
+    type: PatternType
+    match: str
+    value: str | None
+    source: RuleSource
 
 
 # ── jobs ───────────────────────────────────────────────────────────────

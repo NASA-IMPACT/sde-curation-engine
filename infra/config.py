@@ -9,7 +9,7 @@ appear in git, in the synthesized template, or in cdk.out. Seed them with `make 
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 APP_NAME = "sde-curation-engine"
@@ -63,6 +63,7 @@ class EnvConfig:
     # dev indexes into a scratch subset; test and prod write the live sde-web index
     web_index_name: str = "sde-web-subset"
     openai_model: str = "gpt-5.6-luna"  # 1.05M-token window: the full page text always fits
+    llm_provider: str = "openai"  # "fake": canned answers, no API calls (load tests — see stress_config)
     llm_workers: int = 16
     llm_pattern_batch_urls: int = 1000
     # Override for notification links; default = the stack's CloudFront URL.
@@ -103,8 +104,10 @@ class EnvConfig:
 CONFIGS: dict[Environment, EnvConfig] = {
     Environment.DEV: EnvConfig(env=Environment.DEV),
     # The test crawler (SdeCrawlerStack in 119417011911) writes scraped_collections/ at the bucket root.
-    # The engine's real deployment: sized for ~5 concurrent curators and ~100k-URL collections, whose
-    # scrape ingest and test export hold the full page text in memory.
+    # 4 vCPU / 16 GB: test is the engine that does the real curation and publishes to prod. Sized for
+    # ~5 concurrent curators on 100k-URL collections, whose scrape ingest and test export hold the
+    # full page text in memory; four of them peaked at 6.5 GB before the 2026-09-18 scale fixes
+    # (docs/scale-audit-2026-09-18.md); re-measure before sizing down.
     Environment.TEST: EnvConfig(env=Environment.TEST, web_index_name="sde-web", crawler_s3_prefix="",
                                 prod_publish_via_role=True, cpu=4096, memory_mib=16384),
     Environment.PROD: EnvConfig(
@@ -116,3 +119,13 @@ CONFIGS: dict[Environment, EnvConfig] = {
 
 def get_config(env_name: str) -> EnvConfig:
     return CONFIGS[Environment(env_name)]
+
+
+def stress_config(cfg: EnvConfig) -> EnvConfig:
+    """`cdk deploy -c stress=true` (dev only): the environment as a load test needs it. The task at
+    the size test runs with, the fake LLM (a 100k-URL Suggest metadata is 100k paid API calls
+    otherwise) and a WAF limit the test client's polling from one IP stays under. A plain deploy
+    puts everything back."""
+    if cfg.env is not Environment.DEV:
+        raise ValueError("stress=true is for the dev environment only")
+    return replace(cfg, cpu=2048, memory_mib=8192, llm_provider="fake", waf_rate_limit_per_5min=20_000)

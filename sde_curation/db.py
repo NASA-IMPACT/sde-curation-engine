@@ -5,19 +5,20 @@ The schema lives in `schema.py` as numbered migrations applied at connect()."""
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+import sys
+from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from datetime import datetime
 from typing import Any
 
 import psycopg
 from psycopg import AsyncConnection
-from psycopg.rows import dict_row
+from psycopg.rows import dict_row, tuple_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from .engine.patterns import glob_to_like, is_exact
 from .engine.text import content_hash
-from .engine.urls import spellings
+from .engine.urls import canonical_key, spellings
 from .models import (
     Collection,
     CuratedUrl,
@@ -30,7 +31,10 @@ from .models import (
     JobRun,
     JobState,
     Pattern,
+    PatternType,
     Role,
+    Rule,
+    RuleSource,
     Status,
     StatusHistory,
     User,
@@ -47,6 +51,22 @@ log = logging.getLogger(__name__)
 
 class ConflictError(Exception):
     """A unique constraint refused the write (e.g. the username is taken)."""
+
+
+async def _aiter[T](rows: Iterable[T] | AsyncIterable[T]) -> AsyncIterator[T]:
+    if isinstance(rows, AsyncIterable):
+        async for r in rows:
+            yield r
+    else:
+        for r in rows:
+            yield r
+
+
+# After a bulk write the planner still believes the table is as small as before until autovacuum
+# analyses it (up to a minute later). A join over it planned in that window nested-looped
+# 100k × 100k rows and ran for ten minutes (the Suggest-metadata pre-check, seconds after an ingest).
+# So bulk writes refresh the statistics of the columns the joins use, inside their transaction.
+_BULK_ROWS = 5000
 
 
 async def _scalar(cur: psycopg.AsyncCursor) -> Any:
@@ -382,7 +402,8 @@ class Database:
     # ── dump urls ──────────────────────────────────────────────────────
 
     async def replace_dump(
-        self, collection_id: str, rows: list[DumpUrl], failures: list[DumpFailure] | None = None,
+        self, collection_id: str, rows: Iterable[DumpUrl] | AsyncIterable[DumpUrl],
+        failures: list[DumpFailure] | None = None,
     ) -> int:
         """Bulk-replace the dump for a collection in one transaction; returns row count. `failures`
         are the URLs the crawler tried and could not fetch (replaced along with the dump: the two
@@ -405,7 +426,7 @@ class Database:
                 " FROM STDIN"
             ) as copy:
                 seen: set[str] = set()
-                for r in rows:
+                async for r in _aiter(rows):
                     if r.url in seen:  # the SQLite version did INSERT OR REPLACE
                         continue
                     seen.add(r.url)
@@ -416,6 +437,8 @@ class Database:
             n = await _scalar(await conn.execute(
                 "SELECT COUNT(*) FROM dump_urls WHERE collection_id=%s", (collection_id,)
             ))
+            if n >= _BULK_ROWS:
+                await conn.execute("ANALYZE dump_urls (collection_id, url, content_hash)")
             await conn.execute(
                 "UPDATE collections SET dump_count=%s, updated_at=%s WHERE collection_id=%s",
                 (n, utcnow(), collection_id),
@@ -547,14 +570,15 @@ class Database:
             cur = await conn.execute(f"SELECT url FROM {table} WHERE collection_id=%s", (collection_id,))
             return [r["url"] for r in await cur.fetchall()]
 
-    async def effect_counts(self, collection_id: str) -> dict[int, int]:
+    async def effect_counts(self, collection_id: str, ids: list[int] | None = None) -> dict[int, int]:
         """pattern_id -> how many URLs the rule currently decides. pattern_effects holds only the
         winner per (url, field) and a rule has one type, so COUNT(*) is a URL count; it is as of
         the last recompute (a promote keeps the effects)."""
         async with self._conn() as conn:
             cur = await conn.execute(
-                "SELECT pattern_id, COUNT(*) AS n FROM pattern_effects WHERE collection_id=%s GROUP BY pattern_id",
-                (collection_id,),
+                "SELECT pattern_id, COUNT(*) AS n FROM pattern_effects WHERE collection_id=%s"
+                + ("" if ids is None else " AND pattern_id = ANY(%s)") + " GROUP BY pattern_id",
+                (collection_id,) if ids is None else (collection_id, list(ids)),
             )
             return {r["pattern_id"]: r["n"] for r in await cur.fetchall()}
 
@@ -656,38 +680,78 @@ class Database:
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
+    _DELTA_COLS = (
+        "collection_id", "url", "kind", "renamed_from", "crawl_failure", "scraped_title", "title", "division",
+        "document_type", "excluded", "content_changed", "edited_by", "title_ai", "division_ai", "document_type_ai",
+        "title_ai_conf", "division_ai_conf", "document_type_ai_conf", "ai_model", "ai_content_hash", "ai_error",
+        "ai_failures", "title_ai_before", "division_skipped",
+    )
+
     async def replace_deltas(
         self, collection_id: str, deltas: list[DeltaUrl], effects: list[tuple[int, str, str]],
         *, keep_effects: bool = False,
     ) -> None:
-        """Replace the delta URLs (and, unless `keep_effects`, the rule→URL effects). Promote
-        keeps the effects: the rules did not change, and the Curated table still explains its values."""
-        async with self._conn() as conn:
-            await conn.execute("DELETE FROM delta_urls WHERE collection_id=%s", (collection_id,))
-            async with conn.cursor() as cur:
-                async with cur.copy(
-                    "COPY delta_urls (collection_id,url,kind,renamed_from,crawl_failure,scraped_title,title,"
-                    "division,document_type,excluded,content_changed,edited_by,title_ai,division_ai,"
-                    "document_type_ai,title_ai_conf,division_ai_conf,document_type_ai_conf,ai_model,"
-                    "ai_content_hash,ai_error,ai_failures,title_ai_before,division_skipped) FROM STDIN"
-                ) as copy:
+        """Make the delta URLs (and, unless `keep_effects`, the rule→URL effects) equal to the given
+        state. Promote keeps the effects: the rules did not change, and the Curated table still
+        explains its values. The recompute always hands over the complete new state; only the rows
+        that differ from the table are written (an inline edit changes one row of 100k, and
+        rewriting them all was most of what the edit cost)."""
+        cols = self._DELTA_COLS
+        data = [c for c in cols if c not in ("collection_id", "url")]
+        async with self._conn() as conn, conn.cursor() as cur:
+            written = 0
+            if not deltas:
+                await cur.execute("DELETE FROM delta_urls WHERE collection_id=%s", (collection_id,))
+                written += cur.rowcount
+            else:
+                await cur.execute("CREATE TEMP TABLE delta_in (LIKE delta_urls INCLUDING DEFAULTS) ON COMMIT DROP")
+                async with cur.copy(f"COPY delta_in ({','.join(cols)}) FROM STDIN") as copy:
                     for d in deltas:
-                        await copy.write_row((
-                            d.collection_id, d.url, d.kind, d.renamed_from, d.crawl_failure, d.scraped_title,
-                            d.title, d.division, d.document_type, d.excluded, d.content_changed, d.edited_by,
-                            d.title_ai, d.division_ai, d.document_type_ai, d.title_ai_conf, d.division_ai_conf,
-                            d.document_type_ai_conf, d.ai_model, d.ai_content_hash, d.ai_error, d.ai_failures,
-                            d.title_ai_before, d.division_skipped,
-                        ))
-                if not keep_effects:
+                        await copy.write_row(tuple(getattr(d, c) for c in cols))
+                # indexed + analysed: the anti-join below must be a lookup per row whatever plan is
+                # chosen — without the index a generic (prepared) plan nested-looped 100k × 100k rows
+                await cur.execute("CREATE INDEX ON delta_in (url)")
+                await cur.execute("ANALYZE delta_in")
+                await cur.execute(
+                    "DELETE FROM delta_urls d WHERE d.collection_id=%s"
+                    " AND NOT EXISTS (SELECT 1 FROM delta_in i WHERE i.url=d.url)", (collection_id,),
+                )
+                written += cur.rowcount
+                await cur.execute(
+                    f"INSERT INTO delta_urls ({','.join(cols)}) SELECT {','.join(cols)} FROM delta_in"
+                    " ON CONFLICT (collection_id, url) DO UPDATE SET "
+                    + ", ".join(f"{c}=EXCLUDED.{c}" for c in data)
+                    + f" WHERE ({','.join('delta_urls.' + c for c in data)})"
+                      f" IS DISTINCT FROM ({','.join('EXCLUDED.' + c for c in data)})"
+                )
+                written += cur.rowcount
+            if written >= _BULK_ROWS:
+                await cur.execute("ANALYZE delta_urls (collection_id, url, kind, excluded)")
+            if not keep_effects:
+                if not effects:
                     await cur.execute("DELETE FROM pattern_effects WHERE collection_id=%s", (collection_id,))
-                    if effects:
-                        await cur.executemany(
-                            "INSERT INTO pattern_effects (pattern_id,collection_id,url,field) VALUES (%s,%s,%s,%s)"
-                            " ON CONFLICT DO NOTHING",
-                            [(pid, collection_id, url, fld) for pid, url, fld in effects],
-                        )
-            await conn.execute(
+                else:
+                    await cur.execute(
+                        "CREATE TEMP TABLE effects_in (pattern_id bigint, url text, field text) ON COMMIT DROP"
+                    )
+                    async with cur.copy("COPY effects_in (pattern_id,url,field) FROM STDIN") as copy:
+                        for row in set(effects):
+                            await copy.write_row(row)
+                    await cur.execute("CREATE INDEX ON effects_in (pattern_id, url, field)")
+                    await cur.execute("ANALYZE effects_in")
+                    await cur.execute(
+                        "DELETE FROM pattern_effects e WHERE e.collection_id=%s AND NOT EXISTS (SELECT 1 FROM"
+                        " effects_in i WHERE i.pattern_id=e.pattern_id AND i.url=e.url AND i.field=e.field)",
+                        (collection_id,),
+                    )
+                    changed = cur.rowcount
+                    await cur.execute(
+                        "INSERT INTO pattern_effects (pattern_id,collection_id,url,field)"
+                        " SELECT pattern_id,%s,url,field FROM effects_in ON CONFLICT DO NOTHING", (collection_id,),
+                    )
+                    if changed + cur.rowcount >= _BULK_ROWS:
+                        await cur.execute("ANALYZE pattern_effects (pattern_id, collection_id, url)")
+            await cur.execute(
                 "UPDATE collections SET delta_count=%s, updated_at=%s WHERE collection_id=%s",
                 (len(deltas), utcnow(), collection_id),
             )
@@ -758,6 +822,26 @@ class Database:
             cur = await conn.execute(f"SELECT {cols} FROM curated_urls WHERE collection_id=%s", (collection_id,))
             return [CuratedUrl(**r) for r in await cur.fetchall()]
 
+    async def iter_curated_for_export(self, collection_id: str, chunk: int = 500) -> AsyncIterator[list[CuratedUrl]]:
+        """The exportable curated rows (not excluded) with the text they were approved with, in URL
+        order (code-point order, as sorted() gives), `chunk` at a time: the URLs first, then each
+        page of rows by primary key in its own short transaction — the consumer is slow (it writes
+        the file), and a cursor held open for the whole export would keep one of the pool's few
+        connections from every request. Nothing edits the curated set during an index job."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT url FROM curated_urls WHERE collection_id=%s AND NOT excluded", (collection_id,)
+            )
+            urls = sorted(r["url"] for r in await cur.fetchall())
+        for i in range(0, len(urls), chunk):
+            page = urls[i:i + chunk]
+            async with self._conn() as conn:
+                cur = await conn.execute(
+                    "SELECT * FROM curated_urls WHERE collection_id=%s AND url = ANY(%s)", (collection_id, page)
+                )
+                rows = {r["url"]: r for r in await cur.fetchall()}
+            yield [CuratedUrl(**rows[u]) for u in page if u in rows]
+
     async def set_curated_edited_by(self, collection_id: str, items: list[tuple[str, str | None]]) -> None:
         """Re-attribute unchanged curated rows (no delta) after a recompute."""
         if not items:
@@ -804,6 +888,12 @@ class Database:
                 [(reason, collection_id, url) for url, reason in items],
             )
 
+    async def count_curated_excluded(self, collection_id: str) -> int:
+        async with self._conn() as conn:
+            return await _scalar(await conn.execute(
+                "SELECT COUNT(*) FROM curated_urls WHERE collection_id=%s AND excluded", (collection_id,)
+            ))
+
     async def count_curated_unreachable(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
@@ -839,6 +929,8 @@ class Database:
                         r.collection_id, r.url, r.scraped_title, r.title, r.division, r.document_type,
                         r.excluded, r.content_hash, r.edited_by, r.full_text, r.crawl_failure,
                     ))
+            await conn.execute("CREATE INDEX ON curated_in (url)")
+            await conn.execute("ANALYZE curated_in")
             await conn.execute(
                 "DELETE FROM curated_urls c WHERE c.collection_id=%s"
                 " AND NOT EXISTS (SELECT 1 FROM curated_in i WHERE i.url=c.url)",
@@ -861,6 +953,8 @@ class Database:
                     + ("" if text_urls is None else " AND c.url = ANY(%s)"),
                     (collection_id,) if text_urls is None else (collection_id, list(text_urls)),
                 )
+            if len(rows) >= _BULK_ROWS:
+                await conn.execute("ANALYZE curated_urls (collection_id, url, excluded)")
             return await self._recount_curated(conn, collection_id, changed=changed)
 
     # ── index runs ─────────────────────────────────────────────────────
@@ -1381,16 +1475,30 @@ class Database:
         return p
 
     async def insert_patterns(self, rows: list[Pattern]) -> int:
-        """Bulk insert; rows identical to an existing (type, match) are skipped. One transaction."""
+        """Bulk insert; rows identical to an existing (type, match) are skipped. One transaction.
+        COPY + one INSERT … SELECT: bulk-accepting AI metadata inserts three rules per URL."""
         if not rows:
             return 0
         async with self._conn() as conn, conn.cursor() as cur:
-            await cur.executemany(
-                "INSERT INTO patterns (collection_id,type,match,value,created_at,created_by,source)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                [(p.collection_id, p.type, p.match, p.value, p.created_at, p.created_by, p.source) for p in rows],
+            await cur.execute(
+                "CREATE TEMP TABLE patterns_in (n bigint, collection_id text, type text, match text, value text,"
+                " created_at timestamptz, created_by text, source text) ON COMMIT DROP"
             )
-            return cur.rowcount
+            async with cur.copy(
+                "COPY patterns_in (n,collection_id,type,match,value,created_at,created_by,source) FROM STDIN"
+            ) as copy:
+                for n, p in enumerate(rows):
+                    await copy.write_row((n, p.collection_id, p.type, p.match, p.value, p.created_at, p.created_by, p.source))
+            # ORDER BY n: ids are handed out in the order given, and the newest (highest id) rule wins
+            await cur.execute(
+                "INSERT INTO patterns (collection_id,type,match,value,created_at,created_by,source)"
+                " SELECT collection_id,type,match,value,created_at,created_by,source FROM patterns_in ORDER BY n"
+                " ON CONFLICT DO NOTHING"
+            )
+            inserted = cur.rowcount
+            if inserted >= _BULK_ROWS:
+                await cur.execute("ANALYZE patterns (collection_id, type, match)")
+            return inserted
 
     async def delete_exact_patterns(self, collection_id: str, type_: str, matches: list[str]) -> int:
         if not matches:
@@ -1402,10 +1510,113 @@ class Database:
             )
             return cur.rowcount
 
-    async def list_patterns(self, collection_id: str) -> list[Pattern]:
+    async def load_rules(self, collection_id: str) -> list[Rule]:
+        """Every rule, oldest first, as the slim engine view (models.Rule), read through a
+        server-side cursor so the driver's row dicts never pile up next to the result."""
+        types, sources = {t.value: t for t in PatternType}, {x.value: x for x in RuleSource}
+        out: list[Rule] = []
+        async with self._conn() as conn, conn.cursor(name="rules", row_factory=tuple_row) as cur:
+            await cur.execute(
+                "SELECT id, type, match, value, source FROM patterns WHERE collection_id=%s ORDER BY id",
+                (collection_id,),
+            )
+            while rows := await cur.fetchmany(10_000):
+                out += [Rule(i, types[t], m, sys.intern(v) if v is not None else None, sources[x])
+                        for i, t, m, v, x in rows]
+        return out
+
+    async def iter_pattern_rows(self, collection_id: str, chunk: int = 5000) -> AsyncIterator[list[dict[str, Any]]]:
+        """Every rule as a plain row, oldest first, `chunk` at a time (the patterns.yaml writer). Keyset pages, each
+        its own short transaction: the consumer is slow (it serialises YAML), and a cursor held
+        open for the whole file would keep one of the pool's few connections from every request."""
+        last = 0
+        while True:
+            async with self._conn() as conn:
+                cur = await conn.execute(
+                    "SELECT * FROM patterns WHERE collection_id=%s AND id > %s ORDER BY id LIMIT %s",
+                    (collection_id, last, chunk),
+                )
+                rows = await cur.fetchall()
+            if not rows:
+                return
+            last = rows[-1]["id"]
+            yield rows
+
+    async def count_patterns(self, collection_id: str) -> int:
         async with self._conn() as conn:
-            cur = await conn.execute("SELECT * FROM patterns WHERE collection_id=%s ORDER BY id", (collection_id,))
+            return await _scalar(await conn.execute(
+                "SELECT COUNT(*) FROM patterns WHERE collection_id=%s", (collection_id,)
+            ))
+
+    async def get_pattern(self, collection_id: str, pattern_id: int) -> Pattern | None:
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM patterns WHERE collection_id=%s AND id=%s", (collection_id, pattern_id)
+            )
+            row = await cur.fetchone()
+            return Pattern(**row) if row else None
+
+    async def exact_patterns_for(self, collection_id: str, url: str, type_: str | None = None) -> list[Pattern]:
+        """The exact-URL rules for this page under any spelling of its URL (an exact rule matches by
+        canonical key), oldest first — without loading a collection's every per-URL rule to find one."""
+        key = canonical_key(url)
+        q = ("SELECT * FROM patterns WHERE collection_id=%s AND position('*' in match) = 0"
+             " AND position(lower(%s) in lower(match)) > 0")
+        args: list[Any] = [collection_id, key.rstrip("/")]  # the site root is also written without its "/"
+        if type_ is not None:
+            q += " AND type=%s"
+            args.append(type_)
+        async with self._conn() as conn:
+            cur = await conn.execute(q + " ORDER BY id", args)
+            return [p for p in (Pattern(**r) for r in await cur.fetchall()) if canonical_key(p.match) == key]
+
+    async def exact_pattern_matches(self, collection_id: str, types: list[str]) -> list[tuple[int, str, str]]:
+        """(id, type, match) of every exact-URL rule of these types, as plain tuples."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT id, type, match FROM patterns WHERE collection_id=%s AND type = ANY(%s)"
+                " AND position('*' in match) = 0", (collection_id, list(types)),
+            )
+            return [(r["id"], r["type"], r["match"]) for r in await cur.fetchall()]
+
+    async def delete_patterns(self, collection_id: str, ids: list[int]) -> int:
+        if not ids:
+            return 0
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "DELETE FROM patterns WHERE collection_id=%s AND id = ANY(%s)", (collection_id, list(ids))
+            )
+            return cur.rowcount
+
+    async def list_patterns(self, collection_id: str, *, types: list[str] | None = None,
+                            exact: bool | None = None, limit: int | None = None, offset: int = 0) -> list[Pattern]:
+        """The collection's rules, oldest first. `types` / `exact` (per-URL rules only, or globs only)
+        narrow it in SQL, `limit` / `offset` page it: a collection can hold three per-URL rules for
+        every URL."""
+        q, args = "SELECT * FROM patterns WHERE collection_id=%s", [collection_id]
+        if types is not None:
+            q += " AND type = ANY(%s)"
+            args.append([str(t) for t in types])
+        if exact is not None:
+            q += f" AND position('*' in match) {'=' if exact else '>'} 0"
+        q += " ORDER BY id"
+        if limit is not None:
+            q += " LIMIT %s OFFSET %s"
+            args += [limit, offset]
+        async with self._conn() as conn:
+            cur = await conn.execute(q, args)
             return [Pattern(**r) for r in await cur.fetchall()]
+
+    async def pattern_counts(self, collection_id: str) -> dict[str, Any]:
+        """How many rules there are, how many of them per-URL (exact), and how many per source."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT source, COUNT(*) AS n, COUNT(*) FILTER (WHERE position('*' in match) = 0) AS exact"
+                " FROM patterns WHERE collection_id=%s GROUP BY source ORDER BY source", (collection_id,),
+            )
+            rows = await cur.fetchall()
+        return {"total": sum(r["n"] for r in rows), "exact": sum(r["exact"] for r in rows),
+                "by_source": {r["source"]: r["n"] for r in rows}}
 
     async def delete_pattern(self, collection_id: str, pattern_id: int) -> bool:
         async with self._conn() as conn:
@@ -1483,6 +1694,16 @@ class Database:
     async def active_jobs(self) -> list[JobRun]:
         async with self._conn() as conn:
             cur = await conn.execute("SELECT * FROM job_runs WHERE state IN ('queued','running') ORDER BY id")
+            return [self._job(r) for r in await cur.fetchall()]
+
+    async def jobs_ended_by_shutdown(self) -> list[JobRun]:
+        """Collections whose *latest* job was cancelled by an engine shutdown (a deploy): nothing
+        has happened on them since, so the job can be picked up where it stopped."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM (SELECT DISTINCT ON (collection_id) * FROM job_runs ORDER BY collection_id, id DESC) j"
+                " WHERE state='failed' AND error='cancelled by shutdown' ORDER BY id"
+            )
             return [self._job(r) for r in await cur.fetchall()]
 
     async def list_recent_jobs(self, limit: int = 20, state: str | None = None) -> list[JobRun]:

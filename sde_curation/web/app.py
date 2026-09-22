@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -37,8 +37,6 @@ from ..db import (
     ConflictError,
     Database,
 )
-from ..engine.patterns import is_exact
-from ..engine.urls import canonical_key
 from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
 from ..llm.base import LLMError, make_llm
@@ -56,6 +54,7 @@ from ..models import (
     EditedBy,
     IndexKeyUpdate,
     IndexRun,
+    JobKind,
     JobRun,
     PatternCreate,
     PatternType,
@@ -67,7 +66,7 @@ from ..models import (
     utcnow,
 )
 from ..notify import Notifier
-from ..store import remove_collection_files, write_collection_yaml, write_patterns_yaml
+from ..store import PatternsFile, remove_collection_files, write_collection_yaml
 from . import auth
 
 _HERE = Path(__file__).parent
@@ -128,6 +127,7 @@ _ORDER = {st: i for i, (st, _, _, _) in enumerate(PIPELINE)}
 # Which pipeline step a job kind belongs to (failure footers, step panels).
 STEP_FOR_KIND = {
     "scrape": Status.BACKLOG, "llm_patterns": Status.CURATING, "llm_metadata": Status.CURATING, "llm_titles": Status.CURATING,
+    "recompute": Status.CURATING, "bulk_accept": Status.CURATING, "bulk_suggestions": Status.CURATING,
     "index_test": Status.CONFIG_GENERATED, "validate": Status.CONFIG_GENERATED, "index_prod": Status.LIVE,
     "validate_prod": Status.LIVE,
 }
@@ -217,6 +217,7 @@ class SuggestionBulk(BaseModel):
 
 
 AI_FIELDS = ("title", "division", "document_type")
+RULES_PAGE = 200  # per-URL rules the Rules tab shows at a time (the glob rules are always all shown)
 CURATE_PREVIEW_ROWS = 50  # rows each Curate list shows in place; ⤢ Expand pages through all of them
 CURATE_FOCUS = ("exclusions", "metadata")  # ?focus=: one Curate list on its own page, paginated
 
@@ -378,11 +379,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.jobs = jobs
         app.state.existing_cache = {}
         app.state.curation = CurationService(db, lock_for=jobs.lock)
+        app.state.patterns_file = PatternsFile(db, settings.collections_dir)
         await jobs.recover()
         try:
             yield
         finally:
             await jobs.shutdown()
+            await app.state.patterns_file.flush()
             await db.close()
 
     app = FastAPI(title="SDE Curation Engine", version="0.1.0", lifespan=lifespan)
@@ -418,6 +421,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         j = request.app.state.jobs.active_for(c.collection_id)
         if j:
             raise HTTPException(409, f"{j.kind} job #{j.id} is running — wait for it or cancel it")
+
+    async def run_or_job(request: Request, c: Collection, kind: JobKind, what: str, work) -> Any:
+        """A bulk curation change: awaited in the request on a small collection, a background job
+        on a big one (settings.bulk_job_min_urls) — there it takes longer than the 60 s a request
+        has behind CloudFront, and the curator gets progress instead of an error page. `work` is the
+        change itself and returns the payload; as a job the answer is 202 + the job."""
+        if c.dump_count < settings.bulk_job_min_urls:
+            return htmx_done(request, await work())
+        try:
+            job = await request.app.state.jobs.start_curation(c, kind, work, what, actor=actor(request))
+        except JobConflict as e:
+            raise HTTPException(409, str(e)) from e
+        return JSONResponse(jsonable_encoder(job), status_code=202,
+                            headers={"HX-Refresh": "true"} if _is_htmx(request) else None)
 
     # ── identity (set by auth.AuthMiddleware; absent when login is off) ─
 
@@ -899,10 +916,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def rules_context(request: Request, c: Collection) -> dict[str, Any]:
         """The rules (patterns) table: every rule with its match count over the set the count
         links to (CurationService.rows_set) and how many URLs it still decides."""
-        patterns = await curation(request).pattern_stats(c)
+        n = await db(request).pattern_counts(c.collection_id)
+        try:
+            page = max(1, int(request.query_params.get("rpage", 1)))
+        except ValueError:
+            page = 1
+        pages = max(1, -(-n["exact"] // RULES_PAGE))
+        page = min(page, pages)
+        patterns = await curation(request).pattern_stats(c, exact_limit=RULES_PAGE, exact_offset=(page - 1) * RULES_PAGE)
         return {
-            "patterns": patterns, "source_label": SOURCE_LABEL,
-            "source_counts": Counter(p["source"] for p in patterns),
+            "patterns": patterns, "source_label": SOURCE_LABEL, "source_counts": n["by_source"],
+            "rules_paging": {"page": page, "pages": pages, "per": RULES_PAGE, "total": n["exact"]},
             "rows_set": CurationService.rows_set(c), "divisions": list(Division), "doc_types": list(DocumentType),
         }
 
@@ -1003,8 +1027,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             counts["content_changed"] = (await d.list_deltas(c.collection_id, content_changed=True, limit=1))[1]
             counts["renamed"] = (await d.list_deltas(c.collection_id, renamed=True, limit=1))[1]
         counts["excluded"] = await d.count_excluded_by_rules(c.collection_id)  # rules, not deltas
-        curated = await d.load_curated(c.collection_id) if c.curated_rows else []
-        counts["kept"] = sum(1 for r in curated if r.crawl_failure)
+        counts["kept"] = await d.count_curated_unreachable(c.collection_id) if c.curated_rows else 0
         runs = await d.list_index_runs(c.collection_id, limit=5)
         failed = jobs[0] if jobs and jobs[0].state == "failed" else None
         # while an index/validate job is still going, the run's stored report is provisional (the
@@ -1020,8 +1043,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "validating_prod": next((j for j in active if j.kind in ("index_prod", "validate_prod")), None),
             "exportable": await d.curated_export_count(c.collection_id) if c.curated_rows else 0,
             "delta_counts": counts,
-            "pattern_count": len(await d.list_patterns(c.collection_id)),
-            "curated_excluded": sum(1 for r in curated if r.excluded),
+            "pattern_count": await d.count_patterns(c.collection_id),
+            "curated_excluded": await d.count_curated_excluded(c.collection_id) if c.curated_count else 0,
         }
         if step in (Status.BACKLOG, Status.SCRAPED) or c.status in (Status.BACKLOG, Status.SCRAPED):
             stats["existing_crawl"] = await existing_crawl(request, c)
@@ -1274,8 +1297,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 actor=actor(request),
             )
         c = await must_get(request, c.collection_id)
-        write_patterns_yaml(settings.collections_dir, c.collection_id,
-                            await db(request).list_patterns(c.collection_id))
+        await request.app.state.patterns_file.changed(c.collection_id)
         emit_collection(request, c)
         return c
 
@@ -1286,15 +1308,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ensure_idle(request, c)
         if c.dump_count == 0:
             raise HTTPException(409, "no dump ingested yet — scrape first")
-        ds = await curation(request).recompute(c)
-        await _after_curation_change(request, c, ds)
-        await audit(request, "recompute", collection_id, f"{len(ds.deltas)} delta URLs")
-        return htmx_done(request, ds.counts)
+        async def work() -> dict:
+            ds = await curation(request).recompute(c)
+            await _after_curation_change(request, c, ds)
+            await audit(request, "recompute", collection_id, f"{len(ds.deltas)} delta URLs")
+            return ds.counts
+
+        return await run_or_job(request, c, JobKind.RECOMPUTE, f"comparing {c.dump_count:,} dump URLs with the curated URLs", work)
 
     @app.get("/api/collections/{collection_id}/patterns")
-    async def api_patterns(request: Request, collection_id: str):
+    async def api_patterns(request: Request, collection_id: str, exact_limit: int | None = Query(None, ge=0, le=5000),
+                           exact_offset: int = Query(0, ge=0)):
+        """Every rule with its match / in-effect counts. `exact_limit` + `exact_offset` page the
+        per-URL (exact) rules — there can be three per URL; the glob rules always come in full."""
         c = await must_get(request, collection_id)
-        return await curation(request).pattern_stats(c)
+        return await curation(request).pattern_stats(c, exact_limit=exact_limit, exact_offset=exact_offset)
 
     @app.post("/api/collections/{collection_id}/patterns", status_code=201)
     async def api_add_pattern(request: Request, collection_id: str, body: PatternCreate):
@@ -1312,7 +1340,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_delete_pattern(request: Request, collection_id: str, pattern_id: int):
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        gone = next((p for p in await db(request).list_patterns(collection_id) if p.id == pattern_id), None)
+        gone = await db(request).get_pattern(collection_id, pattern_id)
         ds = await curation(request).delete_pattern(c, pattern_id)
         if ds is None or gone is None:
             raise HTTPException(404, "pattern not found")
@@ -1332,9 +1360,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await audit(request, "url.edit", collection_id, f"{body.type} {body.url}")
             return htmx_done(request, ds.counts)
         # an exact rule matches every spelling of its page, so find it under any spelling
-        key = canonical_key(body.url)
-        existing = [p for p in await db(request).list_patterns(collection_id)
-                    if p.type == body.type and is_exact(p.match) and canonical_key(p.match) == key]
+        existing = await db(request).exact_patterns_for(collection_id, body.url, str(body.type))
         if existing and existing[0].value == body.value:
             ds = await curation(request).recompute(c)  # no-op edit
         else:
@@ -1398,6 +1424,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except IncompleteMetadata as e:
             raise HTTPException(409, str(e)) from e
         c = await must_get(request, collection_id)
+        await request.app.state.patterns_file.flush(collection_id)  # the approved set's rules are on disk
         await audit(request, "promote", collection_id, f"{n} curated")
         emit_collection(request, c)
         return htmx_done(request, {"curated": n, "status": c.status})
@@ -1617,9 +1644,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if body.type is None or s["type"] == body.type]
         if not sugs:
             raise HTTPException(409, f"no pending {body.type or ''} suggestions".replace("  ", " "))
-        n = await _decide_suggestions(request, c, sugs, body.decision)
-        await audit(request, f"suggestion.bulk_{body.decision}", collection_id, f"{body.type or 'all'} × {n}")
-        return htmx_done(request, {"decided": n, "state": body.decision + "ed"})
+        async def work() -> dict:
+            n = await _decide_suggestions(request, c, sugs, body.decision)
+            await audit(request, f"suggestion.bulk_{body.decision}", collection_id, f"{body.type or 'all'} × {n}")
+            return {"decided": n, "state": body.decision + "ed"}
+
+        if body.decision != "accept":  # a reject applies nothing: no recompute, nothing long
+            return htmx_done(request, await work())
+        return await run_or_job(request, c, JobKind.BULK_SUGGESTIONS, f"applying {len(sugs)} suggested rules", work)
 
     @app.post("/api/collections/{collection_id}/suggestions/{sid}/{decision}")
     async def api_decide_suggestion(
@@ -1674,15 +1706,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ensure_idle(request, c)
         d = db(request)
         fields = [body.field] if body.field else list(AI_FIELDS)
+        kind = (f"{body.conf}-confidence " if body.conf else "") + (f"AI {body.field} suggestions" if body.field else "AI suggestions")
+        whole = body.url is None and body.decision == "accept"  # every URL's suggestions → rules: the long one
+        if whole and not await d.count_ai_suggestions(collection_id, field=body.field, conf=body.conf):
+            raise HTTPException(409, f"no {kind} to {body.decision}")
+
+        async def work() -> dict:
+            return await _decide_ai_bulk(request, c, body, fields, kind)
+
+        if not whole:
+            return htmx_done(request, await work())
+        return await run_or_job(request, c, JobKind.BULK_ACCEPT, f"accepting the {kind}", work)
+
+    async def _decide_ai_bulk(request: Request, c: Collection, body: AiBulk, fields: list[str], kind: str) -> dict:
+        d, collection_id = db(request), c.collection_id
         # accept-all (no url) skips what an SME rule decides; a named row, and any reject, does not
         skip_human = body.decision == "accept" and body.url is None
         per_field = {f: await d.deltas_with_ai(collection_id, f, url=body.url, conf=body.conf,
                                                skip_human=skip_human) for f in fields}
         n = sum(len(v) for v in per_field.values())
         if not n:
-            what = (f"{body.conf}-confidence " if body.conf else "") + (f"AI {body.field} suggestions" if body.field else "AI suggestions")
             held = skip_human and await d.count_ai_suggestions(collection_id, field=body.field, conf=body.conf)
-            raise HTTPException(409, f"no {what} to {body.decision}" + (f" on {body.url}" if body.url else "")
+            raise HTTPException(409, f"no {kind} to {body.decision}" + (f" on {body.url}" if body.url else "")
                                 + (f": all {held} left are on fields your own rules decide — accept those row by row"
                                    if held else ""))
         if body.decision == "accept":
@@ -1699,8 +1744,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         detail = " · ".join(f"{f} × {len(rows)}" for f, rows in per_field.items() if rows)
         await audit(request, f"ai.bulk_{body.decision}", collection_id, detail + (f" ({body.url})" if body.url else "")
                     + (f" [{body.conf} confidence]" if body.conf else ""))
-        return htmx_done(request, {"decided": n, "field": body.field, "url": body.url,
-                                   "state": body.decision + "ed"})
+        return {"decided": n, "field": body.field, "url": body.url, "state": body.decision + "ed"}
 
     @app.post("/api/collections/{collection_id}/ai/{decision}")
     async def api_decide_ai(request: Request, collection_id: str, decision: str, body: AiDecision):
@@ -1721,8 +1765,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pc = PatternCreate(type=PatternType(body.field), match=body.url, value=edited or str(value))
             except ValueError as e:
                 raise HTTPException(422, str(e)) from e
-            existing = [p for p in await db(request).list_patterns(collection_id)
-                        if p.match == body.url and p.type == body.field]
+            existing = [p for p in await db(request).exact_patterns_for(collection_id, body.url, body.field)
+                        if p.match == body.url]
             ds = await curation(request).replace_exact_pattern(
                 c, pc, old_id=existing[0].id if existing else None, actor=actor(request),
                 source=RuleSource.LLM_EDITED if edited else RuleSource.LLM,

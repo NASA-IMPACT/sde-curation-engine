@@ -30,6 +30,7 @@ unmet curated URL stays too (`not_visited`) — an incomplete crawl proves nothi
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,6 +41,7 @@ from ..models import (
     DeltaUrl,
     DumpUrl,
     Pattern,
+    Rule,
     RuleSource,
     edited_by_of,
     failure_means_gone,
@@ -112,7 +114,7 @@ def recompute(
     collection_name: str,
     dump: list[DumpUrl],
     curated: list[CuratedUrl],
-    patterns: list[Pattern],
+    patterns: Sequence[Pattern | Rule],
     previous: list[DeltaUrl] | None = None,
     failures: dict[str, str] | None = None,
     capped: bool = False,
