@@ -1,9 +1,9 @@
 # Architecture and workflow
 
 How the engine is put together, what happens at each stage of the curation pipeline, where jobs
-live, and what it loads into memory. Describes the code at `3b1810e` on `featuure/optimize-app`
-plus the ingest-memory changes in the working tree (2026-09-22): schema V9, the streamed ingest
-with byte-capped chunks, connection recycling after the ingest, and the streamed export.
+live, and what it loads into memory. Describes the code at `3cb06e4` ("stream byte wise",
+2026-09-22): schema V9, the streamed ingest with byte-capped chunks, connection recycling after the
+ingest, and the streamed export — the ingest numbers confirmed on dev the same day.
 
 Companion docs: `infra/README.md` (the deployed stack), `docs/deploy-dev.md` (deploys),
 `docs/workflow.md` (the curator’s view).
@@ -424,7 +424,7 @@ the service run more than one task, make deploys non-destructive, and let a job 
 | LLM calls within a job | `LLM_WORKERS` = 16 | `llm/pool.py` |
 | LLM calls across jobs | **unbounded** — the first rate-limit risk | see `README.md` guidance |
 | Index runs | unlimited; each dispatches its own ECS task | `backends/index.py` |
-| DB connections | `DB_POOL_SIZE` = 8 per process; replaced wholesale after each crawl ingest (`recycle_connections`) | `db.py:248` |
+| DB connections | `DB_POOL_SIZE` = 16 per process (`config.py:35`; `Database`'s own default of 8 applies only when it is built without settings); replaced wholesale after each crawl ingest (`recycle_connections`) | `config.py:35`, `db.py:248` |
 | AOSS bulk request | 100 docs / 8 MB (AOSS caps at 10 MiB) | `config.py:82-83` |
 | Curation edits | **no stale-edit check** — two curators on one collection, last save wins silently | `README.md` |
 
@@ -442,7 +442,7 @@ What grows with what:
 | Number of collections (30, 300) | dashboard round trips (N+1 on `latest_job`); nothing else |
 | URLs in a collection | whole-set loads in recompute/promote — URL count × ~0.5–1 KB |
 | Bytes of page text | storage (`page_text`, once per hash) and time (~24 s/GB ingest on a laptop); memory only up to one chunk — the ingest, export and LLM paths all stream |
-| Concurrent curators | LLM in-flight calls (unbounded across jobs); DB pool at 8 |
+| Concurrent curators | LLM in-flight calls (unbounded across jobs); DB pool at 16 |
 | Job history | `job_runs` / `audit_log` growth; both indexed and read with `LIMIT` |
 
 ### Known risks, in priority order

@@ -19,7 +19,7 @@ WEB_COSMOS test indexing, validation gate, prod indexing, notifications.
 cp .env.example .env      # sibling repo paths, AWS values, OPENAI_API_KEY (or LLM_PROVIDER=fake)
 make install              # uv sync if uv is installed, else python3.13 venv + pip -r requirements-dev.txt
 make run                  # http://localhost:8080   (8000 is taken by sde-elastic-wrapper)
-make test                 # 91 tests, incl. a state-matrix that fires every action in every status
+make test                 # 315 tests, incl. a state-matrix that fires every action in every status
 make lint
 ```
 
@@ -206,6 +206,10 @@ https (or a crawler that now drops the slash) produces one *modified* delta per 
 removal; promote moves the row and its metadata. Exact-URL rules (per-URL edits, accepted AI
 suggestions) match by the same key, so a title or exclusion set under one spelling follows the
 page; a per-URL edit under a new spelling replaces the rule written under the old one.
+The same key collapses a crawl that reached one page under several links: the ingest keeps one
+row per page (the resolved URL, then https, then the shorter spelling), and the scrape job and the
+status history say how many it dropped — "45,024 read, 22,700 duplicate links dropped" for a site
+that links every page over both `http://` and `https://www.`.
 
 **Crawl failures are not deletions**: the scrape also ingests the crawler's failures log
 (`dump_failures`: URL, reason, HTTP status) and whether the crawl stopped at its page cap
@@ -396,7 +400,10 @@ A recompute always computes the complete new delta set, but writes only the rows
 (an inline edit changes one row); per-URL rules are matched by lookup, never by regex; the Rules
 tab lists every glob rule and pages the per-URL rules (`?rpage=`, 200 at a time;
 `GET …/patterns?exact_limit=&exact_offset=` does the same, without them it returns every rule);
-the crawl's documents file and the index export are streamed, never held whole in memory;
+the crawl's documents file and the index export are streamed, never held whole in memory — the
+ingest reads the crawl in chunks of 500 pages or 1 MB of text, whichever comes first, and replaces
+the pooled DB connections afterwards (a 6.7 GB crawl of ~1 MB pages peaks under 300 MB; see
+`docs/architecture.md` §1);
 `patterns.yaml` is written in the background once a collection has more than 2 000 rules (always
 current after a promote and at shutdown). A Suggest-metadata job interrupted by an engine restart
 (a deploy, a crash) is started again for the URLs still missing, at most
@@ -505,11 +512,13 @@ sde_curation/
   config.py        pydantic-settings
   models.py        every boundary model (API, DB rows, indexer contracts, LLM schemas)
   db.py            PostgreSQL (psycopg 3 pool): one transaction per method, COPY for bulk replaces
-  schema.py        numbered migrations (schema_version table)
+  schema.py        numbered migrations (schema_version table; V9 = page text stored once, in page_text)
   import_sqlite.py one-off cutover: copy a SQLite-era engine.db into PostgreSQL
-  engine/          pure: patterns.py (resolution), diff.py (delta URLs, promote), export.py (indexer contract)
+  engine/          pure: patterns.py (resolution), diff.py (delta URLs, promote), export.py (indexer contract),
+                   urls.py (canonical_key, duplicate links), text.py (content_hash)
   curation.py      engine ↔ DB glue, per-collection locking
-  backends/        scrape.py (local subprocess | SSM), index.py (local subprocess | ECS), validate.py (direct AOSS check), s3.py
+  backends/        scrape.py (local subprocess | SSM; the crawl as a streamed DocumentSource), index.py (local subprocess | ECS),
+                   validate.py (direct AOSS check), publish.py (Index to prod), aoss.py, s3.py
   notify.py        Slack-compatible webhook on status transitions
   llm/             base.py (provider protocol + registry), openai.py, fake.py, tasks.py (prompts, sanity filters)
   jobs.py          JobManager: background tasks, cancel, recovery, SSE events
