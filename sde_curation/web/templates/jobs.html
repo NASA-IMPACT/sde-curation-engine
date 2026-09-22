@@ -4,7 +4,7 @@
 {% block content %}
 <h1>Jobs</h1>
 <p class="muted">Every crawl, LLM run and indexing run across all collections. Collections run independently; the crawler host runs one crawl at a time (queued crawls show their position).</p>
-<section class="card" id="jobs-active" hx-get="/jobs/panel" hx-trigger="sse:collection, every 10s" hx-sync="this:replace" hx-swap="innerHTML">
+<section class="card" id="jobs-active" hx-get="/jobs/panel" hx-trigger="sse:collection, every 10s [jobLive('#jobs-active')], sseReopen from:body" hx-sync="this:replace" hx-swap="innerHTML">
   {% include "partials/jobs_panel.html" %}
 </section>
 <section class="card">

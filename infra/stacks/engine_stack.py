@@ -192,7 +192,7 @@ class CurationEngineStack(Stack):
             "WEB_INDEX_NAME": cfg.web_index_name,
             "OPENSEARCH_ENDPOINT_TEST": p["opensearch_endpoint_test"],
             "OPENSEARCH_ENDPOINT_PROD": p["opensearch_endpoint_prod"],
-            "LLM_PROVIDER": "openai",
+            "LLM_PROVIDER": cfg.llm_provider,
             "OPENAI_MODEL": cfg.openai_model,
             "LLM_WORKERS": str(cfg.llm_workers),
             "LLM_PATTERN_BATCH_URLS": str(cfg.llm_pattern_batch_urls),

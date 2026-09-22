@@ -24,10 +24,11 @@ recompute after the pattern is gone — the next newest pattern, then curated, t
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..models import Pattern, PatternType
+from ..models import Pattern, PatternType, Rule
 from .urls import canonical_key
 
 FIELD_TYPES = (PatternType.TITLE, PatternType.DIVISION, PatternType.DOCUMENT_TYPE)
@@ -69,8 +70,8 @@ class Resolved:
 
 @dataclass
 class Compiled:
-    pattern: Pattern
-    regex: re.Pattern[str]
+    pattern: Pattern | Rule
+    regex: re.Pattern[str] | None  # None for an exact-URL rule: it never scans
     matches: set[str] = field(default_factory=set)
 
 
@@ -78,27 +79,29 @@ def is_exact(match: str) -> bool:
     return "*" not in match
 
 
-def compile_patterns(patterns: list[Pattern], urls: list[str]) -> list[Compiled]:
+def compile_patterns(patterns: Sequence[Pattern | Rule], urls: list[str]) -> list[Compiled]:
     """An exact match (no `*`) is a dict lookup by canonical key, not a regex scan: per-URL edits
     and accepted per-URL AI suggestions are exact patterns, and there can be as many of them as
     URLs. It matches every spelling of its page that the dump has."""
-    by_key: dict[str, list[str]] = {}
-    for u in urls:
-        by_key.setdefault(canonical_key(u), []).append(u)
+    by_key: dict[str, list[str]] | None = None  # built only when there is an exact rule to look up
     out = []
     for p in patterns:
-        c = Compiled(p, glob_to_regex(p.match))
         if is_exact(p.match):
-            c.matches = set(by_key.get(canonical_key(p.match), ()))
+            if by_key is None:
+                by_key = {}
+                for u in urls:
+                    by_key.setdefault(canonical_key(u), []).append(u)
+            c = Compiled(p, None, set(by_key.get(canonical_key(p.match), ())))
         else:
-            c.matches = {u for u in urls if c.regex.match(u)}
+            rx = glob_to_regex(p.match)
+            c = Compiled(p, rx, {u for u in urls if rx.match(u)})
         out.append(c)
     return out
 
 
 def resolve_all(
     urls: list[str],
-    patterns: list[Pattern],
+    patterns: Sequence[Pattern | Rule],
     *,
     base: dict[str, dict[str, Any]],
     scraped_titles: dict[str, str | None],
@@ -166,5 +169,5 @@ def resolve_all(
     return out
 
 
-def match_counts(patterns: list[Pattern], urls: list[str]) -> dict[int, int]:
+def match_counts(patterns: Sequence[Pattern | Rule], urls: list[str]) -> dict[int, int]:
     return {c.pattern.id: len(c.matches) for c in compile_patterns(patterns, urls)}  # type: ignore[misc]

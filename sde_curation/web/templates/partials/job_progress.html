@@ -20,6 +20,7 @@
   {%- elif p.phase == 'done' %}{% if p.validation_ok is defined %}validation {{ 'passed' if p.validation_ok else 'failed' }}{% else %}validating the {{ 'prod' if job.kind in ('index_prod', 'validate_prod') else 'test' }} index{% endif %}
   {%- elif p.llm_phase == 'titles' %}regenerating duplicate titles · {{ p.title_calls_done or 0 }}/{{ p.title_groups or '?' }} group{{ 's' if p.title_groups != 1 }}{% if p.titles_total %} · {{ p.titles_total }} URLs{% endif %}{% if p.title_pass %} · pass {{ p.title_pass }}{% endif %}{% if p.title_calls_inflight %} · {{ p.title_calls_inflight }} in flight{% endif %}{% if p.title_calls_retrying %} · {{ p.title_calls_retrying }} to retry{% endif %}{% if p.title_calls_failed %} · {{ p.title_calls_failed }} failed{% endif %}
   {%- elif p.llm %}LLM calls in progress · {{ p.done or 0 }}/{{ p.total or '?' }}{{ ' calls' if p.llm == 'patterns' else ' URLs' }}{% if p.inflight %} · {{ p.inflight }} in flight{% endif %}{% if p.retrying %} · {{ p.retrying }} to retry{% endif %}{% if p.failed %} · {{ p.failed }} failed{% endif %}
+  {%- elif p.curation %}{{ p.curation }}…
   {%- elif p.docs is defined %}{{ p.docs }} docs{% if p.failed %}, {{ p.failed }} failed{% endif %}
   {%- else %}running…{% endif -%}
 {%- elif job.error -%}
@@ -30,6 +31,7 @@
   {%- elif p.suggestions is defined %}{{ p.suggestions }} suggestions{% if p.urls %} · {{ '{:,}'.format(p.urls) }} URLs in {{ p.calls or p.done or 0 }} call{{ 's' if (p.calls or p.done) != 1 }}{% endif %}{% if p.global %} · {{ p.global }} from the global list{% endif %}{% if p.failed %} · {{ p.failed }} call{{ 's' if p.failed != 1 }} failed{% endif %}
   {%- elif p.llm == 'titles' %}{{ p.retitled or 0 }} of {{ p.titles_total or 0 }} URLs sharing a title and doc type retitled{% if p.title_calls %} in {{ p.title_calls }} group call{{ 's' if p.title_calls != 1 }}{% endif %}{% if p.disambiguated %} · {{ p.disambiguated }} told apart by their URLs{% endif %}{% if p.title_calls_failed %} · {{ p.title_calls_failed }} failed{% endif %}{% if p.still_duplicate is defined %} · {{ p.still_duplicate }} still share one{% endif %}{% if p.tokens_in %} · {{ '{:,}'.format(p.tokens_in) }} tokens in / {{ '{:,}'.format(p.tokens_out or 0) }} out{% endif %}
   {%- elif p.classified is defined %}{{ p.classified }} classified{% if p.failed %} · {{ p.failed }} failed{% endif %}{% if p.titles_total %} · {{ p.retitled or 0 }} of {{ p.titles_total }} sharing a title and doc type retitled{% endif %}{% if p.disambiguated %} · {{ p.disambiguated }} told apart by their URLs{% endif %}{% if p.still_duplicate %} · {{ p.still_duplicate }} still share one{% endif %}{% if p.titles_error %} · telling titles apart failed{% endif %}{% if p.tokens_in %} · {{ '{:,}'.format(p.tokens_in) }} tokens in / {{ '{:,}'.format(p.tokens_out or 0) }} out{% endif %}
+  {%- elif p.curation %}{{ p.curation }} · done
   {%- elif p.exported is defined %}{{ p.exported }} exported{% if p.validation_ok is defined %} · validation {{ 'passed' if p.validation_ok else 'failed' }}{% endif %}
   {%- endif -%}
 {%- endif -%}

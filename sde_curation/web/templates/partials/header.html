@@ -3,7 +3,7 @@
 {% set cid = c.collection_id %}
 {% set a = next_action(c, job) %}
 {% set running = job and job.state == 'running' %}
-<div class="wb-head">
+<div class="wb-head"{% if job and job.state in ('queued', 'running') %} data-job-live{% endif %}>
   <div class="wb-ident">
     <a class="crumb" href="/">← Collections</a>
     <h1 class="wb-name">{{ c.name }}

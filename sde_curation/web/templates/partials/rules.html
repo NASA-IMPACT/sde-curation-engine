@@ -2,8 +2,12 @@
    p.set = the URL set the rule's match count is over and links to: rows_set (delta while reviewing,
    curated once promoted, dump before curating), except exclude rules — always the dump, since the
    URLs they keep out have no delta row. #}
+{# Every glob rule is listed; the per-URL rules (one per field per URL once AI metadata is
+   accepted — 300k on a 100k collection) come a page at a time: rules_paging, ?rpage=. #}
+{% from "partials/pager.html" import pager %}
 {% set cid = c.collection_id %}
 {% set running = job and job.state == 'running' %}
+{% macro rules_href(n) %}/collections/{{ cid }}?tab=rules&rpage={{ n }}{% endmacro %}
 {% if patterns %}
 <p class="muted small">Rules belong to this collection only. {% for src, n in source_counts.items() %}<span class="edited e-src-{{ src }}">{{ source_label.get(src, src) }} {{ n }}</span> {% endfor %}</p>
 <table>
@@ -17,4 +21,8 @@
         <td><button class="danger" aria-label="delete rule" {% if running %}disabled{% endif %} hx-delete="/api/collections/{{ cid }}/patterns/{{ p.id }}" hx-swap="none" hx-confirm="Delete this rule? Its effects are unapplied (next newest rule → curated value → empty).">×</button></td></tr>
   {% endfor %}</tbody>
 </table>
+{% if rules_paging and rules_paging.pages > 1 %}
+<div class="inline pager"><span class="muted small">Per-URL rules (inline edits and accepted AI suggestions):</span>
+  {{ pager(rules_paging.page, rules_paging.pages, rules_paging.per, rules_paging.total, rules_href) }}</div>
+{% endif %}
 {% else %}<p class="empty">No rules yet. Accept suggestions or add one above.</p>{% endif %}

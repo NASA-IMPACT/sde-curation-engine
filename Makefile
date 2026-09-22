@@ -58,10 +58,12 @@ docker-run: db-up  ## local smoke of the image: fake LLM, login password "dev", 
 # ── AWS (CDK, infra/) ──────────────────────────────────────────────────
 ENV ?= dev
 PROFILE ?= sde-dev
+# extra CDK context, e.g. CDK_CONTEXT="-c stress=true" (dev only: infra/config.py stress_config)
+CDK_CONTEXT ?=
 STACK = CurationEngine-$(ENV)
 IPY = $(abspath $(IVENV))/bin/python
 # cdk.json runs `python app.py`; activating infra/.venv puts that python (and the CDK libs) first
-CDK = cd infra && . $(abspath $(IVENV))/bin/activate && AWS_PROFILE=$(PROFILE) JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 cdk -c environment=$(ENV)
+CDK = cd infra && . $(abspath $(IVENV))/bin/activate && AWS_PROFILE=$(PROFILE) JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 cdk -c environment=$(ENV) $(CDK_CONTEXT)
 infra-install:  ## infra: infra/.venv with the CDK libs (the cdk CLI itself: npm i -g aws-cdk)
 ifdef HAVE_UV
 	cd infra && uv sync

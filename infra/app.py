@@ -11,11 +11,13 @@ import os
 
 import aws_cdk as cdk
 
-from config import APP_NAME, get_config
+from config import APP_NAME, get_config, stress_config
 from stacks.engine_stack import CurationEngineStack
 
 app = cdk.App()
 cfg = get_config(app.node.try_get_context("environment") or "dev")
+if str(app.node.try_get_context("stress")).lower() == "true":  # make deploy ENV=dev CDK_CONTEXT="-c stress=true"
+    cfg = stress_config(cfg)
 account = os.environ.get("CDK_DEFAULT_ACCOUNT")
 if not account:
     raise SystemExit("no AWS credentials: set AWS_PROFILE (e.g. `aws sso login --profile sde-dev`)")

@@ -379,9 +379,28 @@ are in flight — the ceilings come from the systems behind it.
   This is the first place you will hit the provider's rate limit.
 - *Index runs* — each dispatches its own ECS task and polls S3. Nothing limits how many run at
   once; runs on different collections are fine as long as the indexer tolerates it.
+- *Bulk curation changes* — on a collection with at least `BULK_JOB_MIN_URLS` (20 000) dump URLs,
+  **Start curating / recompute**, **accept all pattern suggestions** and **accept all AI metadata**
+  answer `202` with a job (`recompute`, `bulk_suggestions`, `bulk_accept`) and show progress like
+  any other job; smaller collections are answered in the request as before. A request has 60 s
+  behind CloudFront. Single edits are always answered in the request.
+- *One process, one event loop.* The whole-collection CPU work (diff + rule resolution, match
+  counts, promote, parsing the crawl, writing `patterns.yaml`) runs in threads so that one
+  curator's recompute does not freeze everyone else's pages, polls and SSE streams.
+
+**Big collections (100k URLs)** — measured in `docs/scale-audit-2026-09-18.md` and its follow-up.
+A recompute always computes the complete new delta set, but writes only the rows that differ
+(an inline edit changes one row); per-URL rules are matched by lookup, never by regex; the Rules
+tab lists every glob rule and pages the per-URL rules (`?rpage=`, 200 at a time;
+`GET …/patterns?exact_limit=&exact_offset=` does the same, without them it returns every rule);
+the crawl's documents file and the index export are streamed, never held whole in memory;
+`patterns.yaml` is written in the background once a collection has more than 2 000 rules (always
+current after a promote and at shutdown). A Suggest-metadata job interrupted by an engine restart
+(a deploy, a crash) is started again for the URLs still missing, at most
+`LLM_RESUME_AFTER_RESTART` (3) times; a job a curator cancelled stays cancelled.
 
 **Data layer**
-- PostgreSQL through a small connection pool (`DB_POOL_SIZE`, default 8); every `Database`
+- PostgreSQL through a small connection pool (`DB_POOL_SIZE`, default 16); every `Database`
   method is one transaction, and status transitions lock the collection row. The job registry
   and per-collection locks still live in memory, so the ECS service is pinned to one task —
   **do not run two replicas** until those move into the database.
@@ -390,10 +409,14 @@ are in flight — the ceilings come from the systems behind it.
   is warned.
 
 **What other curators see**
-- Job starts, progress and completion are pushed over SSE to every open browser; the header,
-  pipeline and jobs strip also poll (5–10 s), so a second curator sees status and counts move.
-- Another person's pattern/metadata edits are *not* pushed. Header counts catch up on the next
-  poll; the curate table body only reloads when a job finishes or the page is refreshed.
+- Job starts, progress and completion are pushed over SSE to every open browser. The header,
+  pipeline, jobs strip and dashboard rows poll (4–10 s) **only while a job is live** on what they
+  show, as the safety net for a missed event; after the SSE stream reconnects everything re-fetches
+  once. An idle page sends nothing — the WAF rate limit (per IP, and curators share an office IP)
+  was reached by idle dashboards polling every row.
+- Another person's pattern/metadata edits are pushed as a `collection` event (header, stepper and
+  dashboard row refresh); the curate table body only reloads when a job finishes or the page is
+  refreshed.
 
 **Guidance**
 - Assign curators to distinct collections — that is the model the app is built around.
@@ -407,7 +430,8 @@ are in flight — the ceilings come from the systems behind it.
 | Key | Purpose |
 |---|---|
 | `DATABASE_URL` or `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_SSLMODE` | PostgreSQL. One URL locally (`make db-up` → `postgresql://engine:engine@localhost:5432/engine`); the ECS task gets the parts, with user/password from the RDS secret |
-| `DB_POOL_SIZE` (8) | connections per engine process |
+| `DB_POOL_SIZE` (16) | connections per engine process |
+| `BULK_JOB_MIN_URLS` (20000) | dump URLs from which recompute / accept-all run as background jobs (0 = always) |
 | `DATA_DIR` | `collections/<id>/{collection,patterns}.yaml`, index logs, scrape jobs |
 | `CRAWLER_ROOT`, `CRAWLER_PYTHON` | crawl4ai repo and its interpreter |
 | `INDEXER_ROOT`, `INDEXER_PYTHON` | sde-api-scrapers repo (Phase 5) |
@@ -443,8 +467,8 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `GET …/history`, `…/jobs`, `…/dump` | audit trail, job runs, ingested URLs |
 | `POST …/scrape` | run the crawl → job (202; 409 if busy) |
 | `POST …/jobs/cancel` | cancel the running job |
-| `POST …/recompute` | diff dump vs curated + apply patterns (idempotent) |
-| `GET/POST /…/patterns`, `DELETE …/patterns/{pid}` | pattern CRUD with match counts |
+| `POST …/recompute` | diff dump vs curated + apply patterns (idempotent); 202 + job on a big collection (`BULK_JOB_MIN_URLS`) |
+| `GET/POST /…/patterns`, `DELETE …/patterns/{pid}` | pattern CRUD with match counts; `GET …?exact_limit=&exact_offset=` pages the per-URL rules |
 | `POST …/urls` | per-URL edit `{url, type, value?}`; exclude/include toggles |
 | `GET …/dump?q&excluded`, `…/delta?kind&excluded&division&document_type&q&edited&renamed&limit&offset` (`…/deltas` still works), `…/curated?q&excluded&edited&unreachable` | the three URL sets, paginated |
 | `GET /collections/{id}/urls/{dump\|delta\|curated}?format=csv&…` | CSV export of the filtered set |

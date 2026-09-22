@@ -224,3 +224,16 @@ def test_test_env_publishes_to_prod_through_an_assumed_role(test_template):
     assert "PROD_INDEX_ROLE_ARN" in env and env["CRAWLER_S3_PREFIX"] == "" and env["WEB_INDEX_NAME"] == "sde-web"
     [policy] = test_template.find_resources("AWS::OpenSearchServerless::AccessPolicy").values()
     assert "aoss:WriteDocument" not in str(policy["Properties"]["Policy"])
+
+
+def test_stress_context_is_dev_only_and_sizes_the_task():
+    import pytest
+
+    from config import Environment, get_config, stress_config
+
+    cfg = stress_config(get_config("dev"))
+    assert (cfg.cpu, cfg.memory_mib, cfg.llm_provider) == (2048, 8192, "fake") and cfg.env is Environment.DEV
+    assert get_config("dev").llm_provider == "openai" and get_config("dev").cpu == 1024  # a plain deploy undoes it
+    for env in ("test", "prod"):
+        with pytest.raises(ValueError):
+            stress_config(get_config(env))

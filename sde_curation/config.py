@@ -30,7 +30,13 @@ class Settings(BaseSettings):
     db_user: str | None = None
     db_password: str | None = None
     db_sslmode: Literal["disable", "prefer", "require", "verify-ca", "verify-full"] = "prefer"
-    db_pool_size: int = Field(default=8, ge=1, le=64)  # connections per engine process
+    # connections per engine process. Every recompute, job and poll takes one for each transaction;
+    # four curators on big collections kept 8 busy and requests queued for seconds behind them.
+    db_pool_size: int = Field(default=16, ge=1, le=64)
+    # Bulk curation changes (Start curating / recompute, accept-all) on a collection with at least this
+    # many dump URLs run as a background job: a request has 60 s before CloudFront gives up on it, and
+    # an error page for work that is still going on makes the curator click again. 0 = always a job.
+    bulk_job_min_urls: int = Field(default=20_000, ge=0)
 
     # ── sibling repos ──────────────────────────────────────────────────
     crawler_root: Path = _PROJECTS / "sde-crawl4ai-scraper"
@@ -118,6 +124,10 @@ class Settings(BaseSettings):
     # Calls that still fail with a rate limit / 5xx / timeout after the SDK's own retries are run
     # again at the end of the job, this long after the main pass, with a quarter of the workers.
     llm_retry_passes: int = Field(default=1, ge=0, le=5)
+    # A Suggest-metadata job on 100k URLs runs for hours; a deploy or a crash restarts the engine under
+    # it. Its answers are saved as they arrive, so the restarted engine carries on with the URLs still
+    # missing — at most this many times per run (a job that itself brings the engine down must stop).
+    llm_resume_after_restart: int = Field(default=3, ge=0, le=20)
     llm_retry_delay_s: float = Field(default=30.0, ge=0)
     # Suggest metadata always sends the FULL page text (no budget, no truncation, one model), one
     # call per URL. Suggest patterns sends every crawled URL (+ title) in batches of this size.
