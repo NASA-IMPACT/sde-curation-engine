@@ -29,7 +29,7 @@ def test_compare_mirrors_indexer_report():
 async def test_validate_direct_uses_client_and_maps_403():
     class Client:
         def search(self, index, body):
-            assert index == "sde-web-subset" and body["query"]["bool"]["filter"][0]["term"]["collection_key"] == "k"
+            assert index == "sde-web" and body["query"]["bool"]["filter"][0]["term"]["collection_key"] == "k"
             return {"hits": {"hits": [{"_source": {"id": web_id("k", "https://x/a"), "title": "A"}, "sort": [1]}]}}
 
     s = Settings(opensearch_endpoint_test="https://e.example", llm_provider="fake")

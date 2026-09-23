@@ -60,8 +60,8 @@ class EnvConfig:
     # where both targets are the dev collection) → the stack's AOSS data-access policy grants write.
     prod_publish_via_role: bool = False
     indexing_container_name: str = "WEB_COSMOSContainer"
-    # dev indexes into a scratch subset; test and prod write the live sde-web index
-    web_index_name: str = "sde-web-subset"
+    # every tier writes sde-web in its own collection; must match sde-api-scrapers' WEB_INDEX_NAMES
+    web_index_name: str = "sde-web"
     openai_model: str = "gpt-5.6-luna"  # 1.05M-token window: the full page text always fits
     llm_provider: str = "openai"  # "fake": canned answers, no API calls (load tests — see stress_config)
     llm_workers: int = 16
@@ -118,11 +118,11 @@ CONFIGS: dict[Environment, EnvConfig] = {
     # 500 GB: test holds every collection's crawl text at once and is where the big sites land
     # (ascl.net alone crawls to 6.7 GB of JSON). Autoscaling only ever raises the volume, and
     # gp3 is billed on what is allocated, not on the ceiling.
-    Environment.TEST: EnvConfig(env=Environment.TEST, web_index_name="sde-web", crawler_s3_prefix="",
+    Environment.TEST: EnvConfig(env=Environment.TEST, crawler_s3_prefix="",
                                 prod_publish_via_role=True, cpu=4096, memory_mib=16384,
                                 db_max_storage_gib=500),
     Environment.PROD: EnvConfig(
-        env=Environment.PROD, web_index_name="sde-web", cpu=2048, memory_mib=4096,
+        env=Environment.PROD, cpu=2048, memory_mib=4096,
         db_multi_az=True, db_backup_days=35, db_deletion_protection=True,
     ),
 }

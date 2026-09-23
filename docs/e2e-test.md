@@ -21,7 +21,7 @@ INDEXER_FAMILY=$(jq -r .indexing_task_family infra/envs/dev.json)
 - Second terminal: `make logs ENV=dev PROFILE=sde-dev` (the engine log; every step below produces lines there)
 - Test site: `https://aurorasaurus.org` with **Max pages** 15. Small, public, stable, and cheap to index.
   Any site works, but keep the cap low: everything you index lands in the shared dev
-  `sde-web-subset` index.
+  `sde-web` index.
 - On dev, **Index to test** and **Index to prod** both write to the dev OpenSearch collection. Index to
   prod does not run the indexer: it publishes the test run's vectors from S3 `vectorized/`.
   The difference is only which target the run is recorded against and which gate applies.
@@ -136,13 +136,13 @@ Click **Promote N deltas → curated** (or **Mark curated** if there are no delt
 ## 7. Index to test (indexer over ECS) and validation
 
 Click **Index to test**, confirm the dialog ("Export N URLs and index them into the TEST index?").
-An `index_test` job runs. On dev this writes to the dev `sde-web-subset` index.
+An `index_test` job runs. On dev this writes to the dev collection's `sde-web` index.
 
 | Phase | Expect | Check |
 |---|---|---|
 | export | **Exported** N URLs → `s3://<hand-off bucket>/curated_collections/aurorasaurus.org/<run_id>/` | `aws s3 ls s3://$HANDOFF_BUCKET/curated_collections/aurorasaurus.org/ --recursive \| tail -3` → `documents.jsonl` then `manifest.json` |
 | dispatch | an indexer task starts | `aws ecs list-tasks --cluster $INDEXER_CLUSTER --family $INDEXER_FAMILY --desired-status RUNNING` → one ARN; its log: `aws logs tail /ecs/api-scrapers-dev --since 5m --follow` |
-| finish (2–5 min) | **Indexer** line: `N indexed · changed · deleted · index sde-web-subset · Ns`; `status.json` in `index_runs/` | `aws s3 ls s3://$HANDOFF_BUCKET/index_runs/ --recursive \| tail -3` |
+| finish (2–5 min) | **Indexer** line: `N indexed · changed · deleted · index sde-web · Ns`; `status.json` in `index_runs/` | `aws s3 ls s3://$HANDOFF_BUCKET/index_runs/ --recursive \| tail -3` |
 | validation (~30 s later) | **Validation** line: `N / N — counts match · titles 100%`, "via direct" | engine log: `validated_by: direct`, no 403 |
 | result | status **Test index** (`config_generated`), step 5; **Index to prod** and **Re-validate** buttons appear; **Re-index to test** also available | collection page |
 
