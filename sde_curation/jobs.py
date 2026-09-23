@@ -662,7 +662,8 @@ class JobManager:
         return self._publisher()
 
     async def start_index(
-        self, c: Collection, target: str, *, actor: str | None = None
+        self, c: Collection, target: str, *, actor: str | None = None,
+        allow_high_deletion: bool = False,
     ) -> tuple[JobRun, IndexRun]:
         if not self.s.cosmos_index_bucket:
             raise IndexError_("COSMOS_INDEX_BUCKET is not set")
@@ -672,12 +673,18 @@ class JobManager:
         if target == "prod":
             job = await self._start(c, JobKind.INDEX_PROD, lambda job: self._run_publish_prod(c, job, run), actor=actor)
         else:
-            job = await self._start(c, JobKind.INDEX_TEST, lambda job: self._run_index(c, job, run), actor=actor)
+            job = await self._start(
+                c, JobKind.INDEX_TEST,
+                lambda job: self._run_index(c, job, run, allow_high_deletion=allow_high_deletion),
+                actor=actor,
+            )
         job.run_id = run.run_id
         await self.db.update_job(job)
         return job, run
 
-    async def _run_index(self, c: Collection, job: JobRun, run: IndexRun) -> None:
+    async def _run_index(
+        self, c: Collection, job: JobRun, run: IndexRun, *, allow_high_deletion: bool = False
+    ) -> None:
         async def body():
             s3 = S3(self.s.cosmos_index_bucket, region=self.s.aws_region)
             await self.db.insert_index_run(run)
@@ -713,7 +720,9 @@ class JobManager:
             await progress({"exported": n, "export": s3.url(prefix), "phase": "dispatch"})
 
             # 2. dispatch
-            d: Dispatch = await backend.dispatch(c, run.run_id, run.target)
+            d: Dispatch = await backend.dispatch(
+                c, run.run_id, run.target, allow_high_deletion=allow_high_deletion
+            )
             run.external_ref = d.external_ref
             job.external_ref = d.external_ref
             await self.db.update_index_run(run)
