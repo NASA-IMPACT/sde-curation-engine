@@ -22,7 +22,16 @@ from sde_curation.engine.export import (
     mint_run_id,
     write_jsonl,
 )
-from sde_curation.models import Collection, CuratedUrl, Division, ExportManifest, JobKind, JobRun, JobState, Status
+from sde_curation.models import (
+    Collection,
+    CuratedUrl,
+    Division,
+    ExportManifest,
+    JobKind,
+    JobRun,
+    JobState,
+    Status,
+)
 from sde_curation.web.app import HIGH_DELETION_CONFIRM, next_action
 from tests.conftest import prepare, wait_job
 
