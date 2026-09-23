@@ -817,8 +817,7 @@ class JobManager:
             await self.db.update_index_run(run)
             await self._validate_prod(
                 c, job, run, progress,
-                note=(f"prod publish {run.run_id} from test run {source.run_id}: {status.indexed} written "
-                      f"({st.get('from_vectorized', 0)} from S3, {st.get('from_test_index', 0)} from the test index), "
+                note=(f"prod publish {run.run_id} from test run {source.run_id}: {status.indexed} docs promoted from the test index, "
                       f"{st.get('unchanged', 0)} unchanged, {status.deleted} removed"),
             )
 
