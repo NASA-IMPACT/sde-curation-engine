@@ -25,10 +25,10 @@ async def test_jobs_panel_and_page(crawler_client):
     panel = (await c.get("/jobs/panel")).text
     assert "queued" in panel and "behind 2 crawls" in panel
     await wait_job(c, "ex.org")
-    # a failed job shows up as the last failure, on the dashboard and on /jobs
+    # a failed job is not shown in the running-jobs strip — only in /jobs → Recent
     await c.post("/api/collections/b.org/scrape"); await wait_job(c, "b.org")
-    home = (await c.get("/")).text
-    assert "last failure" in home and ">Bee<" in home
+    panel = (await c.get("/jobs/panel")).text
+    assert "last failure" not in panel and ">Bee<" not in panel and "No jobs running" in panel
     page = (await c.get("/jobs")).text
     assert "Recent" in page and ">Bee<" in page and ">Ex<" in page and "failed" in page
     assert "Jobs" in (await c.get("/")).text.split('role="menu"')[1]

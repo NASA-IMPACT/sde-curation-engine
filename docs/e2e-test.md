@@ -155,12 +155,12 @@ the index simply had not refreshed yet.
 Click **Index to prod**, confirm. An `index_prod` job publishes the validated test run's vectors to
 the prod target (on dev: the same collection). No indexer task runs. The job moves through
 `preflight → from_vectorized → (from_test_index) → (delete) → validating`. When it finishes, the
-page shows a **Prod run** line from test run `<id>` and **Published** `N written (N from S3 vectors ·
-0 from the test index) · … unchanged · … removed`, and a **Validation** row (`pass` via direct, N / N
+page shows a **Prod run** line from test run `<id>` and **Published** `N docs promoted from the test index ·
+… unchanged · … removed`, and a **Validation** row (`pass` via direct, N / N
 visible in prod). Only once that passes does status become **Live**, and step 6 shows
 **Live ✓** with the hint "Re-scrape to start a new cycle". A failed prod check (or one that cannot
 read prod) leaves status at **Test index** with a **⚠ prod not validated** chip (not the re-curation flag); **Re-validate prod** re-runs it. **Re-index to prod** stays available and,
-with nothing changed, reports `0 written`.
+with nothing changed, reports `0 docs promoted`.
 
 Negative: **Index to prod** is not offered until a test run has validated. Deltas pending after
 a promote block indexing with "N deltas are pending — promote them first".
