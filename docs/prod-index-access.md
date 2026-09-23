@@ -151,7 +151,7 @@ aws opensearchserverless get-security-policy --type network --name <POLICY_NAME>
 2. Redeploy the test stack. Its task role already has `sts:AssumeRole` on that parameter's value.
 3. Publish one small collection and confirm three things:
    - the job reports `N written`, then `N / N visible in prod`
-   - a second publish reports `0 written · N unchanged`
+   - a second publish reports `0 docs promoted · N unchanged`
    - the documents show up on the prod search front end
 
 ## Revoking access

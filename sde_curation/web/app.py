@@ -664,7 +664,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def jobs_context(request: Request, *, compact: bool = False) -> dict[str, Any]:
         d = db(request)
         return {
-            "jobs_active": await d.active_jobs(), "jobs_failed": await d.list_recent_jobs(5, "failed"),
+            "jobs_active": await d.active_jobs(),
             "names": {c.collection_id: c.name for c in await d.list_collections()}, "compact": compact,
         }
 

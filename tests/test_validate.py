@@ -121,7 +121,7 @@ async def test_gate_falls_back_to_second_pass_then_prod(index_client, monkeypatc
     runs = (await c.get("/api/collections/ex.org/index_runs")).json()
     assert runs[0]["target"] == "prod" and runs[0]["state"] == "succeeded" and runs[0]["external_ref"] == f"publish:{test_run}"
     live = (await c.get("/collections/ex.org?tab=overview&step=live")).text
-    assert f"from test run {test_run}" in live and f"{len(lines)} from S3 vectors" in live
+    assert f"from test run {test_run}" in live and f"{len(lines)} docs promoted from the test index" in live
     # notifications fired for each transition
     assert [n["new_status"] for n in notes][-2:] == ["config_generated", "live"] or "live" in [n["new_status"] for n in notes]
     assert "Live ✓" in (await c.get("/collections/ex.org/header")).text
