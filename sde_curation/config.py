@@ -87,10 +87,10 @@ class Settings(BaseSettings):
     prod_index_role_arn: str | None = None
     publish_bulk_docs: int = Field(default=100, ge=1, le=1000)  # docs per bulk request
     publish_bulk_max_bytes: int = Field(default=8_000_000, ge=100_000)  # AOSS caps a request at 10 MiB
-    # Same guards as the indexer (web/deletion_guard.py): refuse the whole run when tombstoning would
-    # remove more than this share of the collection's prod documents, or more than this many.
+    # Same guard as the indexer (web/deletion_guard.py): refuse the whole run when deleting would
+    # remove more than this share of the collection's prod documents, unless the curator confirms
+    # (allow_high_deletion, as the indexer's --allow-high-deletion). No cap on the absolute count.
     publish_deletion_abort_ratio: float = Field(default=0.90, ge=0.0, le=1.0)
-    publish_deletion_abort_max: int = Field(default=5000, ge=0)
     index_stall_timeout_s: float = 4 * 3600
     scrape_poll_interval_s: float = 15.0
 

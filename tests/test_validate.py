@@ -323,3 +323,53 @@ async def test_prod_validation_without_read_access_fails_instead_of_skipping(ind
     assert "not validated" in live and "Re-validate prod" in live
     header = (await c.get("/collections/ex.org/header")).text
     assert "Live ✓" not in header and ">⚠ prod not validated<" in header
+
+
+async def test_prod_high_deletion_refused_then_confirmed(index_client, monkeypatch):
+    """Like the indexer's --allow-high-deletion: a publish that would remove > 90% of the collection's
+    prod documents is refused with nothing written; the prod button then asks to continue, and the
+    confirmed run deletes them. The test button is not turned into an override by a prod refusal."""
+    c = index_client
+    settings = c.app.state.settings
+    settings.validation_delay_s = 0.1
+    await prepare(c)
+    await c.post("/api/collections/ex.org/index?target=test")
+    assert (await wait_job(c, "ex.org", timeout=40))["state"] == "succeeded"
+    settings.opensearch_endpoint_prod = "https://prod.example.aoss.amazonaws.com"
+    test_run = (await c.get("/api/collections/ex.org/index_runs")).json()[0]["run_id"]
+    prefix = f"curated_collections/ex_org/{test_run}"
+    manifest = json.loads(c.s3.get_object(Bucket="cosmos-idx", Key=f"{prefix}/manifest.json")["Body"].read())
+    lines = [json.loads(x) for x in c.s3.get_object(Bucket="cosmos-idx", Key=f"{prefix}/documents.jsonl")["Body"].read().splitlines()]
+    c.s3.put_object(Bucket="cosmos-idx", Key=f"vectorized/ex_org/{test_run}/batch_0001.jsonl", Body="\n".join(
+        json.dumps({**to_web_document(ln, manifest), "vectorized_title": [1], "vectorized_full_text": []}) for ln in lines).encode())
+    prod = FakeAoss()
+    stale = [prod.add(to_web_document({"url": f"https://ex.org/stale{i}", "title": f"S{i}"}, manifest))
+             for i in range(len(lines) * 10)]
+    c.app.state.jobs._publisher = lambda: ProdPublisher(settings, s3=S3("cosmos-idx", client=c.s3), prod=prod)
+    import sde_curation.jobs as jobs_mod
+
+    async def prod_direct(settings, *, collection_key, run_id, target, expected_titles, client=None):
+        hits = prod.search("sde-web", {"size": 10_000})["hits"]["hits"]
+        indexed = {h["_source"]["id"]: h["_source"]["title"] or "" for h in hits}
+        return compare(collection_key, run_id, {web_id(collection_key, u): t for u, t in expected_titles.items()}, indexed)
+
+    monkeypatch.setattr(jobs_mod, "validate_direct", prod_direct)
+
+    assert (await c.post("/api/collections/ex.org/index?target=prod")).status_code == 202
+    job = await wait_job(c, "ex.org", timeout=40)
+    assert job["state"] == "failed" and "deletion_threshold_exceeded" in job["error"], job
+    assert set(stale) <= set(prod.store) and not prod.bulk_calls  # refused with nothing written
+    header = (await c.get("/collections/ex.org/header")).text
+    assert "index?target=prod&amp;allow_high_deletion=true" in header and "PRODUCTION index" in header
+    live = (await c.get("/collections/ex.org?tab=overview&step=live")).text
+    assert "index?target=prod&amp;allow_high_deletion=true" in live and "delete more than 90% of the documents already in the production index" in live
+    test_step = (await c.get("/collections/ex.org?tab=overview&step=config_generated")).text
+    assert "target=test&amp;allow_high_deletion" not in test_step
+
+    assert (await c.post("/api/collections/ex.org/index?target=prod&allow_high_deletion=true")).status_code == 202
+    job = await wait_job(c, "ex.org", timeout=40)
+    assert job["state"] == "succeeded", job
+    st = job["progress"]["status"]
+    assert st["allow_high_deletion"] is True and st["deleted"] == len(stale) and st["deletion_ratio"] > 0.9
+    assert not set(stale) & set(prod.store) and len(prod.store) == len(lines)
+    assert (await c.get("/api/collections/ex.org")).json()["status"] == "live"

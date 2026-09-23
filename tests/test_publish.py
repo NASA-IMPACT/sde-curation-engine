@@ -107,14 +107,14 @@ async def test_publish_picks_newest_matching_vectors_falls_back_to_test_and_dele
     manifest = export([a, b, c, d])
     # older run: A at a stale version, B current; newer run: A current
     put_vectors("20260801T000000Z-000001", [vectorized(line("a", "A old"), "a-old"), vectorized(b, "b-1")])
-    put_vectors("20260905T000000Z-000002", [{**vectorized(a, "a-new"), "modified_date": "2024-08-22 21:08:32"}])
+    put_vectors("20260905T000000Z-000002", [{**vectorized(a, "a-new"), "modified_date": "2026-09-05 00:00:00"}])
     prod, test = FakeAoss(), FakeAoss()
     prod.add(vectorized(c, "c-prod", manifest))                                        # unchanged
     prod.add({**vectorized(line("b", "B before"), "b-prod", manifest)})                  # changed → update
     gone = prod.add(vectorized(line("gone", "Gone"), "gone", manifest))                  # removed → deleted
     hidden = prod.add({**vectorized(line("old", "Old"), "old", manifest), "public_visibility": False})  # hidden earlier
     legacy = prod.add({k: v for k, v in vectorized(line("legacy", "Legacy"), "l", manifest).items() if k != "version"})
-    test.add({**vectorized(d, "d-test", manifest), "modified_date": "2024-08-22 21:08:32"})                                         # only in the test index
+    test.add({**vectorized(d, "d-test", manifest), "modified_date": "2026-09-01 12:00:00"})                                         # only in the test index
 
     st = await run(publisher(prod, test))
 
@@ -128,12 +128,11 @@ async def test_publish_picks_newest_matching_vectors_falls_back_to_test_and_dele
     assert prod.by_id(to_web_document(d, manifest)["id"])[0]["vectorized_title"] == ["d-test"]
     # really gone — with the unversioned document from before the indexer and the one hidden earlier
     assert not {gone, hidden, legacy} & set(prod.store) and len(prod.store) == 4 and "delete_failed" not in st
-    # written documents carry the publish time in the index's format — one stamp, and never the date
-    # the test run left on the vectors or the test index; the untouched one is left alone
-    import re
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", pa["modified_date"])
-    pd = prod.by_id(to_web_document(d, manifest)["id"])[0]
-    assert pa["modified_date"] == pb["modified_date"] == pd["modified_date"] != "2024-08-22 21:08:32"
+    # modified_date is exactly what test holds — from the vectors or the test index — never a publish
+    # stamp; a source without one writes none, and the untouched document is left alone
+    assert pa["modified_date"] == "2026-09-05 00:00:00"
+    assert prod.by_id(to_web_document(d, manifest)["id"])[0]["modified_date"] == "2026-09-01 12:00:00"
+    assert "modified_date" not in pb
     assert "modified_date" not in prod.by_id(to_web_document(c, manifest)["id"])[0]
     phases = [e["phase"] for e in st["_events"] if "phase" in e]
     assert phases == ["preflight", "from_vectorized", "from_test_index", "delete"]
@@ -146,6 +145,27 @@ async def test_publish_picks_newest_matching_vectors_falls_back_to_test_and_dele
     # publishing again writes nothing
     again = await run(publisher(prod, test), "20260916T010000Z-cccccc")
     assert again["state"] == "succeeded" and again["changed"] == 0 and again["indexed"] == 0 and again["deleted"] == 0
+
+
+async def test_prod_takes_every_field_exactly_as_test_holds_it(aws):
+    a, b = line("a", "A"), line("b", "B")
+    manifest = export([a, b])
+    # test's own name and flags on a — no longer overridden from the manifest or forced visible
+    as_in_test = {**vectorized(a, "a", manifest), "collection_name": "Ex (test)", "public_visibility": False,
+                  "is_metadata_viewer": True, "executive_order_filter": True, "modified_date": "2026-09-01 12:00:00"}
+    # a vector copy of b filed under no collection is never taken: it would escape every later scan
+    stray = {k: v for k, v in vectorized(b, "b-stray", manifest).items() if k != "collection_key"}
+    put_vectors("20260905T000000Z-000002", [as_in_test, stray])
+    prod, test = FakeAoss(), FakeAoss()
+    test.add(vectorized(b, "b-test", manifest))
+
+    st = await run(publisher(prod, test))
+
+    assert (st["from_vectorized"], st["from_test_index"], st["missing"]) == (1, 1, 0), st
+    [pa] = prod.by_id(to_web_document(a, manifest)["id"])
+    assert pa == as_in_test
+    [pb] = prod.by_id(to_web_document(b, manifest)["id"])
+    assert pb["vectorized_title"] == ["b-test"] and pb["collection_key"] == KEY
 
 
 async def test_missing_vectors_fail_the_run_and_skip_removals(aws):
@@ -206,8 +226,21 @@ async def test_deletion_guard_refuses_before_anything_is_written(aws):
     st = await run(publisher(prod))
     assert st["state"] == "failed" and st["error"] == "deletion_threshold_exceeded" and not prod.bulk_calls
 
-    st = await run(publisher(prod, publish_deletion_abort_ratio=1.0, publish_deletion_abort_max=5))
-    assert st["error"] == "deletion_budget_exceeded" and not prod.bulk_calls
+    # confirmed (the indexer's --allow-high-deletion): the same run goes ahead
+    p = publisher(prod)
+    events: list[dict] = []
+
+    async def progress(e):
+        events.append(e)
+
+    st = await p.run(KEY, "20260916T000001Z-dddddd", SOURCE, progress, allow_high_deletion=True)
+    assert st["state"] == "succeeded" and st["allow_high_deletion"] is True and st["deleted"] == 20
+    for i in range(20):
+        prod.add(vectorized(line(f"old{i}", f"Old {i}"), "x", manifest))
+
+    # no cap on the count: at 100% allowed, removing everything but the one curated page goes ahead
+    st = await run(publisher(prod, publish_deletion_abort_ratio=1.0))
+    assert st["state"] == "succeeded" and st["deleted"] == 20
 
 
 @pytest.mark.parametrize("setup, reason", [

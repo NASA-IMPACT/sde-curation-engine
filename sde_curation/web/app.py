@@ -138,10 +138,25 @@ HIGH_DELETION_CONFIRM = (
     "This export would delete more than 90% of the documents already in the test index "
     "for this collection. Continue?"
 )
+HIGH_DELETION_CONFIRM_PROD = (
+    "This publish would delete more than 90% of the documents already in the PRODUCTION index "
+    "for this collection. Continue?"
+)
 
 
-def high_deletion_refused(*sources) -> bool:
+def _index_target(src) -> str | None:
+    """'test' / 'prod' for an index job (by kind) or an index run (by target)."""
+    kind = str(getattr(src, "kind", "") or "")
+    if kind in (JobKind.INDEX_TEST, JobKind.INDEX_PROD):
+        return "prod" if kind == JobKind.INDEX_PROD else "test"
+    return getattr(src, "target", None)
+
+
+def high_deletion_refused(*sources, target: str | None = None) -> bool:
+    """The last index job/run was refused by the 90% deletion guard — for `target` when given, so a
+    refused prod publish never turns the test button into an override (or the other way round)."""
     return any(src is not None and "deletion_threshold_exceeded" in (getattr(src, "error", None) or "")
+               and (target is None or _index_target(src) == target)
                for src in sources)
 
 
@@ -163,14 +178,18 @@ def next_action(c: Collection, job) -> dict:
         url = f"/api/collections/{cid}/index?target=test"
         action = {"label": "Index to test", "kind": "post", "url": url,
                   "hint": "Export the curated set to S3 and run the WEB_COSMOS indexer against the test index"}
-        if high_deletion_refused(job):
+        if high_deletion_refused(job, target="test"):
             action["url"] = url + "&allow_high_deletion=true"
             action["confirm"] = HIGH_DELETION_CONFIRM
         return action
     if c.status is Status.CONFIG_GENERATED:
         if getattr(c, "_validated", None):
-            return {"label": "Index to prod", "kind": "post", "url": f"/api/collections/{cid}/index?target=prod",
-                    "confirm": "Index this collection into PRODUCTION?", "hint": "Test run validated — publish to the production index"}
+            action = {"label": "Index to prod", "kind": "post", "url": f"/api/collections/{cid}/index?target=prod",
+                      "confirm": "Index this collection into PRODUCTION?", "hint": "Test run validated — publish to the production index"}
+            if high_deletion_refused(job, target="prod"):
+                action["url"] += "&allow_high_deletion=true"
+                action["confirm"] = HIGH_DELETION_CONFIRM_PROD
+            return action
         return {"label": "Re-validate", "kind": "post", "url": f"/api/collections/{cid}/index/revalidate",
                 "hint": "Check the test index against the curated set (count + titles)"}
     return {"label": "Live ✓", "kind": "done", "hint": "Re-scrape to start a new cycle"}
@@ -219,6 +238,7 @@ templates.env.globals.update(
     next_action=next_action, pipeline_steps=pipeline_steps, status_icon=status_icon, status_label=status_label,
     step_for_kind=lambda kind: STEP_FOR_KIND.get(str(kind)),
     high_deletion_refused=high_deletion_refused, HIGH_DELETION_CONFIRM=HIGH_DELETION_CONFIRM,
+    HIGH_DELETION_CONFIRM_PROD=HIGH_DELETION_CONFIRM_PROD,
     curation_divisions=list(CURATION_DIVISIONS),
 )
 
@@ -1529,7 +1549,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             job, run = await jobs.start_index(
                 c, target, actor=actor(request),
-                allow_high_deletion=allow_high_deletion and target == "test",
+                allow_high_deletion=allow_high_deletion,
             )
         except (JobConflict, IndexError_) as e:
             raise HTTPException(409, str(e)) from e
