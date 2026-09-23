@@ -134,6 +134,17 @@ STEP_FOR_KIND = {
 }
 
 
+HIGH_DELETION_CONFIRM = (
+    "This export would delete more than 90% of the documents already in the test index "
+    "for this collection. Continue?"
+)
+
+
+def high_deletion_refused(*sources) -> bool:
+    return any(src is not None and "deletion_threshold_exceeded" in (getattr(src, "error", None) or "")
+               for src in sources)
+
+
 def next_action(c: Collection, job) -> dict:
     """The one thing the curator should do next, given where the collection is."""
     cid = c.collection_id
@@ -149,8 +160,13 @@ def next_action(c: Collection, job) -> dict:
         return {"label": "Open curation", "kind": "link", "url": f"/collections/{cid}?tab=curate",
                 "hint": "Settle the exclusions, set metadata, then promote"}
     if c.status is Status.CURATED:
-        return {"label": "Index to test", "kind": "post", "url": f"/api/collections/{cid}/index?target=test",
-                "hint": "Export the curated set to S3 and run the WEB_COSMOS indexer against the test index"}
+        url = f"/api/collections/{cid}/index?target=test"
+        action = {"label": "Index to test", "kind": "post", "url": url,
+                  "hint": "Export the curated set to S3 and run the WEB_COSMOS indexer against the test index"}
+        if high_deletion_refused(job):
+            action["url"] = url + "&allow_high_deletion=true"
+            action["confirm"] = HIGH_DELETION_CONFIRM
+        return action
     if c.status is Status.CONFIG_GENERATED:
         if getattr(c, "_validated", None):
             return {"label": "Index to prod", "kind": "post", "url": f"/api/collections/{cid}/index?target=prod",
@@ -202,6 +218,7 @@ def status_label(st) -> str:
 templates.env.globals.update(
     next_action=next_action, pipeline_steps=pipeline_steps, status_icon=status_icon, status_label=status_label,
     step_for_kind=lambda kind: STEP_FOR_KIND.get(str(kind)),
+    high_deletion_refused=high_deletion_refused, HIGH_DELETION_CONFIRM=HIGH_DELETION_CONFIRM,
     curation_divisions=list(CURATION_DIVISIONS),
 )
 
@@ -1490,7 +1507,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ── indexing ───────────────────────────────────────────────────────
 
     @app.post("/api/collections/{collection_id}/index", status_code=202, response_model=None)
-    async def api_index(request: Request, collection_id: str, target: Literal["test", "prod"] = "test"):
+    async def api_index(
+        request: Request, collection_id: str, target: Literal["test", "prod"] = "test",
+        allow_high_deletion: bool = False,
+    ):
         """test: export curated (non-excluded) URLs to S3 and dispatch the WEB_COSMOS indexer.
         prod: publish the latest validated test run's vectors to the production index."""
         c = await must_get(request, collection_id)
@@ -1507,7 +1527,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(409, "prod indexing requires a successful, validated test run first")
         jobs: JobManager = request.app.state.jobs
         try:
-            job, run = await jobs.start_index(c, target, actor=actor(request))
+            job, run = await jobs.start_index(
+                c, target, actor=actor(request),
+                allow_high_deletion=allow_high_deletion and target == "test",
+            )
         except (JobConflict, IndexError_) as e:
             raise HTTPException(409, str(e)) from e
         await audit(request, "index.start", collection_id, f"{target} run {run.run_id}")

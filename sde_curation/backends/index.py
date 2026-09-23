@@ -34,17 +34,25 @@ class Dispatch:
 class IndexBackend(Protocol):
     name: str
 
-    async def dispatch(self, c: Collection, run_id: str, target: str) -> Dispatch: ...
+    async def dispatch(
+        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False
+    ) -> Dispatch: ...
 
     async def still_running(self, d: Dispatch) -> bool | None:
         """True/False if knowable, None if the backend cannot tell."""
         ...
 
 
-def indexer_command(c: Collection, run_id: str, target: str, *, python: str = "python3") -> list[str]:
+def indexer_command(
+    c: Collection, run_id: str, target: str, *, python: str = "python3",
+    allow_high_deletion: bool = False,
+) -> list[str]:
     """Exactly what the ECS task definition / CLI expects (api_scraper.py::_run_web_cosmos)."""
-    return [python, "api_scraper.py", "--source", "WEB_COSMOS", "--collection", c.collection_key,
-            "--run-id", run_id, "--target", target]
+    cmd = [python, "api_scraper.py", "--source", "WEB_COSMOS", "--collection", c.collection_key,
+           "--run-id", run_id, "--target", target]
+    if allow_high_deletion:
+        cmd.append("--allow-high-deletion")
+    return cmd
 
 
 # ── local subprocess ───────────────────────────────────────────────────
@@ -72,7 +80,9 @@ class LocalSubprocessIndexer:
             env["SAGEMAKER_ENDPOINT_NAME"] = s.sagemaker_endpoint_name
         return env
 
-    async def dispatch(self, c: Collection, run_id: str, target: str) -> Dispatch:
+    async def dispatch(
+        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False
+    ) -> Dispatch:
         if not (self.root / "api_scraper.py").is_file():
             raise IndexError_(f"indexer not found: {self.root / 'api_scraper.py'} (INDEXER_ROOT)")
         if not self.python.is_file():
@@ -81,7 +91,8 @@ class LocalSubprocessIndexer:
         log_dir.mkdir(parents=True, exist_ok=True)
         log = await asyncio.to_thread(open, log_dir / f"{c.collection_key}-{run_id}.log", "wb")
         proc = await asyncio.create_subprocess_exec(
-            *indexer_command(c, run_id, target, python=str(self.python)),
+            *indexer_command(c, run_id, target, python=str(self.python),
+                            allow_high_deletion=allow_high_deletion),
             cwd=self.root, env=self.env(), stdout=log, stderr=asyncio.subprocess.STDOUT,
         )
         self._procs[run_id] = proc
@@ -145,7 +156,9 @@ class EcsDispatchIndexer:
         self._creds_expire = float("inf")
         return self._ecs
 
-    def run_task_args(self, c: Collection, run_id: str, target: str) -> dict[str, Any]:
+    def run_task_args(
+        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False
+    ) -> dict[str, Any]:
         s = self.s
         return {
             "cluster": s.indexing_ecs_cluster,
@@ -159,14 +172,18 @@ class EcsDispatchIndexer:
             }},
             "overrides": {"containerOverrides": [{
                 "name": s.indexing_container_name,
-                "command": indexer_command(c, run_id, target),
+                "command": indexer_command(c, run_id, target, allow_high_deletion=allow_high_deletion),
             }]},
             "startedBy": f"sde-curation-engine:{c.collection_id}"[:36],
         }
 
-    async def dispatch(self, c: Collection, run_id: str, target: str) -> Dispatch:
+    async def dispatch(
+        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False
+    ) -> Dispatch:
         ecs = self._client()
-        resp = await asyncio.to_thread(ecs.run_task, **self.run_task_args(c, run_id, target))
+        resp = await asyncio.to_thread(
+            ecs.run_task, **self.run_task_args(c, run_id, target, allow_high_deletion=allow_high_deletion)
+        )
         if resp.get("failures"):
             raise IndexError_(f"ecs:RunTask failed: {resp['failures']}")
         task = resp["tasks"][0]

@@ -22,7 +22,8 @@ from sde_curation.engine.export import (
     mint_run_id,
     write_jsonl,
 )
-from sde_curation.models import Collection, CuratedUrl, Division, ExportManifest
+from sde_curation.models import Collection, CuratedUrl, Division, ExportManifest, JobKind, JobRun, JobState, Status
+from sde_curation.web.app import HIGH_DELETION_CONFIRM, next_action
 from tests.conftest import prepare, wait_job
 
 INDEXER_ROOT = Path(__file__).resolve().parents[2] / "sde-api-scrapers"
@@ -78,7 +79,18 @@ def test_indexer_command_matches_task_definition():
     assert indexer_command(COLL, "r1", "test") == [
         "python3", "api_scraper.py", "--source", "WEB_COSMOS", "--collection", "ex", "--run-id", "r1", "--target", "test",
     ]
+    assert indexer_command(COLL, "r1", "test", allow_high_deletion=True)[-1] == "--allow-high-deletion"
     assert mint_run_id()[8] == "T" and len(mint_run_id()) == 23
+
+
+def test_next_action_confirms_high_deletion():
+    c = COLL.model_copy(update={"status": Status.CURATED})
+    job = JobRun(collection_id=c.collection_id, kind=JobKind.INDEX_TEST, state=JobState.FAILED,
+                 error="indexer failed: deletion_threshold_exceeded")
+    action = next_action(c, job)
+    assert "allow_high_deletion=true" in action["url"]
+    assert action["confirm"] == HIGH_DELETION_CONFIRM
+    assert "allow_high_deletion" not in next_action(c, None)["url"]
 
 
 @pytest.fixture
