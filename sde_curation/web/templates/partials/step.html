@@ -79,7 +79,7 @@
   <div class="inline">
     {% if info.state == 'todo' %}<span class="muted">Promote the deltas in step 3 first.</span>
     {% else %}
-      {% set deletion_warn = high_deletion_refused(job, stats.last_test_run) %}
+      {% set deletion_warn = high_deletion_refused(job, stats.last_test_run, target='test') %}
       {{ btn('Index to test', '/api/collections/' ~ cid ~ '/index?target=test' ~ ('&allow_high_deletion=true' if deletion_warn else ''),
              'Export ' ~ stats.exportable ~ ' curated URLs to S3 and run the WEB_COSMOS indexer against the test index',
              primary=True, disabled=(not stats.exportable or c.delta_count > 0),
@@ -113,7 +113,7 @@
   </dl>
   {% else %}<p class="muted">Export the curated set to S3 and run the WEB_COSMOS indexer against the test index (<code>{{ settings.web_index_name }}</code>). The indexer reports back through <code>status.json</code> / <code>validation.json</code>.</p>{% endif %}
   <div class="inline">
-    {% set deletion_warn = high_deletion_refused(job, r) %}
+    {% set deletion_warn = high_deletion_refused(job, r, target='test') %}
     {{ btn('Re-index to test' if r else 'Index to test', '/api/collections/' ~ cid ~ '/index?target=test' ~ ('&allow_high_deletion=true' if deletion_warn else ''),
            'Export the curated set and run the test indexer', primary=(info.state != 'done'),
            disabled=(c.status not in ('curated','config_generated','live') or not stats.exportable or c.delta_count > 0),
@@ -150,10 +150,11 @@
   {% endif %}
   {% set gate = t and t.state == 'succeeded' and t.validation_passes(settings.validation_title_match_threshold) %}
   <div class="inline">
-    {{ btn('Re-index to prod' if pr else 'Index to prod', '/api/collections/' ~ cid ~ '/index?target=prod',
+    {% set prod_deletion_warn = high_deletion_refused(job, pr, target='prod') %}
+    {{ btn('Re-index to prod' if pr else 'Index to prod', '/api/collections/' ~ cid ~ '/index?target=prod' ~ ('&allow_high_deletion=true' if prod_deletion_warn else ''),
            "Publish the validated test run's vectors to the PRODUCTION index", primary=True,
            disabled=(not gate or c.status not in ('config_generated','live') or c.delta_count > 0),
-           confirm='Index ' ~ stats.exportable ~ ' URLs into the PRODUCTION index?') }}
+           confirm=(HIGH_DELETION_CONFIRM_PROD if prod_deletion_warn else 'Index ' ~ stats.exportable ~ ' URLs into the PRODUCTION index?')) }}
     {% if pr and pr.state == 'succeeded' %}{{ btn('Re-validate prod', '/api/collections/' ~ cid ~ '/index/revalidate?target=prod', 'Check the production index against the curated set now (count + titles, same gate as test)') }}{% endif %}
     <a class="button secondary" href="{{ settings.prod_frontend_url }}" target="_blank" rel="noopener"
        title="Open the production search front end in a new tab to verify what is live">Open prod front end ↗</a>
@@ -162,6 +163,7 @@
 {% endif %}
 
 {% if job and job.state == 'failed' and (step == c.status or step == stats.failed_step) %}
-  {% if high_deletion_refused(job) %}<div class="banner warn">This export would delete more than 90% of the documents already in the test index. Confirm Index to test to continue.</div>
+  {% if high_deletion_refused(job, target='prod') %}<div class="banner warn">This publish would delete more than 90% of the documents already in the production index. Confirm Index to prod to continue.</div>
+  {% elif high_deletion_refused(job) %}<div class="banner warn">This export would delete more than 90% of the documents already in the test index. Confirm Index to test to continue.</div>
   {% else %}<div class="err">Last {{ job.kind }} failed: {{ job.error }}</div>{% endif %}
 {% endif %}

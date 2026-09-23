@@ -388,7 +388,7 @@ against the collection. The engine log shows `validated_by: direct` and **no** 4
 collection moves to **config_generated** and **Index to prod** becomes available.
 
 **6. Wrapper**: search the dev elastic wrapper (its own URL, from that repo's outputs) for a title
-you saw in the dump. It reads the same `sde-web-subset` index the indexer just wrote, so the
+you saw in the dump. It reads the same `sde-web` index the indexer just wrote, so the
 document is there.
 
 **7. State survives restarts**:

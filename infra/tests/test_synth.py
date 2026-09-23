@@ -196,7 +196,7 @@ def test_dev_publishes_into_its_own_collection(template):
     assert "PROD_INDEX_ROLE_ARN" not in _container_env(template)
     [policy] = template.find_resources("AWS::OpenSearchServerless::AccessPolicy").values()
     body = str(policy["Properties"]["Policy"])
-    assert "index/${Collection}/sde-web-subset" in body and "aoss:WriteDocument" in body
+    assert "index/${Collection}/sde-web" in body and "aoss:WriteDocument" in body
 
 
 @pytest.mark.parametrize("env", ["dev", "test"])

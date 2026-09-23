@@ -72,9 +72,9 @@ natural-language text distribution:
 - **Correction from the real crawl (dev, 2026-09-22): memory was *not* flat in bytes when pages are
   big.** The synthetic crawls above had small pages. ascl.net's 6.7 GB crawl has thousands of ~1 MB
   pages, and chunks of a fixed 500 pages made ~500 MB chunks: the engine peaked at ~5 GB (6.6 GB
-  high-water mark) and kept 2.8 GB resident afterwards. The working tree fixes both (1 MB byte cap
-  per chunk; connection recycle + `malloc_trim` after the ingest) — see *Still open* and
-  `docs/architecture.md` §1.
+  high-water mark) and kept 2.8 GB resident afterwards. Fixed in `3cb06e4` (1 MB byte cap per
+  chunk; connection recycle + `malloc_trim` after the ingest) and confirmed on dev: the same crawl
+  now peaks at 289 MB — see *Ingest fixes on dev* and `docs/architecture.md` §1.
 
 ## Measured timings, 100K-URL collection (688 MB crawl)
 
@@ -214,6 +214,32 @@ only earlier backup is the 08:31Z automated snapshot). Checked afterwards:
 | curated text | every included curated row resolves to non-empty text (aurorasaurus 6, hytes 43, techport 23) |
 | workflow on V9 | scrape, AI patterns, AI metadata and test index all succeeded (hytes, techport); ascl.net's 6.7 GB crawl ingested (45,024 read → 22,324 kept) |
 
+### Ingest fixes on dev, 2026-09-22
+
+`3cb06e4` ("stream byte wise") deployed as task def rev 28 (4 vCPU / 16 GB) at 20:03Z; the deployed
+image was checked to carry `_INGEST_BATCH_BYTES = 1 MiB` and `Database.recycle_connections`.
+ascl.net was deleted and its existing crawl reloaded (job 73), against the 17:24Z load of the same
+crawl on the previous code (job 58). Container Insights and RDS metrics at 1-minute resolution:
+
+| | before (job 58) | after (job 73) |
+|---|---|---|
+| engine container peak | 4,976 MB | **289 MB** |
+| engine process high-water mark (`VmHWM`) | 6.6 GB | **299 MB** — the task's whole life, this load included |
+| resident once idle | ~2,900 MB | **~200 MB** |
+| job duration | 379 s | **351 s** |
+| RDS write, streaming phase (~4.5 min) | 1–19 MB/s, 12–92 IOPS, 6–32 ms | **15–20 MB/s, 90–110 IOPS, 9–16 ms** |
+| RDS write, store phase (`page_text` + `dump_urls` INSERTs) | 100 → 63 → 43 MB/s, up to 70 ms | 77 → 57 → 28 MB/s, up to 45 ms |
+| RDS CPU peak | 56% | 36% (~14% while streaming) |
+
+Engine memory, per minute through the reload: 136 → 253 → 269 → 279 → 289 → 278 → 255 → 219 MB —
+flat across the band of ~1 MB pages that used to push it past 4 GB. The history note reads
+"22324 documents (45,024 read, 22,700 duplicate links dropped)", and the recompute that followed
+(2 s) produced 22,324 delta URLs.
+
+**The ingest is now engine-CPU-bound, not database-bound.** While streaming, the engine sits at one
+full vCPU (parse, hash, COPY formatting on one thread) while RDS is at ~14% CPU with ~12 ms write
+latency. The next speed-up is using the task's other three vCPUs; the database has headroom.
+
 The database is reachable only from inside the VPC. Run the pre-flight through ECS Exec on the
 running task, which already holds the credentials (needs `session-manager-plugin`; the image has no
 `psql`, so use python + psycopg, and keep the command short — a long one can end with
@@ -240,9 +266,10 @@ Status for **test**, 2026-09-22:
 | 5. Deploy | ⬜ to do |
 | 6. Watch first boot | ⬜ to do |
 | 7. Verify | ⬜ to do |
-| 8. `make db-compact` | ⬜ later, in a maintenance window |
+| 8. Check for dead space | ⬜ after the deploy: one read-only size query; `make db-compact` only if it finds a large gap *and* free storage is tight (see 8.) |
 
-Dev: deployed and verified (see *Result on dev*); step 8 still open there too.
+Dev: V9 deployed and verified (see *Result on dev*); ingest fixes deployed and measured (*Ingest
+fixes on dev*); step 8 checked — nothing to compact (see 8.).
 
 1. **Run the pre-flight** (above) against the environment you are about to deploy. Query 2 must be
    empty. If it is not, stop: those rows will change text, and the change is unrecoverable once the
@@ -282,10 +309,54 @@ Dev: deployed and verified (see *Result on dev*); step 8 still open there too.
 7. **Verify.** Open a curated collection and check a row still shows its text length; run an export
    to a test index and confirm the document count matches `curated_count`.
 
-8. **Reclaim the space, later.** `DROP COLUMN` does not free the TOAST the column pointed at. The
-   NULLed rows become dead and autovacuum returns them to each table's free space, which is what
-   stops the volume growing; to hand space back to the OS, run `make db-compact` (VACUUM FULL,
-   ACCESS EXCLUSIVE lock, service stopped) in a maintenance window.
+8. **Check for dead space; compact only if it is worth a window.** Usually nothing to do.
+
+   *What autovacuum already does.* It marks dead rows' space reusable inside their table, which is
+   what stops the volume growing, and it cuts empty pages off the end of a file. Every re-crawl
+   deletes and re-inserts the dump and `_gc_page_text` drops unreferenced blobs, and autovacuum
+   recycles that churn by itself.
+
+   *What `make db-compact` adds.* `VACUUM (FULL, ANALYZE)` rewrites each table into a packed new
+   file and hands every unused page back to the filesystem. It holds an ACCESS EXCLUSIVE lock (every
+   read and write on the table waits) and needs free space for a full copy of the table, so it wants
+   the service stopped. It also cannot run from a laptop: the RDS is private, so it has to go
+   through a one-off task in the VPC (ECS Exec).
+
+   *Why it is rarely worth it.* **RDS never shrinks allocated storage.** Compacting raises
+   `FreeStorageSpace`; the allocated size, and the bill, stay where they are. The only thing it
+   buys is headroom before storage autoscaling grows the volume. The one place V9 leaves space
+   that autovacuum cannot reuse is the TOAST of the dropped `full_text` columns: that space
+   belongs to `dump_urls` / `curated_urls`, which no longer store text, so `page_text` can never
+   reuse it. Once every row's old text is dead that TOAST is empty and autovacuum can truncate it;
+   whatever it cannot truncate is bounded by the pre-V9 text size (~490 MB on test, against 20 GB
+   allocated). Skipping this step costs at most that much disk; it has no effect on correctness or
+   speed.
+
+   *What to do.* A few hours after the deploy, run this read-only query (ECS Exec, as for the
+   pre-flight) and look at `FreeStorageSpace` in CloudWatch:
+   ```sql
+   SELECT s.relname, pg_size_pretty(pg_total_relation_size(s.relid)) AS total,
+          pg_size_pretty(COALESCE(pg_total_relation_size(c.reltoastrelid), 0)) AS toast,
+          s.n_live_tup, s.n_dead_tup, s.last_autovacuum
+     FROM pg_stat_user_tables s JOIN pg_class c ON c.oid = s.relid
+    WHERE s.relname IN ('dump_urls', 'curated_urls', 'page_text');
+   ```
+   Schedule `make db-compact` (service at 0, one-off task, the three `VACUUM (FULL, ANALYZE)`
+   statements, service back to 1) only if `dump_urls` / `curated_urls` are still far larger than
+   their rows justify *and* free storage is getting close to the autoscaling threshold.
+
+   *Dev, 2026-09-22 20:20Z — checked, not compacted:*
+
+   | Table | heap | TOAST | indexes | total | live rows | dead rows | last autovacuum |
+   |---|---|---|---|---|---|---|---|
+   | `page_text` | 24.2 MB | 1,726 MB | 5.8 MB | 1,756 MB | 21,944 | 0 | 20:11:53Z |
+   | `dump_urls` | 4.9 MB | 8.1 MB | 10.8 MB | 23.7 MB | 22,411 | 0 | 20:11:52Z |
+   | `curated_urls` | 0.04 MB | 0.09 MB | 0.19 MB | 0.34 MB | 73 | 0 | 18:09:26Z |
+
+   Database 1,799 MB, RDS free storage 14.35 GiB of 20 GiB. Autovacuum had already cleared the
+   delete-and-reload of ascl.net (0 dead rows anywhere, 0 dead TOAST chunks in `page_text`'s 865,689);
+   `page_text` holds 2.95 GB of text as 1.73 GB of compressed TOAST. The most a compact could have
+   returned is ~110 MB, so it was not worth stopping the service.
 
 ## Rollback
 
@@ -312,15 +383,15 @@ So:
   120 s ALB health-check grace to matter. Running V9 out-of-band, before rolling the image, would
   decouple the schema change from the deploy.
 - **A real LLM per-call latency** (see above) — everything else in the workflow is measured.
-- **Ingest memory fixes, not yet committed or deployed.** ascl.net on dev peaked at ~5 GB (6.6 GB
-  high-water mark) and left 2.8 GB resident after the job. The working tree now caps each ingest
-  chunk at 500 pages *or* 1 MB of text, replaces the pooled DB connections after the COPY, and calls
-  `malloc_trim`. On a local ascl.net-shaped crawl: peak 1.7 GB → 340 MB, after-job 445 MB → 90 MB,
-  ingest 90 s → 70 s. Decide whether they ride along with the test deploy (5.) or follow it.
-  `docs/architecture.md` (section 1, *The text paths*) has the breakdown.
+- **Ingest throughput is one vCPU.** Parsing, hashing and COPY formatting run on one thread; on dev
+  the 6.7 GB ascl.net crawl streams at ~20 MB/s with RDS mostly idle. Spreading `take()` over the
+  task's vCPUs is the lever if a crawl this size needs to load faster than ~6 minutes.
 
 Closed:
 
+- ~~Ingest memory fixes, not yet committed or deployed~~ — `3cb06e4`, on dev since 2026-09-22
+  20:03Z: ascl.net peak 4,976 → 289 MB, idle after 2.9 GB → 200 MB, 379 → 351 s (*Ingest fixes on
+  dev*). They are in the same commit range as V9, so the test deploy (step 5) carries them.
 - ~~`docs/architecture.md` is stale~~ — updated 2026-09-22: the streamed ingest (chunk caps,
   connection recycle), the streamed export, V9's `page_text`, promote naming text by hash, and the
   duplicate-links count.

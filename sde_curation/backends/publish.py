@@ -51,8 +51,6 @@ VECTOR_FIELDS = ("vectorized_title", "vectorized_full_text")
 DOC_FIELDS = (*_PASSTHROUGH_FIELDS, *_COLLECTION_DEFAULTED_FIELDS, "id", "collection_key", "collection_name",
               "public_visibility", "is_metadata_viewer", "executive_order_filter", "version", "modified_date",
               *VECTOR_FIELDS)
-# web_processor.format_modified_date: the format sde-web already holds, in UTC
-_MODIFIED_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 _PAGE = 1000
 _LOOKUP_CHUNK = 100
@@ -207,18 +205,20 @@ def scan_ids(client, index: str, collection_key: str) -> list[str]:
             return out
 
 
-def deletion_decision(candidates: list[str], state_count: int, settings: Settings) -> float:
-    """Raise when the deletions would remove too much (web/deletion_guard.py); returns the ratio."""
+def deletion_decision(candidates: list[str], state_count: int, settings: Settings, *,
+                      allow_high_deletion: bool = False) -> float:
+    """Raise when the deletions would remove too much of the collection (web/deletion_guard.py),
+    unless the curator confirmed it — the indexer's --allow-high-deletion; returns the ratio.
+    There is no cap on the absolute number."""
     if not candidates:
         return 0.0
     ratio = len(candidates) / state_count if state_count else 1.0
-    if len(candidates) > settings.publish_deletion_abort_max:
-        raise PublishRefused(
-            "deletion_budget_exceeded",
-            f"{len(candidates)} documents would be removed from prod, above PUBLISH_DELETION_ABORT_MAX="
-            f"{settings.publish_deletion_abort_max} — refusing with nothing written",
-        )
     if ratio > settings.publish_deletion_abort_ratio:
+        if allow_high_deletion:
+            log.warning("deletion ratio %.1f%% (%d/%d) exceeds PUBLISH_DELETION_ABORT_RATIO=%.0f%% — "
+                        "proceeding with allow_high_deletion", ratio * 100, len(candidates), state_count,
+                        settings.publish_deletion_abort_ratio * 100)
+            return ratio
         raise PublishRefused(
             "deletion_threshold_exceeded",
             f"{len(candidates)}/{state_count} ({ratio:.0%}) of the collection's prod documents would be removed, "
@@ -229,6 +229,19 @@ def deletion_decision(candidates: list[str], state_count: int, settings: Setting
 
 def has_vectors(doc: dict[str, Any]) -> bool:
     return isinstance(doc.get("vectorized_title"), list) and isinstance(doc.get("vectorized_full_text"), list)
+
+
+def usable_source(doc: dict[str, Any], key: str, version: str) -> bool:
+    """A test copy prod can take as-is: the validated version, with vectors, filed under this
+    collection (a copy without the collection_key would escape every later scan and deletion)."""
+    return doc.get("version") == version and doc.get("collection_key") == key and has_vectors(doc)
+
+
+def to_prod_document(src: dict[str, Any]) -> dict[str, Any]:
+    """The test copy exactly as test holds it — modified_date, collection name and visibility
+    flags included; this app never sets a field of its own. Only fields outside the sde-web
+    document are dropped."""
+    return {f: src[f] for f in DOC_FIELDS if f in src}
 
 
 # ── the run ────────────────────────────────────────────────────────────
@@ -246,24 +259,23 @@ class ProdPublisher:
         self.prod = prod
         self.test = test
         self.index = settings.web_index_name
-        self.published_at = datetime.now(UTC).strftime(_MODIFIED_DATE_FORMAT)  # one stamp per publish
 
     async def _call(self, fn, *args, **kw):
         return await asyncio.to_thread(fn, *args, **kw)
 
-    async def run(self, collection_key: str, run_id: str, source_run_id: str, on_progress: ProgressCb) -> dict[str, Any]:
+    async def run(self, collection_key: str, run_id: str, source_run_id: str, on_progress: ProgressCb, *,
+                  allow_high_deletion: bool = False) -> dict[str, Any]:
         t0 = time.time()
-        self.published_at = datetime.now(UTC).strftime(_MODIFIED_DATE_FORMAT)
         status: dict[str, Any] = {
             "run_id": run_id, "collection_key": collection_key, "target": "prod", "index": self.index,
             "mode": "publish_vectors", "source_test_run": source_run_id, "state": "failed",
             "documents_in_export": 0, "unchanged": 0, "changed": 0, "indexed": 0, "failed": 0, "deleted": 0,
             "from_vectorized": 0, "from_test_index": 0, "missing": 0, "missing_urls": [],
-            "deletion_ratio": 0.0, "deletions_skipped": [], "error": None,
+            "deletion_ratio": 0.0, "allow_high_deletion": allow_high_deletion, "deletions_skipped": [], "error": None,
             "started_at": datetime.now(UTC).isoformat(), "finished_at": None,
         }
         try:
-            await self._run(collection_key, source_run_id, status, on_progress)
+            await self._run(collection_key, source_run_id, status, on_progress, allow_high_deletion)
             if status["failed"] or status["missing"]:
                 status["error"] = "vectors_missing" if status["missing"] else "upsert_failed"
             else:
@@ -283,10 +295,11 @@ class ProdPublisher:
                 log.warning("could not write publish status.json: %s", e)
         return status
 
-    async def _run(self, key: str, source_run_id: str, status: dict[str, Any], progress: ProgressCb) -> None:
+    async def _run(self, key: str, source_run_id: str, status: dict[str, Any], progress: ProgressCb,
+                   allow_high_deletion: bool = False) -> None:
         # 1. what was validated
         await progress({"phase": "preflight", "source_test_run": source_run_id})
-        manifest, expected, urls = await self._load_export(key, source_run_id)
+        _, expected, urls = await self._load_export(key, source_run_id)
         status["documents_in_export"] = len(expected)
 
         # 2. pre-flight against prod — before anything is written
@@ -307,7 +320,8 @@ class ProdPublisher:
         held = set(await self._call(scan_ids, self.prod, self.index, key)) | set(state)
         assert_owned(key, held, "collection_scan")
         candidates = sorted(held - set(expected))
-        status["deletion_ratio"] = round(deletion_decision(candidates, len(held), self.s), 6)
+        status["deletion_ratio"] = round(deletion_decision(candidates, len(held), self.s,
+                                                           allow_high_deletion=allow_high_deletion), 6)
         await progress({"phase": "from_vectorized", "documents_in_export": len(expected),
                         "unchanged": status["unchanged"], "changed": len(needed), "to_remove": len(candidates)})
 
@@ -323,10 +337,10 @@ class ProdPublisher:
         # 3. vectors from S3, newest run first
         async for rec in self._vectorized_records(key):
             i = rec.get("id")
-            if i in needed and rec.get("version") == expected[i] and has_vectors(rec):
+            if i in needed and usable_source(rec, key, expected[i]):
                 needed.discard(i)
                 status["from_vectorized"] += 1
-                if batch.add(self._normalize(rec, manifest)):
+                if batch.add(to_prod_document(rec)):
                     await flush()
                 if not needed:
                     break
@@ -339,10 +353,10 @@ class ProdPublisher:
                 for chunk in _chunks(sorted(needed), _TEST_FETCH_CHUNK):
                     for src in await self._call(self._test_docs, key, chunk):
                         i = src.get("id")
-                        if i in needed and src.get("version") == expected[i] and has_vectors(src):
+                        if i in needed and usable_source(src, key, expected[i]):
                             needed.discard(i)
                             status["from_test_index"] += 1
-                            if batch.add(self._normalize(src, manifest)):
+                            if batch.add(to_prod_document(src)):
                                 await flush()
                 await flush()
             except Exception as e:  # noqa: BLE001 - the rest is reported as missing
@@ -423,18 +437,6 @@ class ProdPublisher:
                     continue
                 for rec in records:
                     yield rec
-
-    def _normalize(self, rec: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
-        doc = {f: rec.get(f) for f in DOC_FIELDS if f in rec}
-        # in prod "modified" is when the document went live, never the test run's stamp on the vectors
-        doc["modified_date"] = self.published_at
-        # non-content fields follow the validated export, not whenever the vectors were made
-        doc["collection_key"] = manifest["collection_key"]
-        doc["collection_name"] = manifest.get("collection_name")
-        doc["public_visibility"] = True
-        doc["is_metadata_viewer"] = False
-        doc["executive_order_filter"] = False
-        return doc
 
     def _test_docs(self, key: str, ids: list[str]) -> list[dict[str, Any]]:
         r = self.test.search(index=self.index, body={

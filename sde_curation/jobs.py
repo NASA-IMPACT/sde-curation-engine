@@ -671,7 +671,11 @@ class JobManager:
             raise IndexError_("OPENSEARCH_ENDPOINT_PROD is not set — nowhere to publish to")
         run = IndexRun(run_id=mint_run_id(), collection_id=c.collection_id, target=target, started_by=actor)
         if target == "prod":
-            job = await self._start(c, JobKind.INDEX_PROD, lambda job: self._run_publish_prod(c, job, run), actor=actor)
+            job = await self._start(
+                c, JobKind.INDEX_PROD,
+                lambda job: self._run_publish_prod(c, job, run, allow_high_deletion=allow_high_deletion),
+                actor=actor,
+            )
         else:
             job = await self._start(
                 c, JobKind.INDEX_TEST,
@@ -771,7 +775,9 @@ class JobManager:
         c.index_key, c.index_name = key, name
         log.info("%s: indexed as '%s' (%s)", c.collection_id, key, name)
 
-    async def _run_publish_prod(self, c: Collection, job: JobRun, run: IndexRun) -> None:
+    async def _run_publish_prod(
+        self, c: Collection, job: JobRun, run: IndexRun, *, allow_high_deletion: bool = False
+    ) -> None:
         """Index to prod: publish the vectors of the latest validated test run straight into the
         production index (backends/publish.py) — no export, no indexer task, no re-vectorizing —
         then run the same validation gate as test against prod. The collection only becomes `live`
@@ -796,7 +802,8 @@ class JobManager:
                 self._emit(c, job)
 
             await progress({"source_test_run": source.run_id, "exported": source.exported})
-            st = await publisher.run(c.collection_key, run.run_id, source.run_id, progress)
+            st = await publisher.run(c.collection_key, run.run_id, source.run_id, progress,
+                                     allow_high_deletion=allow_high_deletion)
             status = IndexStatus.model_validate(st)
             run.status = st
             job.progress = {**job.progress, "phase": "done", "status": st}
