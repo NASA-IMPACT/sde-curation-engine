@@ -3,7 +3,7 @@
 {% set cid = c.collection_id %}
 {% set a = next_action(c, job) %}
 {% set running = job and job.state == 'running' %}
-<div class="wb-head">
+<div class="wb-head"{% if job and job.state in ('queued', 'running') %} data-job-live{% endif %}>
   <div class="wb-ident">
     <a class="crumb" href="/">← Collections</a>
     <h1 class="wb-name">{{ c.name }}
@@ -12,6 +12,7 @@
     <div class="badges">
       {% include "partials/status_badge.html" %}
       {% if running %}<span class="chip busy"><span class="spinner"></span> {{ job.kind }} · {{ job_progress(job) }}</span>
+      {% elif job and job.state == 'failed' and high_deletion_refused(job) %}<span class="chip warn" title="{{ job.error }}">⚠ high deletion — confirm to continue</span>
       {% elif job and job.state == 'failed' %}<span class="chip fail" title="{{ job.error }}">✗ last {{ job.kind }} failed</span>{% endif %}
     </div>
   </div>

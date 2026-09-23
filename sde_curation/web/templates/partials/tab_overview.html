@@ -1,5 +1,6 @@
 {# The panel of the selected pipeline step, details, last job, advanced. Shown alone under most
    steps; under Curating / Curated it is the Overview tab. #}
+{% from "partials/job_progress.html" import dropped %}
 <div id="step-panel" class="next">
   {% include "partials/step.html" %}
 </div>
@@ -20,7 +21,8 @@
                 hx-vals='js:{division: document.getElementById("cdiv").value}'>
             <select id="cdiv" name="division" {% if job and job.state == 'running' %}disabled{% endif %}
                     title="one division for the whole collection, or General to have the AI suggest one per page">
-              {% for d in divisions %}<option {% if c.division == d %}selected{% endif %}>{{ d }}{% if d == 'General' %} — not assigned{% endif %}</option>{% endfor %}
+              {# value="{{ d }}": the label has a suffix, and the form posts the value, not the label. #}
+              {% for d in divisions %}<option value="{{ d }}" {% if c.division == d %}selected{% endif %}>{{ d }}{% if d == 'General' %} — not assigned{% endif %}</option>{% endfor %}
             </select>
             <button class="secondary mini" {% if job and job.state == 'running' %}disabled{% endif %}>Save</button>
           </form>
@@ -41,7 +43,7 @@
       <dt>Started</dt><dd>{{ job.started_at.strftime('%Y-%m-%d %H:%M:%S') }}Z</dd>
       {% if job.finished_at %}<dt>Took</dt><dd>{{ (job.finished_at - job.started_at).seconds }}s</dd>{% endif %}
       {% if job.error %}<dt>Error</dt><dd class="err">{{ job.error }}</dd>{% endif %}
-      {% if job.progress.docs is defined %}<dt>Result</dt><dd>{{ job.progress.docs }} docs{% if job.progress.failed %}, {{ job.progress.failed }} failed{% endif %}</dd>{% endif %}
+      {% if job.progress.docs is defined %}<dt>Result</dt><dd>{{ job.progress.docs }} docs{% if job.progress.failed %}, {{ job.progress.failed }} failed{% endif %}{{ dropped(job.progress) }}</dd>{% endif %}
     </dl>
     <p><a href="/collections/{{ c.collection_id }}?tab=activity">All jobs & history →</a></p>
     {% else %}<p class="muted">No jobs yet — start with <b>Scrape</b>.</p>{% endif %}

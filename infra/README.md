@@ -73,7 +73,7 @@ Changing an account value later: edit `envs/<env>.json`, `make infra-seed`, `mak
 | `COSMOS_INDEX_BUCKET`, `OPENSEARCH_ENDPOINT_TEST/PROD` | SSM `cosmos_index_bucket`, `opensearch_endpoint_*` |
 | `PROD_INDEX_ROLE_ARN` (test only) | SSM `prod_index_role_arn`, the prod-account role "Index to prod" writes through ([docs/prod-index-access.md](../docs/prod-index-access.md)) |
 | `CRAWLER_S3_PREFIX` | `EnvConfig.crawler_s3_prefix` (`sde-curation-engine-prototype` in dev, bucket root in test) |
-| `WEB_INDEX_NAME`, `OPENAI_MODEL` | `EnvConfig` (`WEB_INDEX_NAME`: `sde-web-subset` in dev, `sde-web` in test and prod) |
+| `WEB_INDEX_NAME`, `OPENAI_MODEL` | `EnvConfig` (`WEB_INDEX_NAME`: `sde-web` in every env) |
 | `PUBLIC_BASE_URL`, `AUTH_COOKIE_SECURE` | the CloudFront URL, `true` |
 | secrets → `OPENAI_API_KEY`, `APP_PASSWORD`, `SESSION_SECRET`, `NOTIFY_WEBHOOK_URL` | `/sde-curation-engine/<env>/*` in Secrets Manager |
 

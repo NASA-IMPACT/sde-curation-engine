@@ -35,7 +35,8 @@ scoped to a single `collection_key`. Before writing, the engine runs the same gu
 production indexer. It refuses to run if:
 - ids would collide or duplicate
 - the collection filter does not isolate one collection
-- more than 90% or 5,000 of a collection's documents would be deleted
+- more than 90% of a collection's documents would be deleted (no cap on the count) — unless the
+  curator confirms: the Index to prod button then re-runs with `allow_high_deletion=true`
 
 ---
 
@@ -173,7 +174,7 @@ Refusals happen before anything is written:
 | `index_not_found` | prod `sde-web` does not exist |
 | `id_scheme_collision` / `duplicate_business_ids` | prod has this collection under ids the engine would not mint, so updating them would duplicate them |
 | `scope_filter_ineffective` | the collection filter does not isolate the collection |
-| `deletion_threshold_exceeded` / `deletion_budget_exceeded` | more than `PUBLISH_DELETION_ABORT_RATIO` (90%) or `PUBLISH_DELETION_ABORT_MAX` (5000) of the collection's prod documents would be deleted |
+| `deletion_threshold_exceeded` | more than `PUBLISH_DELETION_ABORT_RATIO` (90%) of the collection's prod documents would be deleted (there is no cap on the count); confirm the Index to prod button to re-run with `allow_high_deletion=true` |
 
 Failures after writing started. Nothing is deleted in these cases:
 

@@ -180,7 +180,150 @@ async def test_metadata_review_table_accept_all_and_row(crawler_client):
     items = (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]
     assert not any(d[f] for d in items for f in ("title_ai", "division_ai", "document_type_ai"))
     assert len((await c.get("/api/collections/ex.org/patterns")).json()) == total
+    # Nothing left to decide, and the table is still there with every row in its place, marked
+    # decided: a list a curator works down must not renumber or empty itself as rows are finished.
     page = (await c.get("/collections/ex.org?tab=curate")).text
-    assert "ai-review" not in page and "Accept all (" not in page
+    assert 'class="urls ai-review"' in page and "✓ row" not in page
+    assert page.count("✓ decided") == 8 and "Accept all (" not in page  # the bulk bar goes with the suggestions
+    assert "Hide decided 8" in page
+    # the toggle narrows the table to what is left, and offers the decided rows back
+    page = (await c.get("/collections/ex.org?tab=curate&decided=hide")).text
+    assert "Nothing left to decide" in page and "show the 8 decided rows" in page
+    assert "Show decided 8" in page
     audit = (await c.get("/api/collections/ex.org/audit")).json()
     assert any(a["action"] == "ai.bulk_accept" and "(https://ex.org/p2)" in a["detail"] for a in audit)
+
+
+# ── the list must not move under the curator ───────────────────────────
+# Reported by the curators: accepting a title and a division sometimes reordered the metadata list
+# they were working down. Two causes, both here: a sorted column sorted by the stored value (every
+# undecided row NULL, NULLS LAST, so the first row decided leapt to the top), and the review table
+# dropping a row the moment its last suggestion was decided (renumbering every row below it).
+
+CID = "ex.org"
+PATHS = ["/about", "/data/aerosol", "/data/ozone", "/earth/climate", "/helio/sun",
+         "/images/gallery/aurora", "/missions/mars", "/software/tools"]
+
+
+async def classified(client, paths=PATHS):
+    """A collection whose delta URLs all carry AI suggestions (fake provider)."""
+    from sde_curation.models import DumpUrl
+
+    await client.post("/api/collections", json={"seed_url": f"https://{CID}", "name": "Ex", "max_pages": 50})
+    await client.app.state.db.replace_dump(
+        CID, [DumpUrl(collection_id=CID, url=f"https://{CID}{p}", scraped_title=p.rsplit("/", 1)[-1],
+                      full_text=f"body of {p}") for p in paths])
+    assert (await client.post(f"/api/collections/{CID}/recompute")).status_code == 200
+    assert (await client.post(f"/api/collections/{CID}/suggest/metadata")).status_code in (200, 202)
+    await wait_job(client, CID)
+
+
+async def pending_for(client, field: str) -> set[str]:
+    items = (await client.get(f"/api/collections/{CID}/delta", params={"per": 50})).json()["items"]
+    return {d["url"] for d in items if d[f"{field}_ai"]}
+
+
+def urls_in_order_any(page: str) -> list[str]:
+    """Every URL of the page's table, in the order it lists them (any path, not just /pN)."""
+    return re.findall(r'<td class="url"><a href="(https://ex\.org[^"]*)"', page)
+
+
+def review_table(page: str) -> list[tuple[str, str]]:
+    """(row number, URL) of the metadata review table, in the order the page lists them."""
+    table = page.split('class="urls ai-review"')[1].split("</table>")[0]
+    return re.findall(r'<td class="num muted">(\d+)</td>\s*<td class="url"><a href="(https://ex\.org[^"]*)"', table)
+
+
+async def test_accepting_a_suggestion_never_moves_the_row_in_a_sorted_table(client):
+    """A column curation writes sorts by the value the row is shown with — its pending suggestion
+    counted as accepted — so ✓ writes the value the row was already sorted under and the row stays
+    under the curator's eye. It used to jump to the top of the list."""
+    await classified(client)
+    for col, field in [("division", "division"), ("document_type", "document_type"),
+                       ("title", "title"), ("edited_by", "division")]:
+        q = f"/collections/{CID}?tab=delta&sort={col}&dir=asc&per=50"
+        before = urls_in_order_any((await client.get(q)).text)
+        assert len(before) == len(PATHS)
+        left = await pending_for(client, field)
+        target = next(u for u in before[1:-1] if u in left)  # mid-list: a move shows either way
+        r = await client.post(f"/api/collections/{CID}/ai/accept", json={"url": target, "field": field})
+        assert r.status_code == 200, r.text
+        assert urls_in_order_any((await client.get(q)).text) == before, f"sorted by {col}, accepted {field}"
+
+
+async def test_the_metadata_review_list_keeps_a_decided_row_in_its_place(client):
+    """Deciding the last suggestion on a row used to remove it, pulling every row below it up one —
+    the row the curator was about to click moved out from under the pointer. The row stays, in its
+    place and with its number, marked decided; "Hide decided" is how you drop them."""
+    await classified(client)
+    page = (await client.get(f"/collections/{CID}?tab=curate")).text
+    before = review_table(page)
+    assert [n for n, _ in before] == [str(i) for i in range(1, len(before) + 1)]
+    target = before[1][1]  # the second row: anything dropping out of the list renumbers the rest
+
+    # accept its fields one at a time — including the last one, which used to empty its place
+    for field in ("title", "division", "document_type"):
+        if target not in await pending_for(client, field):
+            continue
+        assert (await client.post(f"/api/collections/{CID}/ai/accept",
+                                  json={"url": target, "field": field})).status_code == 200
+        assert review_table((await client.get(f"/collections/{CID}?tab=curate")).text) == before
+
+    assert not await pending_for(client, "title") & {target}
+    page = (await client.get(f"/collections/{CID}?tab=curate")).text
+    assert "✓ decided" in page and "Hide decided 1" in page
+    # and the curator who wants only what is left says so
+    hidden = review_table((await client.get(f"/collections/{CID}?tab=curate&decided=hide")).text)
+    assert target not in [u for _, u in hidden] and len(hidden) == len(before) - 1
+
+
+async def test_the_review_counts_agree_with_the_rows_they_describe(client):
+    """The table's total, its pager and the Hide decided count come from count_delta_ai, the rows
+    from list_delta_ai — two SQL paths (a `dup` CTE and the same subquery inlined). They must agree
+    on every filter, or the pager runs past the end of the list or stops short of it."""
+    from sde_curation.db import AI_FIELDS
+
+    await classified(client, PATHS + [f"/archive/{y}/report" for y in range(2010, 2026)])
+    db = client.app.state.db
+    # a spread of states: one row fully decided, one half decided, one dismissed, one untouched
+    await client.post(f"/api/collections/{CID}/ai/bulk",
+                      json={"decision": "accept", "url": f"https://{CID}/about"})
+    await client.post(f"/api/collections/{CID}/ai/accept",
+                      json={"url": f"https://{CID}/data/aerosol", "field": "title"})
+    await client.post(f"/api/collections/{CID}/ai/bulk",
+                      json={"decision": "reject", "url": f"https://{CID}/earth/climate"})
+    # and a collision, so the with_dups arm of the query has something to carry
+    await client.post(f"/api/collections/{CID}/patterns",
+                      json={"type": "title", "match": f"https://{CID}/helio/sun", "value": "Tools"})
+    await client.post(f"/api/collections/{CID}/patterns",
+                      json={"type": "title", "match": f"https://{CID}/software/tools", "value": "Tools"})
+
+    combos = [{"with_dups": True}, {"dups_only": True}]
+    combos += [{"field": f} for f in AI_FIELDS]
+    combos += [{"conf": c} for c in ("high", "medium", "low")]
+    combos += [{"field": f, "conf": c} for f in AI_FIELDS for c in ("high", "low")]
+    for kw in combos:
+        whole, left = await db.count_delta_ai(CID, **kw)
+        rows_whole, total_whole = await db.list_delta_ai(CID, limit=500, **kw, undecided_only=False)
+        rows_left, total_left = await db.list_delta_ai(CID, limit=500, **kw, undecided_only=True)
+        assert (whole, left) == (total_whole, total_left), kw          # the two SQL paths agree
+        assert (len(rows_whole), len(rows_left)) == (whole, left), kw  # and the rows match the count
+        # "decided" really means no suggestion left, and hiding them drops exactly those
+        decided = [r.url for r in rows_whole if not (r.title_ai or r.division_ai or r.document_type_ai)]
+        if kw.get("with_dups"):  # only this arm keeps decided rows; the filters are pending-only
+            assert whole - left == len(decided), kw
+            assert {r.url for r in rows_left} == {r.url for r in rows_whole} - set(decided), kw
+        else:
+            assert whole == left, kw
+
+    # paging the expanded list visits every row of the round exactly once, numbered without gaps
+    # (?per is clamped to at least 10, so the collection has to be bigger than one page)
+    whole, _ = await db.count_delta_ai(CID, with_dups=True)
+    assert whole > 10, "the paging check needs more than one page"
+    seen: list[str] = []
+    for page in range(1, -(-whole // 10) + 1):
+        rows = review_table((await client.get(
+            f"/collections/{CID}?tab=curate&focus=metadata&per=10&page={page}")).text)
+        assert [n for n, _ in rows] == [str(len(seen) + i + 1) for i in range(len(rows))], page
+        seen += [u for _, u in rows]
+    assert len(seen) == len(set(seen)) == whole

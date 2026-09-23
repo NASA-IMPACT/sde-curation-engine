@@ -38,6 +38,14 @@ db-down:  ## stop it (data stays in the `pgdata` volume; `docker compose down -v
 	docker compose down
 db-shell:  ## psql into the local database
 	docker compose exec postgres psql -U engine -d engine
+db-compact:  ## VACUUM FULL the text-heavy tables — hands freed space back to the OS (DB_URL=...)
+	@echo "VACUUM FULL takes an ACCESS EXCLUSIVE lock and needs free space for a copy of each"
+	@echo "table: run it in a maintenance window, with the service stopped. Schema V9 left the"
+	@echo "old page text as dead rows; autovacuum already reuses that space, so this is only"
+	@echo "needed to shrink the volume itself."
+	psql "$(DB_URL)" -c "VACUUM (FULL, ANALYZE) dump_urls" \
+	                 -c "VACUUM (FULL, ANALYZE) curated_urls" \
+	                 -c "VACUUM (FULL, ANALYZE) page_text"
 run: db-up
 	$(VENV)/bin/uvicorn sde_curation.web.app:app --reload --port 8080
 test:  ## tests: reuse TEST_DATABASE_URL when set, else testcontainers starts a throwaway PostgreSQL
@@ -58,10 +66,12 @@ docker-run: db-up  ## local smoke of the image: fake LLM, login password "dev", 
 # ── AWS (CDK, infra/) ──────────────────────────────────────────────────
 ENV ?= dev
 PROFILE ?= sde-dev
+# extra CDK context, e.g. CDK_CONTEXT="-c stress=true" (dev only: infra/config.py stress_config)
+CDK_CONTEXT ?=
 STACK = CurationEngine-$(ENV)
 IPY = $(abspath $(IVENV))/bin/python
 # cdk.json runs `python app.py`; activating infra/.venv puts that python (and the CDK libs) first
-CDK = cd infra && . $(abspath $(IVENV))/bin/activate && AWS_PROFILE=$(PROFILE) JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 cdk -c environment=$(ENV)
+CDK = cd infra && . $(abspath $(IVENV))/bin/activate && AWS_PROFILE=$(PROFILE) JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 cdk -c environment=$(ENV) $(CDK_CONTEXT)
 infra-install:  ## infra: infra/.venv with the CDK libs (the cdk CLI itself: npm i -g aws-cdk)
 ifdef HAVE_UV
 	cd infra && uv sync

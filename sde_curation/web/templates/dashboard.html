@@ -19,13 +19,15 @@
            answers. Any of the five is the curator's decision for the whole collection — it fills every
            URL and is never asked of the model. Either way it can be changed later. #}
         <select name="division" title="one division for the whole collection, or leave it on General to have the AI suggest one per page">
-          {% for d in divisions %}<option {% if (form.division if form else 'General') == d %}selected{% endif %}>{{ d }}{% if d == 'General' %} — not assigned{% endif %}</option>{% endfor %}
+          {# The label carries a suffix, so every option needs its own value: without one the browser
+             posts the label and "General — not assigned" is not a division. #}
+          {% for d in divisions %}<option value="{{ d }}" {% if (form.division if form else 'General') == d %}selected{% endif %}>{{ d }}{% if d == 'General' %} — not assigned{% endif %}</option>{% endfor %}
         </select>
         <input name="max_pages" type="number" value="{{ form.max_pages if form else 100000 }}" min="1" max="100000" size="7" title="max pages">
         <button>Add collection</button>
       </form>
     </section>
-    <section class="card jobs-card" id="jobs-panel" hx-get="/jobs/panel" hx-trigger="sse:collection, every 10s" hx-sync="this:replace" hx-swap="innerHTML">
+    <section class="card jobs-card" id="jobs-panel" hx-get="/jobs/panel" hx-trigger="sse:collection, every 10s [jobLive('#jobs-panel')], sseReopen from:body" hx-sync="this:replace" hx-swap="innerHTML">
       {% with compact=True %}{% include "partials/jobs_panel.html" %}{% endwith %}
     </section>
     <div class="tbl-wrap">{% include "partials/rows.html" %}</div>

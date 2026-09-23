@@ -276,14 +276,15 @@ async def test_per_url_rule_follows_the_page_across_spellings(crawler_client):
 
 
 def test_scrape_result_helpers(tmp_path):
-    from sde_curation.backends.scrape import ScrapeResult, parse_failures
+    from sde_curation.backends.scrape import FileDocuments, ScrapeResult, parse_failures
 
     f = tmp_path / "f.jsonl"
     f.write_text('{"url": "https://x/a", "reason": "http_403", "status": 403}\nnot json\n{"url": "", "reason": "x"}\n'
                  '{"url": "https://x/b", "reason": "crawl_unsuccessful"}\n\n')
-    assert [r["url"] for r in parse_failures(f)] == ["https://x/a", "https://x/b"]
-    res = ScrapeResult(documents_path=tmp_path / "d.json", failures_path=f, summary={"max_pages": 100})
+    assert [r["url"] for r in parse_failures(f.read_bytes())] == ["https://x/a", "https://x/b"]
+    docs = FileDocuments(tmp_path / "d.json")
+    res = ScrapeResult(documents=docs, failures_source=FileDocuments(f), summary={"max_pages": 100})
     assert len(res.failures()) == 2 and res.capped(100) and not res.capped(99)
-    res = ScrapeResult(documents_path=tmp_path / "d.json", failures_path=tmp_path / "missing.jsonl")
+    res = ScrapeResult(documents=docs, failures_source=FileDocuments(tmp_path / "missing.jsonl"))
     assert res.failures() == [] and res.capped(5, 5) and not res.capped(5, None) and not res.capped(4, 5)
     assert json.dumps(res.summary) == "{}"

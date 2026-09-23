@@ -4,17 +4,18 @@ records explicit success/failure in job_runs, and publishes SSE events."""
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 from .backends.index import Dispatch, IndexBackend, IndexError_, wait_for_status
 from .backends.publish import ProdPublisher
 from .backends.s3 import S3
-from .backends.scrape import ScrapeBackend, ScrapeError, parse_documents
+from .backends.scrape import DocumentSource, ProgressCb, ScrapeBackend, ScrapeError, iter_documents
 from .backends.validate import NoIndexAccess, validate_direct
 from .config import Settings
 from .db import Database
@@ -27,7 +28,8 @@ from .engine.export import (
     write_jsonl,
 )
 from .engine.patterns import match_counts
-from .engine.urls import batches, dedupe_variants, duplicate_docs
+from .engine.text import content_hash
+from .engine.urls import batches, dedupe_variants
 from .events import EventBus
 from .llm.base import LLMError, LLMProvider
 from .llm.global_excludes import global_exclude_hits, load_global_excludes
@@ -64,6 +66,16 @@ log = logging.getLogger(__name__)
 # Suggest metadata writes answers to the DB in small chunks (cancel keeps them, commits stay few).
 AI_FLUSH_ROWS = 25
 AI_FLUSH_SECONDS = 2.0
+# How often the crawl ingest reports the pages it has read. Each report is one job-row UPDATE and
+# one SSE event, so it is paced by the clock rather than by the read chunks: a small crawl
+# is over before the second report, a big one ticks steadily.
+_INGEST_PROGRESS_S = 2.0
+# One read chunk of the crawl ingest: this many pages, or this much page text, whichever comes
+# first. A count alone let a run of 1 MB pages (ascl.net has thousands) make a 500 MB chunk.
+# Measured on an ascl.net-shaped crawl (2.8 GB, 45K pages): peak 1.7 GB with the count alone,
+# 640 MB at 16 MB, 340 MB at 1 MB, and no lower below that; the ingest got faster, not slower.
+_INGEST_BATCH_DOCS = 500
+_INGEST_BATCH_BYTES = 1024 * 1024
 # Rounds of URL disambiguation after the model has had its passes. One resolves a group; the rest
 # are only there in case a title it wrote lands on one a page outside that group already had.
 DISAMBIGUATE_ROUNDS = 3
@@ -145,10 +157,29 @@ class JobManager:
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
     async def recover(self) -> None:
-        """Startup: jobs left 'running' by a previous process are dead — say so explicitly."""
+        """Startup: jobs left 'running' by a previous process are dead — say so explicitly. A
+        Suggest-metadata job the restart interrupted (killed under it, or cancelled by the shutdown
+        of a deploy) is started again for the URLs still without an answer: what it had already
+        been told is in the table, so nothing is asked or paid for twice."""
+        interrupted = await self.db.jobs_ended_by_shutdown()
         for j in await self.db.active_jobs():
             await self.db.finish_job(j, JobState.FAILED, error="engine restarted while job was running")
             self._emit(j.collection_id, j)
+            interrupted.append(j)
+        for j in interrupted:
+            resumed = int(j.progress.get("resumed", 0))
+            if j.kind != JobKind.LLM_METADATA or resumed >= self.s.llm_resume_after_restart:
+                continue
+            c = await self.db.get_collection(j.collection_id)
+            if not c or not await self.db.count_deltas_for_llm(c.collection_id, only_missing=True):
+                continue
+            try:
+                new = await self.start_llm_metadata(c, only_missing=True, actor=j.started_by)
+            except JobConflict:
+                continue
+            new.progress = {**new.progress, "resumed": resumed + 1, "resumed_from": j.id}
+            await self.db.update_job(new)
+            log.info("resumed %s for %s as job %s (after job %s)", j.kind, c.collection_id, new.id, j.id)
 
     # ── scrape ─────────────────────────────────────────────────────────
 
@@ -182,9 +213,14 @@ class JobManager:
                     result = await self.scraper.fetch_existing(c, on_progress)
                 else:
                     result = await self.scraper.run(c, on_progress)
-                docs = parse_documents(result.documents_path)
-                failures = result.failures()
-                n = await self.ingest_dump(c.collection_id, docs, failures)
+                failures = await asyncio.to_thread(result.failures)
+                # The crawl still has to be streamed into PostgreSQL, which on a multi-GB
+                # collection is minutes of work after the crawler itself has gone quiet. Say so,
+                # with the page counts, instead of leaving the last crawl figure on screen.
+                await on_progress({"phase": "ingest", "ingested": 0, "failures": len(failures),
+                                   "ingest_total": _expected_docs(result.summary, job.progress)})
+                n = await self.ingest_dump(c.collection_id, result.documents, failures,
+                                           on_progress=on_progress)
                 crawled_at = result.crawled_at or utcnow()
                 capped = result.capped(n, c.max_pages)
                 await self.db.set_last_scraped(c.collection_id, crawled_at, capped=capped)
@@ -195,6 +231,9 @@ class JobManager:
                 job.external_ref = result.external_ref or job.external_ref
                 note = (f"loaded existing crawl from {crawled_at:%Y-%m-%d %H:%M}Z: {n} documents" if reuse
                         else f"scrape ok: {n} documents")
+                if dropped := job.progress.get("duplicates_dropped"):
+                    note += (f" ({job.progress.get('ingested', n + dropped):,} read,"
+                             f" {dropped:,} duplicate links dropped)")
                 # Collection state first, job record last: "succeeded" must mean every effect of
                 # the job is already visible to whoever polls the job list.
                 updated = await self.db.set_status(
@@ -241,6 +280,32 @@ class JobManager:
             return await self._spawn(job, coro_factory(job))
         finally:
             self._starting.discard(cid)
+
+    async def start_curation(self, c: Collection, kind: JobKind, work: Callable[[], Awaitable[Any]], what: str,
+                             *, actor: str | None = None) -> JobRun:
+        """Run a bulk curation change (`work`: the same coroutine the request would have awaited) as
+        a job. Other edits on the collection are refused while it runs (ensure_idle), as for any job."""
+        return await self._start(c, kind, lambda job: self._run_curation(c, job, work, what), actor=actor)
+
+    async def _run_curation(self, c: Collection, job: JobRun, work: Callable[[], Awaitable[Any]], what: str) -> None:
+        # not under the collection lock: the curation service takes it for each of its writes, and an
+        # asyncio.Lock is not re-entrant
+        try:
+            await self._progress_cb(c, job)({"curation": what})
+            result = await work()
+            if isinstance(result, dict):
+                job.progress = {**job.progress, "result": {k: v for k, v in result.items() if isinstance(v, int | str | bool)}}
+                await self.db.update_job(job)
+            await self.db.finish_job(job, JobState.SUCCEEDED)
+            self._emit(await self.db.get_collection(c.collection_id) or c, job)
+        except asyncio.CancelledError:
+            await self.db.finish_job(job, JobState.FAILED, error=f"cancelled by {self._cancel_actor.pop(job.id, None) or 'shutdown'}")
+            self._emit(c, job)
+            raise
+        except Exception as e:
+            log.exception("%s %s failed", job.kind, c.collection_id)
+            await self.db.finish_job(job, JobState.FAILED, error=str(getattr(e, "detail", None) or f"{type(e).__name__}: {e}")[:2000])
+            self._emit(c, job)
 
     async def start_llm_patterns(self, c: Collection, *, actor: str | None = None) -> JobRun:
         return await self._start(c, JobKind.LLM_PATTERNS, lambda job: self._run_llm_patterns(c, job), actor=actor)
@@ -324,7 +389,8 @@ class JobManager:
 
             async def on_result(item, result):
                 kept, done = result
-                counts = match_counts(
+                counts = await asyncio.to_thread(
+                    match_counts,
                     [Pattern(id=i, collection_id=cid, type=s.type, match=s.match) for i, s in enumerate(kept)],
                     all_urls)
                 rows = [{"type": s.type, "match": s.match, "rationale": s.rationale, "matches": counts.get(i, 0)}
@@ -596,7 +662,8 @@ class JobManager:
         return self._publisher()
 
     async def start_index(
-        self, c: Collection, target: str, *, actor: str | None = None
+        self, c: Collection, target: str, *, actor: str | None = None,
+        allow_high_deletion: bool = False,
     ) -> tuple[JobRun, IndexRun]:
         if not self.s.cosmos_index_bucket:
             raise IndexError_("COSMOS_INDEX_BUCKET is not set")
@@ -604,14 +671,24 @@ class JobManager:
             raise IndexError_("OPENSEARCH_ENDPOINT_PROD is not set — nowhere to publish to")
         run = IndexRun(run_id=mint_run_id(), collection_id=c.collection_id, target=target, started_by=actor)
         if target == "prod":
-            job = await self._start(c, JobKind.INDEX_PROD, lambda job: self._run_publish_prod(c, job, run), actor=actor)
+            job = await self._start(
+                c, JobKind.INDEX_PROD,
+                lambda job: self._run_publish_prod(c, job, run, allow_high_deletion=allow_high_deletion),
+                actor=actor,
+            )
         else:
-            job = await self._start(c, JobKind.INDEX_TEST, lambda job: self._run_index(c, job, run), actor=actor)
+            job = await self._start(
+                c, JobKind.INDEX_TEST,
+                lambda job: self._run_index(c, job, run, allow_high_deletion=allow_high_deletion),
+                actor=actor,
+            )
         job.run_id = run.run_id
         await self.db.update_job(job)
         return job, run
 
-    async def _run_index(self, c: Collection, job: JobRun, run: IndexRun) -> None:
+    async def _run_index(
+        self, c: Collection, job: JobRun, run: IndexRun, *, allow_high_deletion: bool = False
+    ) -> None:
         async def body():
             s3 = S3(self.s.cosmos_index_bucket, region=self.s.aws_region)
             await self.db.insert_index_run(run)
@@ -626,10 +703,13 @@ class JobManager:
             #    (non-excluded) rows — with the text they were approved with — to a temp jsonl,
             #    upload, THEN the manifest
             await self._pin_index_key(c, progress)
-            curated = await self.db.load_curated(c.collection_id, with_text=True)
+            # (a server-side cursor, a few hundred rows at a time: the approved text of 100k pages is
+            # never in memory at once, and each batch is serialised off the event loop)
+            n = 0
             with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as fh:
-                n = write_jsonl(export_lines(curated), fh)
                 tmp = Path(fh.name)
+                async for rows in self.db.iter_curated_for_export(c.collection_id):
+                    n += await asyncio.to_thread(write_jsonl, export_lines(rows), fh)
             try:
                 if n == 0:
                     raise IndexError_("nothing to export: every curated URL is excluded")
@@ -644,7 +724,9 @@ class JobManager:
             await progress({"exported": n, "export": s3.url(prefix), "phase": "dispatch"})
 
             # 2. dispatch
-            d: Dispatch = await backend.dispatch(c, run.run_id, run.target)
+            d: Dispatch = await backend.dispatch(
+                c, run.run_id, run.target, allow_high_deletion=allow_high_deletion
+            )
             run.external_ref = d.external_ref
             job.external_ref = d.external_ref
             await self.db.update_index_run(run)
@@ -693,7 +775,9 @@ class JobManager:
         c.index_key, c.index_name = key, name
         log.info("%s: indexed as '%s' (%s)", c.collection_id, key, name)
 
-    async def _run_publish_prod(self, c: Collection, job: JobRun, run: IndexRun) -> None:
+    async def _run_publish_prod(
+        self, c: Collection, job: JobRun, run: IndexRun, *, allow_high_deletion: bool = False
+    ) -> None:
         """Index to prod: publish the vectors of the latest validated test run straight into the
         production index (backends/publish.py) — no export, no indexer task, no re-vectorizing —
         then run the same validation gate as test against prod. The collection only becomes `live`
@@ -718,7 +802,8 @@ class JobManager:
                 self._emit(c, job)
 
             await progress({"source_test_run": source.run_id, "exported": source.exported})
-            st = await publisher.run(c.collection_key, run.run_id, source.run_id, progress)
+            st = await publisher.run(c.collection_key, run.run_id, source.run_id, progress,
+                                     allow_high_deletion=allow_high_deletion)
             status = IndexStatus.model_validate(st)
             run.status = st
             job.progress = {**job.progress, "phase": "done", "status": st}
@@ -872,29 +957,72 @@ class JobManager:
         await self._guarded(c, job, body)
 
     async def ingest_dump(
-        self, collection_id: str, docs: list[dict[str, Any]], failures: list[dict[str, Any]] | None = None,
+        self, collection_id: str, docs: DocumentSource | list[dict[str, Any]],
+        failures: list[dict[str, Any]] | None = None, *, on_progress: ProgressCb | None = None,
     ) -> int:
-        """Store the crawl as the collection's dump. A site that links to the same page as http and
-        https, with and without a trailing slash, with a #fragment, or under two paths that
-        redirect to one (`/map`, `/maps`) gets it crawled once per spelling; only the preferred
-        spelling is kept (a URL alone on its page stays), so the dump curators work from lists
-        each page once. Redirects are known from the crawler's `final_url`."""
-        drop = duplicate_docs(docs)
-        if drop:
-            log.info("dump %s: dropping %d documents that are another URL of a page also present",
-                     collection_id, len(drop))
-        rows = [
-            DumpUrl(
-                collection_id=collection_id,
-                url=_no_nul(d["url"]),
-                scraped_title=_no_nul(d.get("title")),
-                full_text=_no_nul(d.get("full_text")),
-                content_type=_no_nul(d.get("content_type")),
-                depth=d.get("depth"),
-            )
-            for i, d in enumerate(docs)
-            if d.get("url") and i not in drop
-        ]
+        """Store the crawl as the collection's dump.
+
+        `docs` is the crawl — a `DocumentSource`, which for a remote scrape is the S3 object
+        itself — or documents already in memory. It is read exactly once, forwards, a few hundred
+        pages at a time, and every page goes straight into the COPY that `replace_dump` is
+        streaming: the crawl is never written to this host's disk and never held whole in memory.
+
+        Which spellings of a page survive is decided there too, from the URL columns of the
+        staging table (`engine.urls.duplicate_docs`) — it used to be a second pass over this
+        stream, which meant the crawl could not be a stream at all.
+
+        `on_progress` is called every few seconds with the pages read so far. It runs while the
+        COPY is open, so it borrows a second pooled connection for the moment it writes the job
+        row — brief, and the alternative is a status frozen at the crawler's last figure for as
+        long as the ingest takes."""
+        def source() -> Iterator[dict[str, Any]]:
+            return iter(docs) if isinstance(docs, list) else iter_documents(docs)
+
+        def take(it: Iterator[dict[str, Any]]) -> tuple[int, list[DumpUrl]]:
+            """The next chunk of documents as rows (parsing and hashing happen here, off the event
+            loop): up to `_INGEST_BATCH_DOCS` of them, cut short once they carry
+            `_INGEST_BATCH_BYTES` of text."""
+            seen, size, rows = 0, 0, []
+            for d in it:
+                seen += 1
+                if d.get("url"):
+                    text = _no_nul(d.get("full_text"))
+                    size += len(text or "")
+                    rows.append(DumpUrl(
+                        collection_id=collection_id, url=_no_nul(d["url"]),
+                        final_url=_no_nul(d.get("final_url")), scraped_title=_no_nul(d.get("title")),
+                        full_text=text, content_type=_no_nul(d.get("content_type")), depth=d.get("depth"),
+                        content_hash=content_hash(text),
+                    ))
+                if seen >= _INGEST_BATCH_DOCS or size >= _INGEST_BATCH_BYTES:
+                    break
+            return seen, rows
+
+        linked = 0  # pages read that have a URL: what the duplicate-link pass started from
+
+        async def rows() -> AsyncIterator[DumpUrl]:
+            """Counts as it reads: this is the only point that knows how far into the crawl the
+            ingest has got. The count is pages taken off the stream, not rows in the table — the
+            duplicate-spelling pass runs afterwards, so the job's final figure is a little lower."""
+            nonlocal linked
+            it = source()
+            read, reported = 0, 0.0
+            while True:
+                seen, chunk = await asyncio.to_thread(take, it)
+                linked += len(chunk)
+                for r in chunk:
+                    yield r
+                read += seen
+                if not seen:
+                    break
+                now = time.monotonic()
+                if on_progress and now - reported >= _INGEST_PROGRESS_S:
+                    reported = now
+                    await on_progress({"phase": "ingest", "ingested": read})
+            if on_progress:
+                # the stream is spent; what is left is the duplicate pass and the two INSERTs
+                await on_progress({"phase": "ingest_store", "ingested": read})
+
         fails = [
             DumpFailure(
                 collection_id=collection_id, url=_no_nul(f["url"]), reason=_no_nul(str(f["reason"])),
@@ -903,8 +1031,33 @@ class JobManager:
             )
             for f in failures or []
         ]
-        n = await self.db.replace_dump(collection_id, rows, fails)
+        n = await self.db.replace_dump(collection_id, rows(), fails, dedupe_spellings=True)
+        if on_progress:
+            # A crawl that reached a page under several links (http/https, www., a trailing slash)
+            # keeps it once: say how many went, or 45,024 read → 22,324 stored looks like loss.
+            await on_progress({"duplicates_dropped": linked - n})
+        # Hand the ingest's memory back to the OS: the connection's buffers first, then the heap
+        # glibc keeps after the pages are freed. Measured on an ascl.net-shaped crawl, the two
+        # were ~90% of what stayed resident after the job (live Python objects were ~2%).
+        await self.db.recycle_connections()
+        await asyncio.to_thread(_trim_heap)
         return n
+
+
+def _trim_heap() -> None:
+    """Return freed heap to the OS (glibc only; a no-op on macOS and other libcs)."""
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _expected_docs(summary: dict[str, Any], progress: dict[str, Any]) -> int | None:
+    """How many pages the ingest is about to read, for an "x of y" status: the crawl's own count
+    when it wrote a summary (a reused crawl has one and nothing else), else what the job watched
+    the crawler log. Either can be absent, and then the status just counts up."""
+    n = summary.get("documents_scraped") or progress.get("docs")
+    return int(n) if isinstance(n, int | float) and n > 0 else None
 
 
 def _add_tokens(job: JobRun, row: dict[str, Any]) -> None:

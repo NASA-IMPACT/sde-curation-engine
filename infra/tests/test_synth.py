@@ -81,7 +81,7 @@ def test_rds_postgres_is_private_encrypted_and_backed_up(template):
     template.has_resource_properties("AWS::RDS::DBInstance", {
         "Engine": "postgres", "EngineVersion": Match.string_like_regexp("^17"), "DBName": "engine",
         "DBInstanceClass": "db.m6i.large", "PubliclyAccessible": False, "StorageEncrypted": True,
-        "StorageType": "gp3", "AllocatedStorage": "20", "MaxAllocatedStorage": 100,
+        "StorageType": "gp3", "AllocatedStorage": "20", "MaxAllocatedStorage": 200,
         "MultiAZ": False, "BackupRetentionPeriod": 7, "DeletionProtection": False,
         "EnablePerformanceInsights": True, "EnableCloudwatchLogsExports": ["postgresql"],
     })
@@ -107,8 +107,11 @@ def test_prod_database_is_multi_az_and_protected():
     synth("prod").has_resource_properties("AWS::RDS::DBInstance", {
         "DBInstanceClass": "db.m6i.large", "MultiAZ": True, "BackupRetentionPeriod": 35, "DeletionProtection": True,
     })
+    # test carries every collection's page text and is where the big crawls land, so it autoscales
+    # further than the others; the volume is billed on what is allocated, not on this ceiling
     synth("test").has_resource_properties("AWS::RDS::DBInstance", {
         "DBInstanceClass": "db.m6i.large", "MultiAZ": False, "BackupRetentionPeriod": 7, "DeletionProtection": False,
+        "MaxAllocatedStorage": 500,
     })
 
 
@@ -193,7 +196,7 @@ def test_dev_publishes_into_its_own_collection(template):
     assert "PROD_INDEX_ROLE_ARN" not in _container_env(template)
     [policy] = template.find_resources("AWS::OpenSearchServerless::AccessPolicy").values()
     body = str(policy["Properties"]["Policy"])
-    assert "index/${Collection}/sde-web-subset" in body and "aoss:WriteDocument" in body
+    assert "index/${Collection}/sde-web" in body and "aoss:WriteDocument" in body
 
 
 @pytest.mark.parametrize("env", ["dev", "test"])
@@ -224,3 +227,23 @@ def test_test_env_publishes_to_prod_through_an_assumed_role(test_template):
     assert "PROD_INDEX_ROLE_ARN" in env and env["CRAWLER_S3_PREFIX"] == "" and env["WEB_INDEX_NAME"] == "sde-web"
     [policy] = test_template.find_resources("AWS::OpenSearchServerless::AccessPolicy").values()
     assert "aoss:WriteDocument" not in str(policy["Properties"]["Policy"])
+
+
+def test_stress_context_is_dev_only_and_sizes_the_task():
+    import pytest
+
+    from config import Environment, get_config, stress_config
+
+    cfg = stress_config(get_config("dev"))
+    assert (cfg.cpu, cfg.memory_mib, cfg.llm_provider) == (4096, 16384, "fake") and cfg.env is Environment.DEV
+    assert get_config("dev").llm_provider == "openai"  # a plain deploy undoes it
+    for env in ("test", "prod"):
+        with pytest.raises(ValueError):
+            stress_config(get_config(env))
+
+
+def test_dev_task_is_sized_like_test():
+    from config import get_config
+
+    dev, test = get_config("dev"), get_config("test")
+    assert (dev.cpu, dev.memory_mib) == (test.cpu, test.memory_mib)

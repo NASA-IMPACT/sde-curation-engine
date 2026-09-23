@@ -21,7 +21,9 @@
       <select id="pt2" aria-label="rule type"><option>title</option><option>division</option><option>document_type</option></select>
       <input id="pm2" placeholder="*/docs/* · exact URL" size="32" required aria-label="match">
       <input id="pv2" placeholder="value: title template / division / doc type" size="34" list="values" required aria-label="value">
-      <datalist id="values">{% for d in divisions %}<option value="{{ d }}">{% endfor %}{% for d in doc_types %}<option value="{{ d }}">{% endfor %}</datalist>
+      {# curation_divisions, not divisions: a rule sets the division of the URLs it matches, and
+         General is the collection placeholder, not a division a page is curated into. #}
+      <datalist id="values">{% for d in curation_divisions %}<option value="{{ d }}">{% endfor %}{% for d in doc_types %}<option value="{{ d }}">{% endfor %}</datalist>
       <button {% if running %}disabled{% endif %}>Add rule</button>
       <small class="muted">title templates: <code>{title}</code> <code>{url}</code> <code>{collection}</code> · the newest rule wins on the URLs it matches</small>
     </form>

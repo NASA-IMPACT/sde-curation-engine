@@ -22,19 +22,30 @@ from .models import (
 
 class IncompleteMetadata(Exception):
     """Promote refused: some delta URLs would reach the curated set without a title, a division or a
-    document type. `counts` is Database.incomplete_counts."""
+    document type, or under a title another page is already indexed under. `counts` is
+    Database.incomplete_counts — a row with no title rule but a scraped title is not blank: the
+    export indexes it under the scraped title. It is refused only if that title is shared."""
 
     def __init__(self, counts: dict[str, int]):
         self.counts = counts
         general = counts.get("general", 0)
-        missing = ", ".join(f"{counts[f]} without a {label}" for f, label in
-                            (("title", "title"), ("division", "division"), ("document_type", "document type"))
-                            if counts[f])
-        if general:  # the same rows as `division`, but they read as set until you look
-            missing += f" (of those, {general} still on the General placeholder)"
+        # the General note belongs to the division clause: those rows read as set until you look
+        parts = [f"{counts[f]} without a {label}"
+                 + (f" (of those, {general} still on the General placeholder)" if f == "division" and general else "")
+                 for f, label in (("title", "title"), ("division", "division"), ("document_type", "document type"))
+                 if counts[f]]
+        dup = counts.get("duplicate", 0)
+        blank, fix = bool(parts), []
+        if dup:
+            parts.append(f"{dup} sharing a title and document type with another page")
+        if blank:
+            fix.append("accept the AI suggestions or set the values by hand first")
+        if dup:
+            fix.append("Regenerate duplicate titles gives the shared ones a title of their own"
+                       if blank else "run Regenerate duplicate titles, or give them a title of their own by hand")
         n = counts["urls"]
-        super().__init__(f"{n} delta URL{'s' if n != 1 else ''} cannot be promoted yet ({missing}):"
-                         " accept the AI suggestions or set the values by hand first")
+        super().__init__(f"{n} delta URL{'s' if n != 1 else ''} cannot be promoted yet"
+                         f" ({', '.join(parts)}): {'; '.join(fix)}")
 
 
 class CurationService:
@@ -42,22 +53,25 @@ class CurationService:
         self.db = db
         self._lock_for = lock_for or (lambda cid: asyncio.Lock())
 
-    async def recompute(self, c: Collection) -> DeltaSet:
+    async def recompute(self, c: Collection, *, review_all: bool = False) -> DeltaSet:
         """diff + apply patterns in one idempotent pass; persists deltas and pattern effects.
         Serialised per collection so two recomputes (or a recompute and a promote) never
-        interleave their delete+insert on delta_urls."""
+        interleave their delete+insert on delta_urls.
+        `review_all`: queue every included page for review again, changed or not (see engine.diff)."""
         async with self._lock_for(c.collection_id):
-            return await self._recompute(c)
+            return await self._recompute(c, review_all=review_all)
 
-    async def _recompute(self, c: Collection) -> DeltaSet:
+    async def _recompute(self, c: Collection, *, review_all: bool = False) -> DeltaSet:
         dump, curated, patterns, previous, failures = (
             await self.db.load_dump(c.collection_id),
             await self.db.load_curated(c.collection_id),
-            await self.db.list_patterns(c.collection_id),
+            await self.db.load_rules(c.collection_id),
             await self.db.load_deltas(c.collection_id),
             await self.db.load_dump_failures(c.collection_id),
         )
-        ds = recompute(
+        # pure CPU over the whole collection: in a thread, so the event loop keeps serving everyone else
+        ds = await asyncio.to_thread(
+            recompute,
             collection_id=c.collection_id,
             collection_name=c.name,
             dump=dump,
@@ -67,6 +81,7 @@ class CurationService:
             failures=failures,
             capped=c.last_crawl_capped,
             division=c.division if division_assigned(c.division) else None,
+            review_all=review_all,
         )
         await self.db.replace_deltas(c.collection_id, ds.deltas, ds.effects)
         if ds.curated_edited_by:
@@ -121,9 +136,10 @@ class CurationService:
         """Exact rules of the same type for another spelling of the same page would still match
         (and the newest would win): remove them so one page has one per-URL rule per field."""
         wanted = {(t, canonical_key(m)) for t, ms in by_type.items() for m in ms}
-        for p in await self.db.list_patterns(c.collection_id):
-            if is_exact(p.match) and (str(p.type), canonical_key(p.match)) in wanted and p.id is not None:
-                await self.db.delete_pattern(c.collection_id, p.id)
+        rules = await self.db.exact_pattern_matches(c.collection_id, list(by_type))
+        await self.db.delete_patterns(
+            c.collection_id, [pid for pid, t, m in rules if (t, canonical_key(m)) in wanted]
+        )
 
     async def replace_exact_pattern(
         self, c: Collection, body: PatternCreate, *, old_id: int | None, actor: str | None = None,
@@ -148,7 +164,9 @@ class CurationService:
         async with self._lock_for(c.collection_id):
             key = canonical_key(url)
             wanted = PatternType.EXCLUDE if excluded else PatternType.INCLUDE
-            patterns = await self.db.list_patterns(c.collection_id)
+            # only exclude / include rules decide this; the per-URL metadata rules (three per URL) do not
+            patterns = await self.db.list_patterns(
+                c.collection_id, types=[PatternType.EXCLUDE, PatternType.INCLUDE])
             mine = [p for p in patterns if p.type in (PatternType.EXCLUDE, PatternType.INCLUDE)
                     and is_exact(p.match) and canonical_key(p.match) == key]
             drop = [p for p in mine if p.type is not wanted]
@@ -174,18 +192,25 @@ class CurationService:
         something to review, the curated URLs once promoted, the dump before curating starts."""
         return "delta" if c.delta_count else "curated" if c.curated_rows else "dump"
 
-    async def pattern_stats(self, c: Collection) -> list[dict]:
-        """Every rule with `matches` = how many URLs of rows_set(c) it matches (the rows the Rules
+    async def pattern_stats(self, c: Collection, *, exact_limit: int | None = None, exact_offset: int = 0) -> list[dict]:
+        """Rules with `matches` = how many URLs of rows_set(c) each matches (the rows the Rules
         table links to, so the number is the number of rows the click shows) and `in_effect` = how
-        many URLs it currently decides (0 with matches > 0: a newer rule has superseded it)."""
-        patterns = await self.db.list_patterns(c.collection_id)
+        many URLs it currently decides (0 with matches > 0: a newer rule has superseded it).
+        Every rule by default; with `exact_limit` every glob rule plus that page of the per-URL
+        rules — there can be three of those per URL, and the Rules tab shows them a page at a time."""
+        if exact_limit is None:
+            patterns = await self.db.list_patterns(c.collection_id)
+        else:
+            patterns = (await self.db.list_patterns(c.collection_id, exact=False)
+                        + await self.db.list_patterns(c.collection_id, exact=True, limit=exact_limit, offset=exact_offset))
         set_ = self.rows_set(c)
-        counts = match_counts(patterns, await self.db.set_urls(c.collection_id, set_))
+        counts = await asyncio.to_thread(match_counts, patterns, await self.db.set_urls(c.collection_id, set_))
         # exclude rules keep URLs out of the delta URLs altogether, so theirs are counted over the dump
         excludes = [p for p in patterns if p.type is PatternType.EXCLUDE]
         if excludes and set_ != "dump":
-            counts.update(match_counts(excludes, await self.db.set_urls(c.collection_id, "dump")))
-        effects = await self.db.effect_counts(c.collection_id)
+            counts.update(await asyncio.to_thread(match_counts, excludes, await self.db.set_urls(c.collection_id, "dump")))
+        effects = await self.db.effect_counts(
+            c.collection_id, None if exact_limit is None else [p.id for p in patterns if p.id is not None])
         return [{**p.model_dump(mode="json"), "matches": counts.get(p.id, 0), "in_effect": effects.get(p.id, 0),
                  "set": "dump" if p.type is PatternType.EXCLUDE else set_}
                 for p in patterns]
@@ -203,8 +228,8 @@ class CurationService:
     async def _promote(self, c: Collection, actor: str | None = None) -> int:
         await self._check_complete(c)
         deltas = await self.db.load_deltas(c.collection_id)
-        curated = promote(
-            await self.db.load_curated(c.collection_id), deltas,
+        curated = await asyncio.to_thread(
+            promote, await self.db.load_curated(c.collection_id), deltas,
             content_hashes=await self.db.dump_content_hashes(c.collection_id),
         )
         # a promote with an empty queue is the "mark curated" shortcut: it moves nothing, so it
@@ -241,7 +266,7 @@ class CurationService:
                 content_hashes={u: h for u, h in hashes.items() if u in wanted},
             )
             picked_urls = [d.url for d in picked]
-            n = await self.db.replace_curated(c.collection_id, curated, text_urls=picked_urls)
+            n = await self.db.replace_curated(c.collection_id, curated)
             await self.db.delete_deltas(c.collection_id, picked_urls)
             await self.db.delete_effects(c.collection_id, [d.url for d in picked if d.kind is DeltaKind.DELETED])
             if not left:  # the whole queue is through: the re-curation flag comes down, as in _promote

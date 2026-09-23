@@ -9,7 +9,7 @@ appear in git, in the synthesized template, or in cdk.out. Seed them with `make 
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 APP_NAME = "sde-curation-engine"
@@ -60,9 +60,10 @@ class EnvConfig:
     # where both targets are the dev collection) → the stack's AOSS data-access policy grants write.
     prod_publish_via_role: bool = False
     indexing_container_name: str = "WEB_COSMOSContainer"
-    # dev indexes into a scratch subset; test and prod write the live sde-web index
-    web_index_name: str = "sde-web-subset"
+    # every tier writes sde-web in its own collection; must match sde-api-scrapers' WEB_INDEX_NAMES
+    web_index_name: str = "sde-web"
     openai_model: str = "gpt-5.6-luna"  # 1.05M-token window: the full page text always fits
+    llm_provider: str = "openai"  # "fake": canned answers, no API calls (load tests — see stress_config)
     llm_workers: int = 16
     llm_pattern_batch_urls: int = 1000
     # Override for notification links; default = the stack's CloudFront URL.
@@ -70,11 +71,16 @@ class EnvConfig:
     cpu: int = 1024
     memory_mib: int = 2048
     waf_rate_limit_per_5min: int = 1000
-    # RDS PostgreSQL (the state store). Storage starts at 20 GB gp3 and autoscales to 100 GB.
+    # RDS PostgreSQL (the state store). Storage starts at 20 GB gp3 and autoscales to
+    # `db_max_storage_gib`, which is a hard stop: past it writes fail, mid-ingest, with a disk-full
+    # error. The page text is what fills it — schema V9 made a collection cost one copy of its
+    # crawl rather than two (the dump and the curated set share it), but a 100k-page site is still
+    # GBs, and the V9 migration itself needs room for one extra copy of the text while it runs.
     # x86 dedicated compute, 2 vCPU / 8 GiB, no CPU-credit model. Graviton burstable (t4g) was
     # the first choice but hit "insufficient-capacity" twice in us-east-1 on 2026-09-11; the m6i
     # pools are far larger. Same class in every environment.
     db_instance_class: str = "m6i.large"
+    db_max_storage_gib: int = 200
     # The DB subnet group spans every AZ where the class is orderable (not just `azs`, which is
     # limited by Fargate): RDS picks one with free capacity at create time, so more AZs = fewer
     # "insufficient-capacity" failures. us-east-1e offers no db.t3/t4g classes.
@@ -101,14 +107,22 @@ class EnvConfig:
 
 
 CONFIGS: dict[Environment, EnvConfig] = {
-    Environment.DEV: EnvConfig(env=Environment.DEV),
+    # Same task size as test, so a change that works on dev will not run out of memory on test
+    # (2 GB OOM-killed the ascl.net load on 2026-09-22 while test would have held it).
+    Environment.DEV: EnvConfig(env=Environment.DEV, cpu=4096, memory_mib=16384),
     # The test crawler (SdeCrawlerStack in 119417011911) writes scraped_collections/ at the bucket root.
-    # The engine's real deployment: sized for ~5 concurrent curators and ~100k-URL collections, whose
-    # scrape ingest and test export hold the full page text in memory.
-    Environment.TEST: EnvConfig(env=Environment.TEST, web_index_name="sde-web", crawler_s3_prefix="",
-                                prod_publish_via_role=True, cpu=4096, memory_mib=16384),
+    # 4 vCPU / 16 GB: test is the engine that does the real curation and publishes to prod. Sized for
+    # ~5 concurrent curators on 100k-URL collections, whose scrape ingest and test export hold the
+    # full page text in memory; four of them peaked at 6.5 GB before the 2026-09-18 scale fixes
+    # (docs/scale-audit-2026-09-18.md); re-measure before sizing down.
+    # 500 GB: test holds every collection's crawl text at once and is where the big sites land
+    # (ascl.net alone crawls to 6.7 GB of JSON). Autoscaling only ever raises the volume, and
+    # gp3 is billed on what is allocated, not on the ceiling.
+    Environment.TEST: EnvConfig(env=Environment.TEST, crawler_s3_prefix="",
+                                prod_publish_via_role=True, cpu=4096, memory_mib=16384,
+                                db_max_storage_gib=500),
     Environment.PROD: EnvConfig(
-        env=Environment.PROD, web_index_name="sde-web", cpu=2048, memory_mib=4096,
+        env=Environment.PROD, cpu=2048, memory_mib=4096,
         db_multi_az=True, db_backup_days=35, db_deletion_protection=True,
     ),
 }
@@ -116,3 +130,13 @@ CONFIGS: dict[Environment, EnvConfig] = {
 
 def get_config(env_name: str) -> EnvConfig:
     return CONFIGS[Environment(env_name)]
+
+
+def stress_config(cfg: EnvConfig) -> EnvConfig:
+    """`cdk deploy -c stress=true` (dev only): the environment as a load test needs it: the fake
+    LLM (a 100k-URL Suggest metadata is 100k paid API calls otherwise) and a WAF limit the test
+    client's polling from one IP stays under. The task is already test's size. A plain deploy puts
+    everything back."""
+    if cfg.env is not Environment.DEV:
+        raise ValueError("stress=true is for the dev environment only")
+    return replace(cfg, llm_provider="fake", waf_rate_limit_per_5min=20_000)

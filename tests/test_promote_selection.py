@@ -81,8 +81,7 @@ async def test_partial_promote_leaves_rows_under_review_untouched(crawler_client
     await classify(c)
     assert (await c.post(f"{API}/promote")).status_code == 200
     db = c.app.state.db
-    old = {r["url"]: r for r in await db.fetch(
-        "SELECT url, full_text, content_hash FROM curated_urls WHERE collection_id=%s", (CID,))}
+    old = {r.url: (r.full_text, r.content_hash) for r in await db.load_curated(CID, with_text=True)}
     await db.replace_dump(CID, [
         DumpUrl(collection_id=CID, url=url(i), scraped_title=f"Page {i}",
                 full_text="changed text" if i in (1, 2) else "text " * 5)
@@ -90,9 +89,8 @@ async def test_partial_promote_leaves_rows_under_review_untouched(crawler_client
     ])
     assert (await c.post(f"{API}/recompute")).json()["content_changed"] == 2
     assert (await c.post(f"{API}/promote/urls", json={"urls": [url(1)]})).json()["left"] == 1
-    now = {r["url"]: r for r in await db.fetch(
-        "SELECT url, full_text, content_hash FROM curated_urls WHERE collection_id=%s", (CID,))}
-    assert now[url(1)]["full_text"] == "changed text" and now[url(1)]["content_hash"] != old[url(1)]["content_hash"]
+    now = {r.url: (r.full_text, r.content_hash) for r in await db.load_curated(CID, with_text=True)}
+    assert now[url(1)][0] == "changed text" and now[url(1)][1] != old[url(1)][1]
     assert now[url(2)] == old[url(2)], "the unpicked row keeps its approved text and hash"
     # and its delta survives a recompute
     assert (await c.post(f"{API}/recompute")).json()["content_changed"] == 1

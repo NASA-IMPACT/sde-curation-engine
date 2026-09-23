@@ -7,7 +7,7 @@ import pytest
 
 from sde_curation.models import Collection, Division
 from tests.conftest import wait_job
-from tests.test_scrape_backend import aws, ssm_env  # noqa: F401 - pytest fixtures
+from tests.test_scrape_backend import _docs_text, aws, ssm_env  # noqa: F401 - pytest fixtures
 
 COLL = Collection(collection_id="ex.org", name="Ex", seed_url="https://ex.org", division=Division.GENERAL,
                   connector="crawler2", max_pages=10)
@@ -65,8 +65,8 @@ async def test_ssm_existing_and_fetch(ssm_env, tmp_path):  # noqa: F811
 
     res = await s.fetch_existing(COLL, cb)
     assert seen == [{"reused": True}] and res.crawled_at == ex.modified and res.external_ref == "reused"
-    assert json.loads(res.documents_path.read_text())[0]["url"] == "https://ex.org/a"
-    assert res.summary["documents_scraped"] == 1 and res.failures_path is None  # no failures log uploaded
+    assert json.loads(_docs_text(res))[0]["url"] == "https://ex.org/a"
+    assert res.summary["documents_scraped"] == 1 and res.failures_source is None  # no failures log uploaded
     assert s.ssm.commands == []  # no SSM command was issued
 
 
@@ -92,7 +92,7 @@ async def test_ssm_reads_from_the_configured_bucket_folder(ssm_env, tmp_path):  
         pass
 
     res = await s.fetch_existing(COLL, cb)
-    assert json.loads(res.documents_path.read_text())[0]["url"] == "https://ex.org/a"
+    assert json.loads(_docs_text(res))[0]["url"] == "https://ex.org/a"
     assert res.summary == {"documents_scraped": 1}
     assert [f["url"] for f in res.failures()] == ["https://ex.org/b"]  # the failures log rides along
 
@@ -138,7 +138,7 @@ async def test_ssm_checkpoint_of_a_running_crawl_is_not_loadable(ssm_env):  # no
     ex = await s.existing(COLL)
     assert ex and ex.complete
     res = await s.fetch_existing(COLL, lambda p: asyncio.sleep(0))
-    assert json.loads(res.documents_path.read_text())[0]["url"] == "https://ex.org/a"
+    assert json.loads(_docs_text(res))[0]["url"] == "https://ex.org/a"
 
 
 async def test_workbench_shows_a_running_crawl_but_does_not_offer_to_load_it(crawler_client, monkeypatch):
@@ -172,3 +172,44 @@ async def test_workbench_shows_a_running_crawl_but_does_not_offer_to_load_it(cra
     scrape = panel.split('hx-post="/api/collections/ex.org/scrape"')[0].rsplit("<button", 1)[1]
     assert "disabled" not in scrape and "scrape?reuse=true" in panel
     assert 'hx-post="/api/collections/ex.org/scrape"' in (await c.get("/collections/ex.org/header")).text
+
+
+async def test_remote_crawl_streams_from_s3_into_postgres(client, aws):  # noqa: F811
+    """The whole point of the remote path: a crawl goes from the S3 object into the tables without
+    being written down on this host. The rows, their text and the crawl's failures all land, the
+    spellings of one page collapse to one row, and DATA_DIR gains nothing."""
+    import boto3
+
+    from sde_curation.backends.scrape import S3Documents
+
+    key = "scraped_collections/https_ex.org.json"
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="crawl-bkt")
+    s3.put_object(Bucket="crawl-bkt", Key=key, Body=json.dumps([
+        {"url": "https://ex.org/a", "title": "A", "full_text": "body a"},
+        {"url": "http://ex.org/a/", "title": "A (http)", "full_text": "body a"},  # the same page
+        {"url": "https://ex.org/b", "title": "B", "full_text": "body b"},
+    ]))
+    await client.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex"})
+
+    n = await client.app.state.jobs.ingest_dump(
+        "ex.org", S3Documents(s3, "crawl-bkt", key),
+        [{"url": "https://ex.org/c", "reason": "http_403", "status": 403}],
+    )
+    assert n == 2, "the two spellings of /a are one page"
+
+    db = client.app.state.db
+    assert {d.url for d in await db.load_dump("ex.org")} == {"https://ex.org/a", "https://ex.org/b"}
+    assert await db.load_dump_failures("ex.org") == {"https://ex.org/c": "http_403"}
+    # the text came across, and is stored once per distinct page rather than once per row
+    async with db._conn() as conn:
+        cur = await conn.execute("SELECT full_text FROM page_text WHERE collection_id='ex.org'")
+        assert {r["full_text"] for r in await cur.fetchall()} == {"body a", "body b"}
+    # and reads back through the hash, which is how the LLM job gets it
+    await client.post("/api/collections/ex.org/recompute")
+    assert {r["url"]: r["text"] for r in await db.docs_for_llm("ex.org", ["https://ex.org/b"])} == {
+        "https://ex.org/b": "body b"}
+
+    # nothing was staged on the way: no copy of the crawl under DATA_DIR
+    data_dir = client.app.state.settings.data_dir
+    assert not (data_dir / "scrapes").exists()

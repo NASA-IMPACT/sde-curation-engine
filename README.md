@@ -19,7 +19,7 @@ WEB_COSMOS test indexing, validation gate, prod indexing, notifications.
 cp .env.example .env      # sibling repo paths, AWS values, OPENAI_API_KEY (or LLM_PROVIDER=fake)
 make install              # uv sync if uv is installed, else python3.13 venv + pip -r requirements-dev.txt
 make run                  # http://localhost:8080   (8000 is taken by sde-elastic-wrapper)
-make test                 # 91 tests, incl. a state-matrix that fires every action in every status
+make test                 # 315 tests, incl. a state-matrix that fires every action in every status
 make lint
 ```
 
@@ -180,13 +180,16 @@ are covered together). The worker pool (`llm/pool.py`) retries nothing itself �
 retries 429 / 5xx / timeouts `LLM_MAX_RETRIES` times with backoff — but it keeps going past
 per-URL failures and aborts only after ten consecutive non-retryable errors (bad key, bad model).
 
-**The curated set is self-contained**: a promote copies each page's current dump text onto its
-curated row (`curated_urls.full_text`, copied inside PostgreSQL) along with the hash of that text,
-and **Index** exports the curated rows alone — the dump is never consulted at export time. So the
-approved set stays exportable exactly as approved even after a later crawl has replaced the dump,
-and the next cycle diffs the new crawl against it as the source of truth. Rows promoted before the
-engine kept text (the migration backfills them from the dump, which is what the export shipped
-for them anyway) show an empty *Text* size on the Curated URLs table until the next promote.
+**The curated set is self-contained**: a promote stamps each row with the hash of the page text it
+was approved with, and that hash *is* how the row holds the text — the text lives once per
+`(collection, content_hash)` in `page_text`, shared with the dump row it came from, and is kept
+until no row points at it any more (schema V9; before that the dump and the curated set each
+stored their own copy of every page, so a collection cost two copies of its crawl). **Index**
+exports the curated rows alone — the dump is never consulted at export time. So the approved set
+stays exportable exactly as approved even after a later crawl has replaced the dump, and the next
+cycle diffs the new crawl against it as the source of truth. Rows promoted before the engine kept
+text (the migration backfills them from the dump, which is what the export shipped for them
+anyway) show an empty *Text* size on the Curated URLs table until the next promote.
 
 **Content-aware deltas**: every crawled page gets a `content_hash` (sha256 of its
 whitespace-normalised text) at ingest; a promote carries the current hash onto the curated rows.
@@ -203,6 +206,10 @@ https (or a crawler that now drops the slash) produces one *modified* delta per 
 removal; promote moves the row and its metadata. Exact-URL rules (per-URL edits, accepted AI
 suggestions) match by the same key, so a title or exclusion set under one spelling follows the
 page; a per-URL edit under a new spelling replaces the rule written under the old one.
+The same key collapses a crawl that reached one page under several links: the ingest keeps one
+row per page (the resolved URL, then https, then the shorter spelling), and the scrape job and the
+status history say how many it dropped — "45,024 read, 22,700 duplicate links dropped" for a site
+that links every page over both `http://` and `https://www.`.
 
 **Crawl failures are not deletions**: the scrape also ingests the crawler's failures log
 (`dump_failures`: URL, reason, HTTP status) and whether the crawl stopped at its page cap
@@ -265,10 +272,13 @@ latest validated test run and, for every document, the newest record at the same
 `s3://COSMOS_INDEX_BUCKET/vectorized/<key>/*/` (the indexer only vectorizes changed documents, so
 they are spread over runs), falling back to the test index for anything S3 lacks. It upserts them
 into `OPENSEARCH_ENDPOINT_PROD` / `WEB_INDEX_NAME` (existing copies updated in place, never
-duplicated), stamped `modified_date` = the publish time (`2024-08-22 21:08:32` format, UTC, one stamp per publish —
-never the date the test run put on the vectors; unchanged documents are not rewritten and keep theirs), then **deletes** the collection's prod documents that are no
+duplicated), each exactly as test holds it — `modified_date`, `collection_name` and the visibility
+flags included (the engine sets no field of its own; a copy not filed under the collection's
+`collection_key` is never taken; unchanged documents are not rewritten and keep theirs), then **deletes** the collection's prod documents that are no
 longer curated: a real removal, of every document under the `collection_key` the export does not hold,
-including ones from before the indexer (no `version`) and ones an earlier publish had hidden. The indexer's guards are ported and checked before anything is written, and removals
+including ones from before the indexer (no `version`) and ones an earlier publish had hidden. The indexer's guards are ported and checked before anything is written (a publish that would
+delete more than 90% of the collection is refused; the prod button then asks to continue and re-runs
+with `allow_high_deletion=true`, like the indexer's `--allow-high-deletion`), and removals
 never follow a failed or incomplete write. The engine then runs **the same gate against prod**
 (delay, direct poll until visible or `VALIDATION_TIMEOUT_S`, counts equal and titles ≥ threshold):
 pass → `live`; fail → back to `config_generated` (the written documents stay in prod). Prod has no
@@ -379,9 +389,31 @@ are in flight — the ceilings come from the systems behind it.
   This is the first place you will hit the provider's rate limit.
 - *Index runs* — each dispatches its own ECS task and polls S3. Nothing limits how many run at
   once; runs on different collections are fine as long as the indexer tolerates it.
+- *Bulk curation changes* — on a collection with at least `BULK_JOB_MIN_URLS` (20 000) dump URLs,
+  **Start curating / recompute**, **accept all pattern suggestions** and **accept all AI metadata**
+  answer `202` with a job (`recompute`, `bulk_suggestions`, `bulk_accept`) and show progress like
+  any other job; smaller collections are answered in the request as before. A request has 60 s
+  behind CloudFront. Single edits are always answered in the request.
+- *One process, one event loop.* The whole-collection CPU work (diff + rule resolution, match
+  counts, promote, parsing the crawl, writing `patterns.yaml`) runs in threads so that one
+  curator's recompute does not freeze everyone else's pages, polls and SSE streams.
+
+**Big collections (100k URLs)** — measured in `docs/scale-audit-2026-09-18.md` and its follow-up.
+A recompute always computes the complete new delta set, but writes only the rows that differ
+(an inline edit changes one row); per-URL rules are matched by lookup, never by regex; the Rules
+tab lists every glob rule and pages the per-URL rules (`?rpage=`, 200 at a time;
+`GET …/patterns?exact_limit=&exact_offset=` does the same, without them it returns every rule);
+the crawl's documents file and the index export are streamed, never held whole in memory — the
+ingest reads the crawl in chunks of 500 pages or 1 MB of text, whichever comes first, and replaces
+the pooled DB connections afterwards (a 6.7 GB crawl of ~1 MB pages peaks under 300 MB; see
+`docs/architecture.md` §1);
+`patterns.yaml` is written in the background once a collection has more than 2 000 rules (always
+current after a promote and at shutdown). A Suggest-metadata job interrupted by an engine restart
+(a deploy, a crash) is started again for the URLs still missing, at most
+`LLM_RESUME_AFTER_RESTART` (3) times; a job a curator cancelled stays cancelled.
 
 **Data layer**
-- PostgreSQL through a small connection pool (`DB_POOL_SIZE`, default 8); every `Database`
+- PostgreSQL through a small connection pool (`DB_POOL_SIZE`, default 16); every `Database`
   method is one transaction, and status transitions lock the collection row. The job registry
   and per-collection locks still live in memory, so the ECS service is pinned to one task —
   **do not run two replicas** until those move into the database.
@@ -390,10 +422,14 @@ are in flight — the ceilings come from the systems behind it.
   is warned.
 
 **What other curators see**
-- Job starts, progress and completion are pushed over SSE to every open browser; the header,
-  pipeline and jobs strip also poll (5–10 s), so a second curator sees status and counts move.
-- Another person's pattern/metadata edits are *not* pushed. Header counts catch up on the next
-  poll; the curate table body only reloads when a job finishes or the page is refreshed.
+- Job starts, progress and completion are pushed over SSE to every open browser. The header,
+  pipeline, jobs strip and dashboard rows poll (4–10 s) **only while a job is live** on what they
+  show, as the safety net for a missed event; after the SSE stream reconnects everything re-fetches
+  once. An idle page sends nothing — the WAF rate limit (per IP, and curators share an office IP)
+  was reached by idle dashboards polling every row.
+- Another person's pattern/metadata edits are pushed as a `collection` event (header, stepper and
+  dashboard row refresh); the curate table body only reloads when a job finishes or the page is
+  refreshed.
 
 **Guidance**
 - Assign curators to distinct collections — that is the model the app is built around.
@@ -407,7 +443,8 @@ are in flight — the ceilings come from the systems behind it.
 | Key | Purpose |
 |---|---|
 | `DATABASE_URL` or `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_SSLMODE` | PostgreSQL. One URL locally (`make db-up` → `postgresql://engine:engine@localhost:5432/engine`); the ECS task gets the parts, with user/password from the RDS secret |
-| `DB_POOL_SIZE` (8) | connections per engine process |
+| `DB_POOL_SIZE` (16) | connections per engine process |
+| `BULK_JOB_MIN_URLS` (20000) | dump URLs from which recompute / accept-all run as background jobs (0 = always) |
 | `DATA_DIR` | `collections/<id>/{collection,patterns}.yaml`, index logs, scrape jobs |
 | `CRAWLER_ROOT`, `CRAWLER_PYTHON` | crawl4ai repo and its interpreter |
 | `INDEXER_ROOT`, `INDEXER_PYTHON` | sde-api-scrapers repo (Phase 5) |
@@ -443,8 +480,8 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `GET …/history`, `…/jobs`, `…/dump` | audit trail, job runs, ingested URLs |
 | `POST …/scrape` | run the crawl → job (202; 409 if busy) |
 | `POST …/jobs/cancel` | cancel the running job |
-| `POST …/recompute` | diff dump vs curated + apply patterns (idempotent) |
-| `GET/POST /…/patterns`, `DELETE …/patterns/{pid}` | pattern CRUD with match counts |
+| `POST …/recompute` | diff dump vs curated + apply patterns (idempotent); 202 + job on a big collection (`BULK_JOB_MIN_URLS`) |
+| `GET/POST /…/patterns`, `DELETE …/patterns/{pid}` | pattern CRUD with match counts; `GET …?exact_limit=&exact_offset=` pages the per-URL rules |
 | `POST …/urls` | per-URL edit `{url, type, value?}`; exclude/include toggles |
 | `GET …/dump?q&excluded`, `…/delta?kind&excluded&division&document_type&q&edited&renamed&limit&offset` (`…/deltas` still works), `…/curated?q&excluded&edited&unreachable` | the three URL sets, paginated |
 | `GET /collections/{id}/urls/{dump\|delta\|curated}?format=csv&…` | CSV export of the filtered set |
@@ -478,11 +515,13 @@ sde_curation/
   config.py        pydantic-settings
   models.py        every boundary model (API, DB rows, indexer contracts, LLM schemas)
   db.py            PostgreSQL (psycopg 3 pool): one transaction per method, COPY for bulk replaces
-  schema.py        numbered migrations (schema_version table)
+  schema.py        numbered migrations (schema_version table; V9 = page text stored once, in page_text)
   import_sqlite.py one-off cutover: copy a SQLite-era engine.db into PostgreSQL
-  engine/          pure: patterns.py (resolution), diff.py (delta URLs, promote), export.py (indexer contract)
+  engine/          pure: patterns.py (resolution), diff.py (delta URLs, promote), export.py (indexer contract),
+                   urls.py (canonical_key, duplicate links), text.py (content_hash)
   curation.py      engine ↔ DB glue, per-collection locking
-  backends/        scrape.py (local subprocess | SSM), index.py (local subprocess | ECS), validate.py (direct AOSS check), s3.py
+  backends/        scrape.py (local subprocess | SSM; the crawl as a streamed DocumentSource), index.py (local subprocess | ECS),
+                   validate.py (direct AOSS check), publish.py (Index to prod), aoss.py, s3.py
   notify.py        Slack-compatible webhook on status transitions
   llm/             base.py (provider protocol + registry), openai.py, fake.py, tasks.py (prompts, sanity filters)
   jobs.py          JobManager: background tasks, cancel, recovery, SSE events

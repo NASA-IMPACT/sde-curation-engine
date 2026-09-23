@@ -1,7 +1,9 @@
 """Nothing reaches the curated set blank: Suggest metadata answers every field (guesses at low
 confidence), rows left without a field are asked again, promote refuses a delta URL without a
-title, division or document type, and the metadata review filters by confidence and field."""
+division, a document type or any title at all (a page with no title rule keeps its scraped title,
+which is what the export indexes it under), and the metadata review filters by confidence and field."""
 
+from sde_curation.engine.export import export_lines
 from sde_curation.llm.fake import FakeProvider
 from sde_curation.llm.tasks import METADATA_SYSTEM
 from sde_curation.models import CuratedUrl, DumpUrl
@@ -96,17 +98,19 @@ async def test_promote_refuses_blank_metadata_and_says_where(crawler_client):
     c = crawler_client
     db = c.app.state.db
     await setup(c)
-    assert await db.incomplete_counts(CID) == {"urls": 8, "title": 8, "division": 8, "general": 0, "document_type": 8}
+    # the crawl titled every page, so no row is without a title: the two fields with no fallback are
+    assert await db.incomplete_counts(CID) == {"urls": 8, "title": 0, "division": 8, "general": 0, "document_type": 8, "duplicate": 0}
     r = await c.post(f"{API}/promote")
     assert r.status_code == 409
-    assert r.json()["detail"] == ("8 delta URLs cannot be promoted yet (8 without a title, 8 without a division,"
+    assert r.json()["detail"] == ("8 delta URLs cannot be promoted yet (8 without a division,"
                                   " 8 without a document type): accept the AI suggestions or set the values by hand first")
     k = (await c.get(API)).json()
     assert (k["status"], k["curated_count"], k["delta_count"]) == ("curating", 0, 8)
     # the Curate page and the Delta URLs table say so and point at the rows
     curate = (await c.get(f"/collections/{CID}?tab=curate")).text
-    assert "⛔ 8 delta URLs cannot be promoted yet" in curate and "8 without a title · 8 without a division · 8 without a document type" in curate
-    assert 'disabled title="8 delta URLs still lack a title, division or document type"' in curate
+    assert "⛔ 8 delta URLs cannot be promoted yet" in curate and "8 without a division · 8 without a document type" in curate
+    assert ('disabled title="8 delta URLs still lack a title, division or document type,'
+            ' or share a title with another page"') in curate
     table = (await c.get(f"/collections/{CID}?tab=delta")).text
     assert "⛔ 8 cannot be promoted yet" in table
     # suggestions pending are not values yet: still refused until accepted
@@ -117,7 +121,7 @@ async def test_promote_refuses_blank_metadata_and_says_where(crawler_client):
         await c.post(f"{API}/ai/bulk", json={"decision": "accept", "field": field})
     await c.post(f"{API}/ai/reject", json={"url": url(2), "field": "division"})
     await c.post(f"{API}/ai/bulk", json={"decision": "accept", "field": "division"})
-    assert await db.incomplete_counts(CID) == {"urls": 1, "title": 0, "division": 1, "general": 0, "document_type": 0}
+    assert await db.incomplete_counts(CID) == {"urls": 1, "title": 0, "division": 1, "general": 0, "document_type": 0, "duplicate": 0}
     assert [r.url for r in (await db.list_deltas(CID, incomplete=True))[0]] == [url(2)]
     page = (await c.get(f"/collections/{CID}?tab=delta&missing=true")).text
     assert url(2) in page and url(3) not in page
@@ -137,6 +141,40 @@ async def test_promote_refuses_blank_metadata_and_says_where(crawler_client):
     assert "cannot be promoted yet" not in (await c.get(f"/collections/{CID}?tab=curate")).text
 
 
+async def test_only_a_page_the_crawl_left_untitled_counts_as_blank(crawler_client):
+    """A page the crawl titled is never blank: with no title rule the export indexes it under the
+    scraped title, so promote takes it and the cell shows that title rather than an empty dash —
+    filling the other fields by hand is enough. Only a page with no title at all is refused."""
+    c = crawler_client
+    db = c.app.state.db
+    await setup(c)
+    await db.replace_dump(CID, [
+        DumpUrl(collection_id=CID, url=url(1), scraped_title="Page 1", full_text="x"),
+        DumpUrl(collection_id=CID, url=url(2), scraped_title=None, full_text="x"),
+    ])
+    await c.post(f"{API}/recompute")
+    # the curator sets the two fields that have no fallback by hand, taking no AI suggestion
+    for i in (1, 2):
+        for field, value in (("division", "Earth Science"), ("document_type", "Documentation")):
+            r = await c.post(f"{API}/urls", json={"url": url(i), "type": field, "value": value})
+            assert r.status_code in (200, 201), r.text
+    assert await db.incomplete_counts(CID) == {"urls": 1, "title": 1, "division": 0, "general": 0, "document_type": 0, "duplicate": 0}
+    assert [d.url for d in (await db.list_deltas(CID, incomplete=True))[0]] == [url(2)]
+    # the titled row reads as titled, not as an empty cell
+    page = (await c.get(f"/collections/{CID}?tab=delta")).text
+    assert "Page 1" in page and ">scraped<" in page
+    r = await c.post(f"{API}/promote")
+    assert r.status_code == 409 and "1 delta URL cannot be promoted yet (1 without a title)" in r.text
+    # it promotes on its own and reaches the index under the scraped title
+    assert (await c.post(f"{API}/promote/urls", json={"urls": [url(1)]})).json()["promoted"] == 1
+    assert [x.title for x in export_lines(await db.load_curated(CID))] == ["Page 1"]
+    # the untitled page needs a title of its own, and then the queue is through
+    await c.post(f"{API}/urls", json={"url": url(2), "type": "title", "value": "Page 2 by hand"})
+    assert await db.incomplete_counts(CID) == {"urls": 0, "title": 0, "division": 0, "general": 0, "document_type": 0, "duplicate": 0}
+    assert (await c.post(f"{API}/promote")).status_code == 200
+    assert sorted(x.title for x in export_lines(await db.load_curated(CID))) == ["Page 1", "Page 2 by hand"]
+
+
 async def test_removals_and_excluded_rows_are_never_blocked(crawler_client):
     """A tombstone carries no metadata to the index, and an excluded row is never indexed: rows
     promoted before the rule (blank) can still be removed or kept out."""
@@ -146,7 +184,7 @@ async def test_removals_and_excluded_rows_are_never_blocked(crawler_client):
     await db.replace_curated(CID, [CuratedUrl(collection_id=CID, url=url(i), scraped_title=f"Page {i}") for i in (1, 2)])
     await db.replace_dump(CID, [DumpUrl(collection_id=CID, url=url(1), scraped_title="Page 1 (new)", full_text="x")])
     await c.post(f"{API}/patterns", json={"type": "exclude", "match": url(1)})
-    assert await db.incomplete_counts(CID) == {"urls": 0, "title": 0, "division": 0, "general": 0, "document_type": 0}
+    assert await db.incomplete_counts(CID) == {"urls": 0, "title": 0, "division": 0, "general": 0, "document_type": 0, "duplicate": 0}
     kinds = [d["kind"] for d in (await c.get(f"{API}/delta")).json()["items"]]
     assert kinds == ["deleted"]
     r = await c.post(f"{API}/promote")
