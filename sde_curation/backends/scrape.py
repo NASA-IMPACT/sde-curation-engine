@@ -146,6 +146,8 @@ class ScrapeBackend(Protocol):
 
     async def fetch_existing(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult: ...
 
+    async def resume(self, collection: Collection, since: datetime, on_progress: ProgressCb) -> ScrapeResult: ...
+
 
 def build_job(collection: Collection) -> dict[str, Any]:
     """Job JSON in the shape sde_crawler.job.merge_job expects. The crawler names its output files
@@ -259,6 +261,9 @@ def parse_failures(data: bytes) -> list[dict[str, Any]]:
 
 class LocalSubprocessScraper:
     name = "local"
+
+    async def resume(self, collection: Collection, since: datetime, on_progress: ProgressCb) -> ScrapeResult:
+        raise ScrapeError("a local crawl cannot be picked up after an engine restart — run Scrape again")
 
     def __init__(self, settings: Settings):
         self.s = settings
@@ -568,7 +573,15 @@ class SsmRemoteScraper:
         status, out = await self._invocation(await self._send(self.poll_script(cid)))
         return parse_poll(out) if status == "Success" else None
 
-    async def run(self, collection: Collection, on_progress: ProgressCb) -> ScrapeResult:
+    async def resume(self, collection: Collection, since: datetime, on_progress: ProgressCb) -> ScrapeResult:
+        """Pick a crawl back up after the engine restarted under it (a deploy cancels the watcher;
+        the crawler host never hears of it and carries on). Never submits a new crawl: the job is
+        followed if its file is still in the inbox, ingested if it finished while the engine was
+        down (a complete upload newer than `since`, when the crawl was started), else it failed."""
+        return await self.run(collection, on_progress, resume_since=since)
+
+    async def run(self, collection: Collection, on_progress: ProgressCb, *,
+                  resume_since: datetime | None = None) -> ScrapeResult:
         cid = crawl_file_stem(collection.seed_url)  # inbox job file and job log name
         docs_key = self._crawl_keys(collection)["docs"]
         before = await self._head(docs_key)
@@ -581,9 +594,25 @@ class SsmRemoteScraper:
         # that file and make the watcher crawl the site a second time after the current batch —
         # so follow the job that is already there instead.
         already = await self._poll(cid)
+        while already is None and resume_since is not None:  # SSM hiccup: must not guess on a resume
+            await asyncio.sleep(self.s.scrape_poll_interval_s)
+            already = await self._poll(cid)
         if already is not None and already.inbox:
             cmd_id = None
-            await on_progress({"attached": True, "processed": 0, "docs": 0, "failed": 0, "queued": True})
+            await on_progress({"attached": True, "processed": 0, "docs": 0, "failed": 0, "queued": True,
+                               **({"resumed": True} if resume_since is not None else {})})
+        elif resume_since is not None:
+            # the job file has left the inbox: the crawl ended while the engine was down
+            ex = await self.existing(collection)
+            if ex is None or not ex.complete or ex.modified < resume_since:
+                raise ScrapeError(
+                    "the crawl ended while the engine was restarting and left no finished upload"
+                    f" newer than {resume_since:%Y-%m-%d %H:%M}Z (it failed on the crawler host) — run Scrape again"
+                )
+            await on_progress({"resumed": True, "finished_while_down": True})
+            result = await self._resolve(collection)
+            result.external_ref, result.crawled_at = "resumed", ex.modified
+            return result
         else:
             cmd_id = await self._send(self.remote_script(build_job(collection)))
             status, out = await self._invocation(cmd_id)
