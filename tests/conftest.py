@@ -142,6 +142,8 @@ FAKE_RUN_PY = textwrap.dedent(
         {"url": f"{job['seed']}/p{i}", "title": f"Page {i}", "full_text": "text " * 5, "content_type": "text/html", "depth": 0}
         for i in range(1, n + 1) if i % 5
     ]
+    if n == 14:  # sentinel: p1 is a crawler-trap listing, ~360K tokens (more than gpt-5-nano takes)
+        pages[0]["full_text"] = " ".join(f"code{j} abstract" for j in range(120_000))
     if n == 11:  # sentinel: the site also links every page over http://, and the crawl follows both
         pages += [{**d, "url": d["url"].replace("https://", "http://", 1)} for d in pages]
     docs.write_text(json.dumps(pages))

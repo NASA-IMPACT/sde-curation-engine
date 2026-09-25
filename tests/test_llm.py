@@ -8,11 +8,21 @@ from sde_curation.config import Settings
 from sde_curation.llm.base import LLMError, LLMRetryable, make_llm
 from sde_curation.llm.fake import FakeProvider
 from sde_curation.llm.tasks import (
+    count_tokens,
+    fixed_tokens,
+    share_budget,
+    suggest_distinct_titles,
     suggest_metadata,
     suggest_metadata_one,
     suggest_patterns_batch,
 )
-from sde_curation.models import Collection, Division, MetadataSuggestion, PatternSuggestions
+from sde_curation.models import (
+    Collection,
+    DistinctTitles,
+    Division,
+    MetadataSuggestion,
+    PatternSuggestions,
+)
 from tests.conftest import wait_job
 
 # division defaults to General = "not assigned", so the model is asked for one per page
@@ -100,14 +110,75 @@ async def test_suggest_metadata_is_one_call_per_document_with_full_text_and_conf
     assert rows[0]["model"] == "fake" and rows[0]["tokens_in"] > 0
 
 
-async def test_suggest_metadata_one_sends_the_whole_page_and_records_the_model():
+def _prompt_tokens(call, schema=MetadataSuggestion):
+    """What the API would count for a fake call: system + user + response schema + framing."""
+    return fixed_tokens(call["system"], schema) + count_tokens(call["user"])
+
+
+async def test_suggest_metadata_one_sends_a_page_that_fits_whole_and_records_the_model():
     fake = FakeProvider()
-    huge = "".join(f"paragraph {i} " for i in range(100_000))  # ~1.3M chars: still sent whole
-    row = await suggest_metadata_one(fake, {"url": "https://ex.org/a", "title": "A", "text": huge,
+    page = "".join(f"paragraph {i} " for i in range(30_000))  # ~390K chars, ~60K tokens: fits
+    row = await suggest_metadata_one(fake, {"url": "https://ex.org/a", "title": "A", "text": page,
                                             "content_hash": "h"}, settings=SETTINGS)
     assert fake.calls[-1]["model"] is None and row["model"] == "fake"  # the provider's default model
-    assert fake.calls[-1]["user"].endswith(huge) and "paragraph 99999" in fake.calls[-1]["user"]
+    assert fake.calls[-1]["user"].endswith(page) and '"text_cut"' not in fake.calls[-1]["user"]
     assert row["content_hash"] == "h" and "truncated" not in row and "large_model" not in row
+
+
+async def test_suggest_metadata_one_cuts_a_page_to_fit_the_input_limit():
+    """gpt-5-nano refuses a prompt over 272K tokens; a bigger page (ascl.net's listing URLs are
+    ~780K) is cut from the end so the WHOLE prompt fits llm_max_input_tokens, and the model is told."""
+    fake = FakeProvider()
+    huge = "".join(f"paragraph {i} " for i in range(150_000))  # ~2.3M chars, ~450K tokens
+    await suggest_metadata_one(fake, {"url": "https://ex.org/a", "title": "A", "text": huge,
+                                      "content_hash": "h"}, settings=SETTINGS)
+    call = fake.calls[-1]
+    assert f'"text_chars": {len(huge)}, "text_cut": true' in call["user"]
+    assert "Text:\nparagraph 0 paragraph 1 " in call["user"] and "paragraph 149999" not in call["user"]
+    assert 269_000 < _prompt_tokens(call) <= SETTINGS.llm_max_input_tokens  # uses the room, stays under it
+    await suggest_metadata_one(fake, {"url": "https://ex.org/a", "title": "A", "text": huge, "content_hash": "h"},
+                               settings=Settings(llm_provider="fake", data_dir="/tmp/x", llm_max_input_tokens=50_000))
+    assert _prompt_tokens(fake.calls[-1]) <= 50_000
+
+
+def test_share_budget_cuts_only_the_biggest_pages():
+    assert share_budget([10, 20, 30], 100) == [10, 20, 30]  # all fit
+    assert share_budget([10, 500, 900], 410) == [10, 200, 200]  # the small one whole, the rest even
+    assert share_budget([10, 100, 900], 410) == [10, 100, 300]
+    assert sum(share_budget([7, 1_000, 3_000, 2], 999)) <= 999
+
+
+async def test_suggest_distinct_titles_cuts_the_longest_pages_to_fit():
+    fake = FakeProvider()
+    small = "Volume 12 of the calibrated images. " * 50
+    huge = "".join(f"row {i} " for i in range(250_000))  # ~500K tokens
+    docs = [{"url": "https://ex.org/v12", "title": "Vol", "text": small},
+            {"url": "https://ex.org/all", "title": "Vol", "text": huge}]
+    await suggest_distinct_titles(fake, docs, shared_title="Vol", sharing=2, settings=SETTINGS)
+    call = fake.calls[-1]
+    assert _prompt_tokens(call, DistinctTitles) <= SETTINGS.llm_max_input_tokens
+    assert small in call["user"] and "row 249999" not in call["user"]  # the small page whole
+    assert f'"text_chars": {len(small)}}}' in call["user"] and f'"text_chars": {len(huge)}, "text_cut": true' in call["user"]
+
+
+async def test_a_prompt_the_provider_still_refuses_as_too_long_is_cut_and_asked_again():
+    """The local count is the GPT-5 tokenizer's; if the provider still says too long, the call is
+    re-sent once, shorter by what its error message counted over the limit."""
+    from sde_curation.llm.base import LLMInputTooLong
+
+    class Strict(FakeProvider):
+        async def complete(self, *, system, user, schema, model=None):
+            if not self.calls:
+                self.calls.append({"user": user})
+                raise LLMInputTooLong("too long", got=300_000, limit=272_000)
+            return await super().complete(system=system, user=user, schema=schema, model=model)
+
+    fake = Strict()
+    huge = "".join(f"paragraph {i} " for i in range(150_000))
+    row = await suggest_metadata_one(fake, {"url": "https://ex.org/a", "title": "A", "text": huge,
+                                            "content_hash": "h"}, settings=SETTINGS)
+    first, second = count_tokens(fake.calls[0]["user"]), count_tokens(fake.calls[1]["user"])
+    assert first - second >= 28_000 and row["title"]  # cut by the 28K over (+2%), and answered
 
 
 async def test_schemas_reject_bad_enums():
@@ -237,6 +308,7 @@ async def test_metadata_suggestions_flow(crawler_client):
     p = job["progress"]
     assert job["state"] == "succeeded" and p["classified"] == 8 and p["done"] == 8 and p["failed"] == 0, job
     assert p["llm"] == "metadata" and p["tokens_in"] > 0 and p["inflight"] == 0
+    assert p["tokens_cache_write"] == 0  # counted per job, next to tokens in / out
     d = (await c.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["title_ai"] == "Page 2" and d["document_type_ai"] == "Documentation"
     assert d["title_ai_conf"] == "high" and d["document_type_ai_conf"] == "low" and d["ai_model"] == "fake"
@@ -457,7 +529,7 @@ async def test_prompts_are_visible(crawler_client):
     c = crawler_client
     r = await c.get("/api/llm/prompts")
     assert r.status_code == 200 and "exclude" in r.json()["patterns"]["system"]
-    assert "confidence" in r.json()["metadata"]["system"] and "FULL page text, never cut" in r.json()["metadata"]["user"]
+    assert "confidence" in r.json()["metadata"]["system"] and "FULL page text; cut from the end only when" in r.json()["metadata"]["user"]
     await setup(c)
     page = (await c.get("/collections/ex.org?tab=curate")).text
     assert page.count("Show the prompt") == 2 and "search result" in page
@@ -480,7 +552,9 @@ async def test_openai_provider_sends_temperature_only_when_configured():
             answer = MetadataSuggestion(title="T", title_confidence="high", division="Earth Science", division_confidence="low", document_type="Data",
                                         document_type_confidence="low")
             msg = SimpleNamespace(parsed=answer, refusal=None, content=None)
-            return SimpleNamespace(choices=[SimpleNamespace(message=msg)], model=kw["model"], usage=None)
+            return SimpleNamespace(choices=[SimpleNamespace(message=msg)], model=kw["model"], usage=self.usage)
+
+        usage = None
 
     async def run(**over):
         p = OpenAIProvider(Settings(openai_api_key="k", llm_provider="openai", **over))
@@ -490,6 +564,44 @@ async def test_openai_provider_sends_temperature_only_when_configured():
 
     assert "temperature" not in await run()
     assert (await run(llm_temperature=0))["temperature"] == 0
+
+    # page text is unique per call: only the system prompt may be written to the prompt cache
+    call = await run()
+    assert call["prompt_cache_options"] == {"mode": "explicit"}
+    sys_msg, user_msg = call["messages"]
+    assert sys_msg["content"] == [{"type": "text", "text": "s", "prompt_cache_breakpoint": {"mode": "explicit"}}]
+    assert user_msg == {"role": "user", "content": "u"}
+    call = await run(openai_prompt_cache="provider_default")
+    assert "prompt_cache_options" not in call and call["messages"][0]["content"] == "s"
+
+
+async def test_openai_provider_records_cache_writes_and_alarms_when_page_text_is_written(caplog):
+    """Cache writes are billed at 1.25× input on gpt-5.6+: they are counted per call, and a call that
+    wrote more than its system prompt (page text in the cache again) logs an error."""
+    from types import SimpleNamespace
+
+    from sde_curation.llm.openai import OpenAIProvider
+
+    system = "x" * 8_000  # ~2k tokens, like the real system prompts
+    p = OpenAIProvider(Settings(openai_api_key="k", llm_provider="openai"))
+
+    async def answer(written):
+        usage = SimpleNamespace(prompt_tokens=50_000, completion_tokens=10, prompt_tokens_details=SimpleNamespace(
+            cached_tokens=0, cache_write_tokens=written))
+        msg = SimpleNamespace(parsed=MetadataSuggestion(
+            title="T", title_confidence="high", division="Earth Science", division_confidence="low",
+            document_type="Data", document_type_confidence="low"), refusal=None, content=None)
+
+        async def parse(**kw):
+            return SimpleNamespace(choices=[SimpleNamespace(message=msg)], model=kw["model"], usage=usage)
+        p.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))
+        return await p.complete(system=system, user="u", schema=MetadataSuggestion)
+
+    caplog.clear()
+    assert (await answer(1_848)).tokens_cache_write == 1_848  # the system prompt: expected
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert (await answer(48_000)).tokens_cache_write == 48_000  # the page too: alarm
+    assert any("wrote 48000 prompt tokens to the cache" in r.getMessage() for r in caplog.records)
 
 
 async def test_metadata_job_resumes_after_an_engine_restart(tmp_path):
@@ -544,3 +656,78 @@ async def test_metadata_job_resumes_after_an_engine_restart(tmp_path):
         await asyncio.sleep(0.2)
         jobs = (await c.get("/api/collections/ex.org/jobs")).json()
         assert jobs[0]["state"] == "failed" and "cancelled by" in jobs[0]["error"] and len(jobs) == 4  # scrape + 3
+
+
+async def test_openai_provider_drops_cache_options_on_a_model_that_rejects_them():
+    """Models before gpt-5.6 answer 400 to `prompt_cache_options` (they have no cache-write charge):
+    the call is re-sent without it, and that model is never sent it again."""
+    from types import SimpleNamespace
+
+    import httpx
+    from openai import BadRequestError
+
+    from sde_curation.llm.openai import OpenAIProvider
+
+    calls = []
+
+    async def parse(**kw):
+        calls.append(kw)
+        if "prompt_cache_options" in kw:
+            raise BadRequestError("prompt_cache_options is not supported on this model",
+                                  response=httpx.Response(400, request=httpx.Request("POST", "https://x")),
+                                  body={"message": "not supported", "param": "prompt_cache_options"})
+        msg = SimpleNamespace(parsed=MetadataSuggestion(
+            title="T", title_confidence="high", division="Earth Science", division_confidence="low",
+            document_type="Data", document_type_confidence="low"), refusal=None, content=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)], model=kw["model"], usage=None)
+
+    p = OpenAIProvider(Settings(openai_api_key="k", llm_provider="openai", openai_model="gpt-5-nano"))
+    p.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))
+    assert (await p.complete(system="s", user="u", schema=MetadataSuggestion)).parsed.title == "T"
+    assert ["prompt_cache_options" in c for c in calls] == [True, False]
+    assert calls[1]["messages"][0] == {"role": "system", "content": "s"}
+    await p.complete(system="s", user="u", schema=MetadataSuggestion)
+    assert len(calls) == 3 and "prompt_cache_options" not in calls[2]  # remembered: one call, no 400
+
+
+async def test_openai_provider_reports_a_too_long_prompt_with_its_token_counts():
+    from types import SimpleNamespace
+
+    import httpx
+    from openai import BadRequestError
+
+    from sde_curation.llm.base import LLMInputTooLong
+    from sde_curation.llm.openai import OpenAIProvider
+
+    async def parse(**kw):
+        raise BadRequestError(
+            "Error code: 400 - Input tokens exceed the configured limit of 272000 tokens. Your messages"
+            " resulted in 300010 tokens. Please reduce the length of the messages.",
+            response=httpx.Response(400, request=httpx.Request("POST", "https://x")),
+            body={"message": "…", "param": "messages", "code": "context_length_exceeded"})
+
+    p = OpenAIProvider(Settings(openai_api_key="k", llm_provider="openai", openai_prompt_cache="provider_default"))
+    p.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))
+    with pytest.raises(LLMInputTooLong) as e:
+        await p.complete(system="s", user="u", schema=MetadataSuggestion)
+    assert (e.value.limit, e.value.got) == (272_000, 300_010)
+
+
+async def test_metadata_job_classifies_a_page_too_long_for_the_model(tmp_path):
+    """End to end: a crawl with one ~360K-token page (max_pages=14, see FAKE_RUN_PY). Every page is
+    classified, none fails, and the long one went to the model cut to fit."""
+    from httpx import ASGITransport, AsyncClient
+
+    from tests.conftest import _crawler_app
+    app = _crawler_app(tmp_path)
+    async with app.router.lifespan_context(app), AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        await setup(c, n=14)
+        fake = app.state.jobs._llm = FakeProvider()
+        assert (await c.post("/api/collections/ex.org/suggest/metadata")).status_code == 202
+        job = await wait_job(c, "ex.org")
+        assert job["state"] == "succeeded" and job["progress"]["failed"] == 0, job
+        assert job["progress"]["classified"] == job["progress"]["total"] == 12
+        long = [call for call in fake.calls if '"url": "https://ex.org/p1"' in call["user"]]
+        assert len(long) == 1 and '"text_cut": true' in long[0]["user"]
+        assert _prompt_tokens(long[0]) <= app.state.jobs.s.llm_max_input_tokens
+        assert all('"text_cut"' not in call["user"] for call in fake.calls if call not in long)

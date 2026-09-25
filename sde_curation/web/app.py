@@ -321,8 +321,9 @@ def llm_prompts(settings: Settings, c: Collection | None = None) -> dict[str, di
             "system": metadata_system(ask_division),
             "user": ("Document:\n{\"collection\": name, \"collection_seed\": …, \"collection_division\": only when the"
                      " curator set one (then no division is asked for), \"collection_document_type\": only when set,"
-                     " \"url\": …, \"scraped_title\": …, \"text_chars\": N}\n\nText:\n"
-                     f"<the FULL page text, never cut; every page goes to {settings.openai_model}>"),
+                     " \"url\": …, \"scraped_title\": …, \"text_chars\": N, \"text_cut\": true only when cut}\n\nText:\n"
+                     f"<the FULL page text; cut from the end only when the call would pass"
+                     f" {settings.llm_max_input_tokens:,} tokens; every page goes to {settings.openai_model}>"),
         },
         "titles": {
             "system": TITLES_SYSTEM,
@@ -331,8 +332,9 @@ def llm_prompts(settings: Settings, c: Collection | None = None) -> dict[str, di
                      " \"pages_to_retitle\": how many are in this call, \"url_differs_at\": {url: [the parts of it the"
                      " other URLs do not have], …}, \"settled_titles\": [{\"url\": …, \"title\": a title already taken},"
                      f" … up to {TITLE_SIBLINGS}], \"previous_titles\": [answers that already failed]}}"
-                     "\n\nPage 1 of K:\n{\"url\": …, \"scraped_title\": …, \"text_chars\": N}\nText:\n"
-                     "<the FULL page text, never cut>\n\nPage 2 of K:\n…"
+                     "\n\nPage 1 of K:\n{\"url\": …, \"scraped_title\": …, \"text_chars\": N, \"text_cut\": true only when cut}\nText:\n"
+                     f"<the FULL page text; the longest are cut from the end only when the call would pass"
+                     f" {settings.llm_max_input_tokens:,} tokens>\n\nPage 2 of K:\n…"
                      f"\n\n— one call per duplicate group, every page of it together, split at"
                      f" {settings.llm_title_group_chars:,} characters of text"),
         },

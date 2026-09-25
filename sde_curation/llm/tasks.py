@@ -21,7 +21,7 @@ from ..models import (
     PatternSuggestions,
     division_assigned,
 )
-from .base import Completion, LLMError, LLMProvider
+from .base import Completion, LLMError, LLMInputTooLong, LLMProvider
 
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -130,6 +130,8 @@ search engine over NASA science content. You receive the collection (the website
 crawled from), the page URL, its scraped title and its full text (possibly long). The scraped
 title is often the same site-wide string on every page, and the text usually starts with the
 site's navigation menu, alerts and login links: skip that chrome and read the page's own content.
+A page too long to send whole is cut from the end: `text_cut` is then true and `text_chars` is the
+length of the whole page, so judge it from the part you have (a huge page is usually a listing).
 
 Every page of a collection is classified in a separate call, and the answers must agree with
 each other: apply the rules below the same way every time.
@@ -206,7 +208,8 @@ NASA science content. Several pages of one collection (the website they were cra
 up with the same title and the same document type, so a list of search results cannot tell them
 apart. You receive the WHOLE GROUP in one call and rewrite it in one go: the collection, the title
 and document type they share (the type stays as it is: you only write titles), and for every page
-you must retitle its URL, its scraped title and its FULL text. The text usually starts with the
+you must retitle its URL, its scraped title and its FULL text (a page too long to send whole is
+cut from the end, with `text_cut` true and `text_chars` the whole length). The text usually starts with the
 site's navigation menu, alerts and login links: skip that chrome and read the page's own content.
 
 Also given:
@@ -328,15 +331,84 @@ def disambiguate(shared_title: str, urls: Iterable[str], *, taken: Iterable[str]
     return out
 
 
+# ── fitting a prompt under llm_max_input_tokens ───────────────────────
+# Counted with the GPT-5 tokenizer (o200k_base): it matched the API's prompt_tokens to within the 6
+# tokens of chat framing on a 200K-token prompt. The response schema is part of the prompt too.
+_ENCODING = None
+FRAMING_TOKENS = 200  # chat roles / separators and slack for the count
+
+
+def _enc():
+    global _ENCODING
+    if _ENCODING is None:
+        import tiktoken
+        _ENCODING = tiktoken.get_encoding("o200k_base")
+    return _ENCODING
+
+
+def count_tokens(s: str) -> int:
+    return len(_enc().encode(s, disallowed_special=()))
+
+
+def fit_text(text: str, budget: int) -> str:
+    """`text` if it is at most `budget` tokens, else its first `budget` tokens."""
+    if budget <= 0:
+        return ""
+    if len(text.encode("utf-8")) <= budget:  # a token is at least one byte: no need to count
+        return text
+    tokens = _enc().encode(text, disallowed_special=())
+    return text if len(tokens) <= budget else _enc().decode(tokens[:budget])
+
+
+def page_tokens(text: str) -> int:
+    n = len(text.encode("utf-8"))
+    return n if n <= 1_000 else count_tokens(text)  # a short page is not worth encoding
+
+
+def share_budget(sizes: list[int], budget: int) -> list[int]:
+    """Split `budget` tokens across pages of `sizes` tokens: pages smaller than an even share keep
+    all of theirs, and what they leave over goes to the big ones — only the biggest are cut."""
+    out = list(sizes)
+    left, rest = max(budget, 0), sorted(range(len(sizes)), key=lambda i: sizes[i])
+    while rest:
+        share = left // len(rest)
+        i = rest[0]
+        if sizes[i] > share:
+            for j in rest:
+                out[j] = share
+            break
+        left -= sizes[i]
+        rest.pop(0)
+    return out
+
+
+def fixed_tokens(system: str, schema: type) -> int:
+    """What a call costs before any page text: the system prompt, the response schema, framing."""
+    return count_tokens(system) + count_tokens(json.dumps(schema.model_json_schema())) + FRAMING_TOKENS
+
+
+def after_refusal(budget: int, e: LLMInputTooLong) -> int:
+    """The text budget to ask again with after the provider said the prompt was too long: short by
+    what it counted over the limit (from its message), with 2% slack; a tenth less when it said none."""
+    over = (e.got - e.limit) if e.got and e.limit else budget // 10
+    return max(budget - over - budget // 50, 0)
+
+
+def text_meta(total_chars: int, sent: str) -> dict[str, Any]:
+    """`text_chars` (the whole page's length) plus `text_cut: true` when only its start is sent."""
+    return {"text_chars": total_chars, **({"text_cut": True} if len(sent) < total_chars else {})}
+
+
 async def suggest_distinct_titles(
     llm: LLMProvider, docs: list[dict[str, Any]], *, shared_title: str, sharing: int,
     settled: list[dict[str, Any]] | None = None, previous: Iterable[str] = (),
-    document_type: str | None = None, collection: Collection | None = None,
+    document_type: str | None = None, collection: Collection | None = None, settings: Settings,
 ) -> dict[str, Any]:
     """ONE call for a whole group of pages {url, title, text} that would all be indexed under
     `shared_title` + `document_type`: the model sees them together, so it can tell them apart from
-    each other instead of guessing page by page and colliding all over again. Every page's FULL text
-    goes in; `settled` are the group's pages whose titles will not change (their titles only, as
+    each other instead of guessing page by page and colliding all over again. Every page's text goes
+    in, whole unless the group would pass `settings.llm_max_input_tokens` — then the longest texts
+    are cut from the end, evenly, until it fits; `settled` are the group's pages whose titles will not change (their titles only, as
     constraints) and `previous` are answers an earlier pass already gave and that did not work.
 
     Returns {"titles": {url: {"title", "title_conf"}}, "same_page_groups", "model", tokens…}. Only
@@ -355,15 +427,28 @@ async def suggest_distinct_titles(
     }
     if previous := [p for p in previous if p]:
         header["previous_titles"] = sorted(set(previous))
-    pages = "\n\n".join(
-        f"Page {i} of {len(docs)}:\n"
-        + json.dumps({"url": d["url"], "scraped_title": d.get("title"),
-                      "text_chars": len(d.get("text") or "")}, ensure_ascii=False)
-        + "\nText:\n" + (d.get("text") or "")
-        for i, d in enumerate(docs, 1)
-    )
-    user = "Group:\n" + json.dumps(header, ensure_ascii=False) + "\n\n" + pages
-    done = await llm.complete(system=TITLES_SYSTEM, user=user, schema=DistinctTitles)
+    texts = [d.get("text") or "" for d in docs]
+    sizes = [page_tokens(t) for t in texts]
+
+    def build(budget: int) -> str:
+        """The prompt with the pages' texts cut to share `budget` tokens between them."""
+        cut = [fit_text(t, n) for t, n in zip(texts, share_budget(sizes, budget), strict=True)]
+        pages = "\n\n".join(
+            f"Page {i} of {len(docs)}:\n"
+            + json.dumps({"url": d["url"], "scraped_title": d.get("title"), **text_meta(len(t), c)},
+                         ensure_ascii=False)
+            + "\nText:\n" + c
+            for i, (d, t, c) in enumerate(zip(docs, texts, cut, strict=True), 1)
+        )
+        return "Group:\n" + json.dumps(header, ensure_ascii=False) + "\n\n" + pages
+
+    # everything but the texts, counted with every page marked cut (the longest header it can have)
+    frame = build(0)
+    budget = settings.llm_max_input_tokens - fixed_tokens(TITLES_SYSTEM, DistinctTitles) - count_tokens(frame)
+    try:
+        done = await llm.complete(system=TITLES_SYSTEM, user=build(budget), schema=DistinctTitles)
+    except LLMInputTooLong as e:  # the count was off: cut by what the provider says, once
+        done = await llm.complete(system=TITLES_SYSTEM, user=build(after_refusal(budget, e)), schema=DistinctTitles)
 
     asked = {d["url"] for d in docs}
     blocked = {norm_title(shared_title), *(norm_title(s.get("title") or "") for s in settled),
@@ -379,6 +464,7 @@ async def suggest_distinct_titles(
         "titles": titles, "same_page_groups": [g for g in done.parsed.same_page_groups if len(g) > 1],
         "model": done.model,
         "tokens_in": done.tokens_in, "tokens_out": done.tokens_out, "tokens_cached": done.tokens_cached,
+        "tokens_cache_write": done.tokens_cache_write,
     }
 
 
@@ -427,7 +513,7 @@ async def suggest_metadata_one(
     A collection whose curator set a division is asked for the title and document type only: the
     division goes along as context (`collection_division`), the answer has no division field, and
     the returned row carries none — so no division suggestion ever turns up for review."""
-    text = doc.get("text") or ""  # the whole page, never cut: an accurate title needs all of it
+    text = doc.get("text") or ""  # the whole page unless it does not fit llm_max_input_tokens
     # the curator's division, or None while the collection is still on the General placeholder
     division = collection.division if collection is not None and division_assigned(collection.division) else None
     header: dict[str, Any] = {}
@@ -438,10 +524,20 @@ async def suggest_metadata_one(
             header["collection_division"] = division.value
         if collection.document_type is not None:
             header["collection_document_type"] = collection.document_type.value
-    header |= {"url": doc["url"], "scraped_title": doc.get("title"), "text_chars": len(text)}
-    user = "Document:\n" + json.dumps(header, ensure_ascii=False) + "\n\nText:\n" + text
+    header |= {"url": doc["url"], "scraped_title": doc.get("title")}
     schema = MetadataSuggestion if division is None else MetadataSuggestionNoDivision
-    done = await llm.complete(system=metadata_system(division is None), user=user, schema=schema)
+    system = metadata_system(division is None)
+
+    def build(budget: int) -> str:
+        sent = fit_text(text, budget)
+        return ("Document:\n" + json.dumps(header | text_meta(len(text), sent), ensure_ascii=False)
+                + "\n\nText:\n" + sent)
+
+    budget = settings.llm_max_input_tokens - fixed_tokens(system, schema) - count_tokens(build(0))
+    try:
+        done = await llm.complete(system=system, user=build(budget), schema=schema)
+    except LLMInputTooLong as e:  # the count was off: cut by what the provider says, once
+        done = await llm.complete(system=system, user=build(after_refusal(budget, e)), schema=schema)
     r = done.parsed
     if not r.title.strip():  # recorded on the row as a failure; the next Suggest metadata asks again
         raise LLMError("the model returned an empty title")
@@ -456,6 +552,7 @@ async def suggest_metadata_one(
         "document_type": r.document_type, "document_type_conf": r.document_type_confidence,
         "model": done.model, "content_hash": doc.get("content_hash"),
         "tokens_in": done.tokens_in, "tokens_out": done.tokens_out, "tokens_cached": done.tokens_cached,
+        "tokens_cache_write": done.tokens_cache_write,
     }
 
 

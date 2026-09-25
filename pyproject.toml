@@ -20,6 +20,7 @@ dependencies = [
     "opensearch-py>=2.6",
     "python-slugify>=8.0.4",  # same slug rule as COSMOS: config_folder = slugify(name, separator="_")
     "ijson>=3.3",  # the crawl's documents file is one JSON array of up to 100k pages: parsed as a stream
+    "tiktoken>=0.9",  # counts prompt tokens so a page can be cut to fit llm_max_input_tokens
 ]
 
 [dependency-groups]
