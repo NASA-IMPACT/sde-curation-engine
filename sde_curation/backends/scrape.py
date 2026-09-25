@@ -580,6 +580,21 @@ class SsmRemoteScraper:
         down (a complete upload newer than `since`, when the crawl was started), else it failed."""
         return await self.run(collection, on_progress, resume_since=since)
 
+    async def _finished_since(self, collection: Collection, since: datetime,
+                              on_progress: ProgressCb) -> ScrapeResult:
+        """A resumed crawl whose job file has left the inbox: ingest its upload if it finished
+        after `since` (when the scrape started), else it failed on the host."""
+        ex = await self.existing(collection)
+        if ex is None or not ex.complete or ex.modified < since:
+            raise ScrapeError(
+                "the crawl ended while the engine was restarting and left no finished upload"
+                f" newer than {since:%Y-%m-%d %H:%M}Z (it failed on the crawler host) — run Scrape again"
+            )
+        await on_progress({"resumed": True, "finished_while_down": True})
+        result = await self._resolve(collection)
+        result.external_ref, result.crawled_at = "resumed", ex.modified
+        return result
+
     async def run(self, collection: Collection, on_progress: ProgressCb, *,
                   resume_since: datetime | None = None) -> ScrapeResult:
         cid = crawl_file_stem(collection.seed_url)  # inbox job file and job log name
@@ -603,16 +618,7 @@ class SsmRemoteScraper:
                                **({"resumed": True} if resume_since is not None else {})})
         elif resume_since is not None:
             # the job file has left the inbox: the crawl ended while the engine was down
-            ex = await self.existing(collection)
-            if ex is None or not ex.complete or ex.modified < resume_since:
-                raise ScrapeError(
-                    "the crawl ended while the engine was restarting and left no finished upload"
-                    f" newer than {resume_since:%Y-%m-%d %H:%M}Z (it failed on the crawler host) — run Scrape again"
-                )
-            await on_progress({"resumed": True, "finished_while_down": True})
-            result = await self._resolve(collection)
-            result.external_ref, result.crawled_at = "resumed", ex.modified
-            return result
+            return await self._finished_since(collection, resume_since, on_progress)
         else:
             cmd_id = await self._send(self.remote_script(build_job(collection)))
             status, out = await self._invocation(cmd_id)
@@ -632,6 +638,10 @@ class SsmRemoteScraper:
             if poll is None:  # SSM hiccup: neither evidence of life nor of death
                 continue
             if not poll.fresh(submitted):
+                if not poll.inbox and resume_since is not None:
+                    # the crawl we picked back up ended between our first poll and its next log
+                    # write: it finished (or died) while we were starting
+                    return await self._finished_since(collection, resume_since, on_progress)
                 if not poll.inbox:
                     raise ScrapeError(
                         "job file vanished from the crawler inbox before the crawl started"

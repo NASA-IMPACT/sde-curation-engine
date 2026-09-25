@@ -482,9 +482,10 @@ def _old_shutdown(jm):
 
 
 def _host_finishes(host, upload):
+    """The crawl writes its last lines (touching the log, as the real crawler does) and uploads."""
     def finish(n):
         if n >= 2:
-            host.tail = PAGES + ["# s3 documents=...", "# exit=0 elapsed_s=9.0"]
+            host.start_crawl(PAGES + ["# s3 documents=...", "# exit=0 elapsed_s=9.0"])
             if n == 2:
                 upload()
     host.polls, host.on_poll = 0, finish
@@ -551,3 +552,25 @@ async def test_a_scrape_cancelled_by_a_curator_stays_cancelled_across_a_restart(
         jobs = (await c.get("/api/collections/ex.org/jobs")).json()
         assert len(jobs) == 1 and jobs[0]["state"] == "failed" and jobs[0]["error"].startswith("cancelled by ")
         assert jobs[0]["error"] != "cancelled by shutdown"
+
+
+async def test_ssm_resume_ingests_a_crawl_that_finished_just_as_the_engine_came_back(ssm_env):
+    """The job file is still in the inbox at the first poll, then gone before the log moves again:
+    the crawl finished while the engine was starting. That is 'finished while down', not
+    'job file vanished before the crawl started'."""
+    from datetime import UTC, datetime, timedelta
+    host, make, upload = ssm_env
+    host.inbox.add("https_ex.org.json")
+    host.log_mtime, host.tail = int(time.time()) - 60, PAGES  # last written a minute ago
+
+    def on_poll(n):
+        if n == 2:  # run.py uploaded, wrote exit=0 (before we started), moved the job to done/
+            upload()
+            host.inbox.discard("https_ex.org.json")
+
+    host.on_poll = on_poll
+    seen, cb = await progress_recorder()
+    s = make()
+    res = await s.resume(coll(5), datetime.now(UTC) - timedelta(minutes=5), cb)
+    assert _drops(s) == [] and seen[-1] == {"resumed": True, "finished_while_down": True}
+    assert json.loads(_docs_text(res))[0]["url"] == "https://ex.org/a"
