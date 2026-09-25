@@ -15,8 +15,8 @@
   {%- if p.phase == 'ingest' %}storing the crawl · {{ '{:,}'.format(p.ingested or 0) }}{% if p.ingest_total %} of {{ '{:,}'.format(p.ingest_total) }}{% endif %} page{{ 's' if (p.ingested or 0) != 1 }} read{% if p.failures %} · {{ p.failures }} failed{% endif %}
   {%- elif p.phase == 'ingest_store' %}storing the crawl · {{ '{:,}'.format(p.ingested or 0) }} page{{ 's' if (p.ingested or 0) != 1 }} read · writing them to the database{% if p.failures %} · {{ p.failures }} failed{% endif %}
   {%- elif p.reused %}loading existing crawl{% if p.docs %} · {{ p.docs }} docs{% endif %}
-  {%- elif p.queued %}{{ 'following a crawl already on the host, queued' if p.attached else 'queued' }} {{ job.started_at|since }}{% if p.queue_ahead %} behind {{ p.queue_ahead }} crawl{{ 's' if p.queue_ahead != 1 }}{% endif %}
-  {%- elif p.attached and p.docs is defined %}{{ p.docs }} docs{% if p.failed %}, {{ p.failed }} failed{% endif %} · following a crawl that was already running on the host
+  {%- elif p.queued %}{{ ('picked back up after an engine restart, queued' if p.resumed else 'following a crawl already on the host, queued') if p.attached else 'queued' }} {{ job.started_at|since }}{% if p.queue_ahead %} behind {{ p.queue_ahead }} crawl{{ 's' if p.queue_ahead != 1 }}{% endif %}
+  {%- elif p.attached and p.docs is defined %}{{ p.docs }} docs{% if p.failed %}, {{ p.failed }} failed{% endif %} · {{ 'picked back up after an engine restart' if p.resumed else 'following a crawl that was already running on the host' }}
   {%- elif p.phase == 'dispatch' %}exported {{ p.exported }} · starting indexer
   {%- elif p.phase == 'indexing' %}indexing {{ p.exported }} docs{% if p.waiting_s %} · {{ (p.waiting_s // 60)|int }}m{% endif %}
   {%- elif p.phase == 'preflight' %}checking the prod index{% if p.source_test_run %} · publishing test run {{ p.source_test_run }}{% endif %}

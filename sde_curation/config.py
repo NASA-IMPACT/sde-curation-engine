@@ -143,6 +143,10 @@ class Settings(BaseSettings):
     # it. Its answers are saved as they arrive, so the restarted engine carries on with the URLs still
     # missing — at most this many times per run (a job that itself brings the engine down must stop).
     llm_resume_after_restart: int = Field(default=3, ge=0, le=20)
+    # A crawl runs on the crawler host and outlives an engine restart (a deploy): the same scrape job
+    # stays running and the next start watches the crawl again, up to this many restarts per job.
+    # 0 = fail it on restart.
+    scrape_resume_after_restart: int = Field(default=3, ge=0, le=20)
     llm_retry_delay_s: float = Field(default=30.0, ge=0)
     # Suggest metadata sends the full page text — cut from the end only when the call would pass
     # llm_max_input_tokens — one call per URL. Suggest patterns sends every crawled URL (+ title) in batches of this size.
