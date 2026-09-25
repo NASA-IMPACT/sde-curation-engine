@@ -113,8 +113,23 @@ class Settings(BaseSettings):
     # ── LLM ────────────────────────────────────────────────────────────
     llm_provider: Literal["openai", "fake"] = "openai"
     openai_api_key: str | None = None
-    openai_model: str = "gpt-5.6-luna"  # 1.05M-token window: every page fits, whole
+    openai_model: str = "gpt-5-nano"  # $0.05 / $0.40 per 1M in / out; 272K-token input cap (pages
+    # are cut to llm_max_input_tokens to fit). Was gpt-5.6-luna until 2026-09-25: $0.20+ in, 2×
+    # over 272K tokens, and a ~$360 day on ascl.net's multi-megabyte listing pages
     openai_base_url: str | None = None  # any OpenAI-compatible endpoint
+    # gpt-5.6+ caches implicitly by default: the whole prompt is written to the cache and billed at
+    # 1.25× input, but page text is unique per call and never read back (2026-09-24: ~$360 of cache
+    # writes in one job). "system" sends `prompt_cache_options.mode=explicit` with one breakpoint at
+    # the end of the system prompt: only that (~2k tokens, the same on every call) is written, reads
+    # cost 0.1×, and the page is billed as plain input. Verified on Chat Completions 2026-09-25.
+    # "provider_default" sends no cache options — for endpoints that reject them; on gpt-5.6+ it
+    # brings the page-text cache writes back.
+    openai_prompt_cache: Literal["system", "provider_default"] = "system"
+    # The most prompt tokens one call may carry: system prompt + header + page text (+ the response
+    # schema). A page too long for it is cut from the end and the model is told (`text_cut`), so no
+    # call fails for length. gpt-5-nano refuses more than 272K; 270K leaves room for the chat framing.
+    # On gpt-5.6 it also keeps every call out of the 2× long-context price tier (>272K).
+    llm_max_input_tokens: int = Field(default=270_000, ge=1_000)
     # Sent only when set. Reasoning models (gpt-5 family, o-series) reject any value but their
     # default and fail every call with 400; leave unset unless the model is known to accept it.
     llm_temperature: float | None = Field(default=None, ge=0, le=2)
@@ -129,15 +144,17 @@ class Settings(BaseSettings):
     # missing — at most this many times per run (a job that itself brings the engine down must stop).
     llm_resume_after_restart: int = Field(default=3, ge=0, le=20)
     llm_retry_delay_s: float = Field(default=30.0, ge=0)
-    # Suggest metadata always sends the FULL page text (no budget, no truncation, one model), one
-    # call per URL. Suggest patterns sends every crawled URL (+ title) in batches of this size.
+    # Suggest metadata sends the full page text — cut from the end only when the call would pass
+    # llm_max_input_tokens — one call per URL. Suggest patterns sends every crawled URL (+ title) in batches of this size.
     llm_pattern_batch_urls: int = Field(default=1000, ge=50, le=10_000)
     # Regenerate duplicate titles is the one pass that calls per GROUP, not per page: the pages that
     # share a title go to the model together so it can tell them apart from each other instead of
-    # guessing one at a time and colliding again. Their full texts go in uncut, so what bounds a
-    # call is characters, not pages — a group over the budget is split, and each later call is told
-    # the titles the earlier ones already used. 800k chars ≈ 200k tokens, a fifth of the window.
-    llm_title_group_chars: int = Field(default=800_000, ge=20_000)
+    # guessing one at a time and colliding again. Their full texts go in (cut only past
+    # llm_max_input_tokens, see tasks.share_budget), so what bounds a call is characters, not
+    # pages — a group over the budget is split, and each later call is told the titles the earlier
+    # ones already used. 600k chars ≈ 155k tokens at ascl.net's ~3.9
+    # chars/token, leaving room under gpt-5-nano's 272K-token input cap for denser text + the header.
+    llm_title_group_chars: int = Field(default=600_000, ge=20_000)
     # How many times the pass may re-ask a group it did not manage to tell apart before the URLs
     # decide it (see tasks.disambiguate). 0 = ask once, then disambiguate.
     llm_title_passes: int = Field(default=2, ge=0, le=5)

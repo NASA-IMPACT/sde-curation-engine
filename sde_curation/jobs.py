@@ -399,6 +399,8 @@ class JobManager:
                 job.progress["suggestions"] = job.progress.get("suggestions", 0) + added
                 job.progress["tokens_in"] = job.progress.get("tokens_in", 0) + done.tokens_in
                 job.progress["tokens_out"] = job.progress.get("tokens_out", 0) + done.tokens_out
+                job.progress["tokens_cache_write"] = (job.progress.get("tokens_cache_write", 0)
+                                                      + done.tokens_cache_write)
 
             await run_pool(list(enumerate(chunks)), one, workers=self.s.llm_workers, on_result=on_result,
                            on_progress=progress, total=len(chunks), **self._retry())
@@ -418,7 +420,8 @@ class JobManager:
                 raise LLMError("no delta URLs to classify — Start curating (recompute) first (or all already have suggestions)")
             progress = self._progress_cb(c, job)
             await progress({"llm": "metadata", "total": total, "done": 0, "failed": 0, "inflight": 0,
-                            "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
+                            "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
+                            "tokens_cache_write": 0})
             llm = self.llm()
             buf: list[dict[str, Any]] = []
             errs: list[tuple[str, str]] = []
@@ -472,7 +475,8 @@ class JobManager:
         """Regenerate duplicate titles, on demand: the same pass Suggest metadata ends with, over every title +
         document type that a delta URL shares with another page (whoever set them: AI, a rule, a curator)."""
         async def body():
-            await self._progress_cb(c, job)({"llm": "titles", "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
+            await self._progress_cb(c, job)({"llm": "titles", "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
+                                                 "tokens_cache_write": 0})
             if not await self._retitle_duplicates(c, job, self.llm()):
                 raise LLMError("no delta URL shares its title and document type with another page")
         await self._guarded(c, job, body)
@@ -586,7 +590,8 @@ class JobManager:
                     settled = title_siblings(settled, docs[0]["url"])
                 row = await suggest_distinct_titles(
                     llm, docs, shared_title=g["origin"], document_type=g["document_type"],
-                    sharing=len(g["members"]), settled=settled, previous=g["previous"], collection=c)
+                    sharing=len(g["members"]), settled=settled, previous=g["previous"], collection=c,
+                    settings=self.s)
                 given |= {u: {**t, "model": row["model"]} for u, t in row["titles"].items()}
                 same_pages += row["same_page_groups"]
                 made += 1
@@ -1062,7 +1067,7 @@ def _expected_docs(summary: dict[str, Any], progress: dict[str, Any]) -> int | N
 def _add_tokens(job: JobRun, row: dict[str, Any]) -> None:
     """Move a call's token usage from its result row onto the job's running totals."""
     p = job.progress
-    for k in ("tokens_in", "tokens_out", "tokens_cached"):
+    for k in ("tokens_in", "tokens_out", "tokens_cached", "tokens_cache_write"):
         p[k] = p.get(k, 0) + row.pop(k, 0)
 
 

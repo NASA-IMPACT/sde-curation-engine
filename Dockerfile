@@ -8,6 +8,10 @@ WORKDIR /app
 # pinned deps first (layer cached until requirements.txt changes)
 COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
+# the GPT-5 tokenizer (llm/tasks.count_tokens) downloads its table on first use: bake it into the
+# image so an LLM job never depends on reaching openaipublic.blob.core.windows.net
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
+RUN python -c "import tiktoken; tiktoken.get_encoding('o200k_base')" && chmod -R a+rX /opt/tiktoken
 
 # then the package itself, without re-resolving dependencies
 COPY pyproject.toml README.md ./

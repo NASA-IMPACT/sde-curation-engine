@@ -62,7 +62,7 @@ class EnvConfig:
     indexing_container_name: str = "WEB_COSMOSContainer"
     # every tier writes sde-web in its own collection; must match sde-api-scrapers' WEB_INDEX_NAMES
     web_index_name: str = "sde-web"
-    openai_model: str = "gpt-5.6-luna"  # 1.05M-token window: the full page text always fits
+    openai_model: str = "gpt-5-nano"  # 272K-token input cap; pages are cut to llm_max_input_tokens (270K)
     llm_provider: str = "openai"  # "fake": canned answers, no API calls (load tests — see stress_config)
     llm_workers: int = 16
     llm_pattern_batch_urls: int = 1000
