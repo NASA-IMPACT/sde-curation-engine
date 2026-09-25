@@ -62,7 +62,11 @@ class EnvConfig:
     indexing_container_name: str = "WEB_COSMOSContainer"
     # every tier writes sde-web in its own collection; must match sde-api-scrapers' WEB_INDEX_NAMES
     web_index_name: str = "sde-web"
-    openai_model: str = "gpt-5.6-luna"  # 1.05M-token window: the full page text always fits
+    openai_model: str = "gpt-6-luna"  # pages are cut to llm_max_input_tokens (270K), under its 2× tier
+    # LLM_REASONING_EFFORT / LLM_SERVICE_TIER, set on the task only when given (None = the app's
+    # default: the model's own effort, standard tier). "flex" halves the price of bulk runs.
+    llm_reasoning_effort: str | None = None
+    llm_service_tier: str | None = None
     llm_provider: str = "openai"  # "fake": canned answers, no API calls (load tests — see stress_config)
     llm_workers: int = 16
     llm_pattern_batch_urls: int = 1000

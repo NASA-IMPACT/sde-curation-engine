@@ -110,10 +110,13 @@ def test_v2_backfills_curated_text_from_the_dump(pg_url):
                      " VALUES ('c','C','https://c','Earth Science','crawler2',10,'curated',now(),now()),"
                      " ('g','G','https://g','General','crawler2',10,'backlog',now(),now())")
         conn.execute("INSERT INTO dump_urls (collection_id,url,full_text) VALUES ('c','https://c/a','body a')")
+        conn.execute("INSERT INTO audit_log (at,actor,collection_id,action) VALUES"
+                     " (now(),'bob','c','recompute'), (now(),'carol','c','recompute.all'),"
+                     " (now(),'dave','c','pattern.add'), (now(),'erin','g','collection.create')")
         conn.execute("INSERT INTO curated_urls (collection_id,url,excluded) VALUES"
                      " ('c','https://c/a',false), ('c','https://c/gone',false), ('c','https://c/out',true)")
         try:
-            assert migrate_sync(conn) == 9
+            assert migrate_sync(conn) == 10
             # V2 put the dump text on the curated row; V9 moved both onto one blob keyed by the
             # content hash it gives a row that predates hashing, so the text survives shared
             rows = dict(conn.execute(
@@ -131,6 +134,10 @@ def test_v2_backfills_curated_text_from_the_dump(pg_url):
                 "c": "Earth Science", "g": "General"}
             # V8 adds the flag that records "the model was never asked for this row's division"
             assert conn.execute("SELECT division_skipped FROM delta_urls").fetchall() == []
-            assert migrate_sync(conn) == 9  # idempotent: nothing left to apply
+            # V10: the curator is whoever last pressed curate (recompute), not the last to act at all;
+            # a collection nobody has curated stays NULL
+            assert dict(conn.execute("SELECT collection_id, curated_by FROM collections").fetchall()) == {
+                "c": "carol", "g": None}
+            assert migrate_sync(conn) == 10  # idempotent: nothing left to apply
         finally:
             conn.execute("DROP SCHEMA mig CASCADE")

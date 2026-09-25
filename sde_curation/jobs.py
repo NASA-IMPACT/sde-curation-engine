@@ -9,6 +9,7 @@ import logging
 import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +104,7 @@ class JobManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._starting: set[str] = set()  # collections with a job being created (TOCTOU guard)
         self._cancel_actor: dict[int, str] = {}  # job id → who asked for the cancel
+        self._shutting_down = False  # set by shutdown(): a scrape then stays 'running' for the next start
 
     # ── infrastructure ─────────────────────────────────────────────────
 
@@ -152,21 +154,33 @@ class JobManager:
         return None
 
     async def shutdown(self) -> None:
+        self._shutting_down = True
         for t in list(self._tasks.values()):
             t.cancel()
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
     async def recover(self) -> None:
-        """Startup: jobs left 'running' by a previous process are dead — say so explicitly. A
-        Suggest-metadata job the restart interrupted (killed under it, or cancelled by the shutdown
-        of a deploy) is started again for the URLs still without an answer: what it had already
-        been told is in the table, so nothing is asked or paid for twice."""
+        """Startup: jobs left 'running' by a previous process are dead — say so explicitly — except
+        a scrape: the crawl runs on the crawler host and outlives the engine, so the SAME job carries
+        on watching it (_resume_scrape). A Suggest-metadata job the restart interrupted (killed under
+        it, or cancelled by the shutdown of a deploy) is started again for the URLs still without an
+        answer: what it had already been told is in the table, so nothing is asked or paid for twice."""
         interrupted = await self.db.jobs_ended_by_shutdown()
         for j in await self.db.active_jobs():
+            if j.kind == JobKind.SCRAPE and await self._resume_scrape(j):
+                continue
             await self.db.finish_job(j, JobState.FAILED, error="engine restarted while job was running")
             self._emit(j.collection_id, j)
             interrupted.append(j)
         for j in interrupted:
+            if j.kind == JobKind.SCRAPE:
+                # an engine from before 2026-09-25 recorded its scrape as failed on shutdown while
+                # the crawl carried on: reopen that job (still the collection's latest) as well —
+                # only a recent one, never an old crawl nobody is waiting for
+                if j.error == "cancelled by shutdown" and j.finished_at \
+                        and utcnow() - j.finished_at < timedelta(hours=24):
+                    await self._resume_scrape(j)
+                continue
             resumed = int(j.progress.get("resumed", 0))
             if j.kind != JobKind.LLM_METADATA or resumed >= self.s.llm_resume_after_restart:
                 continue
@@ -180,6 +194,24 @@ class JobManager:
             new.progress = {**new.progress, "resumed": resumed + 1, "resumed_from": j.id}
             await self.db.update_job(new)
             log.info("resumed %s for %s as job %s (after job %s)", j.kind, c.collection_id, new.id, j.id)
+
+    async def _resume_scrape(self, j: JobRun) -> bool:
+        """Carry on the scrape job `j` in place — same job, still running — after an engine restart.
+        A deploy stops only the watcher: ScrapeBackend.resume follows the crawl if it is still going
+        and ingests it if it finished meanwhile, and never starts a second crawl. False when it
+        cannot be resumed (restarted too many times in a row, collection gone)."""
+        restarts = int(j.progress.get("restarts", 0))
+        c = await self.db.get_collection(j.collection_id)
+        if not c or restarts >= self.s.scrape_resume_after_restart:
+            return False
+        j.state, j.error, j.finished_at = JobState.RUNNING, None, None
+        j.progress = {**j.progress, "restarts": restarts + 1}
+        await self.db.update_job(j)
+        self._emit(c, j)
+        reuse = bool(j.progress.get("reused"))
+        await self._spawn(j, self._run_scrape(c, j, reuse, None if reuse else j.started_at))
+        log.info("scrape job %s for %s carries on after an engine restart", j.id, c.collection_id)
+        return True
 
     # ── scrape ─────────────────────────────────────────────────────────
 
@@ -199,7 +231,9 @@ class JobManager:
         finally:
             self._starting.discard(cid)
 
-    async def _run_scrape(self, c: Collection, job: JobRun, reuse: bool = False) -> None:
+    async def _run_scrape(self, c: Collection, job: JobRun, reuse: bool = False,
+                          resume_since: datetime | None = None) -> None:
+        """`resume_since`: the job is carrying on after an engine restart (see _resume_scrape)."""
         async with self._lock(c.collection_id):
             try:
                 async def on_progress(p: dict[str, Any]) -> None:
@@ -211,6 +245,8 @@ class JobManager:
 
                 if reuse:
                     result = await self.scraper.fetch_existing(c, on_progress)
+                elif resume_since is not None:
+                    result = await self.scraper.resume(c, resume_since, on_progress)
                 else:
                     result = await self.scraper.run(c, on_progress)
                 failures = await asyncio.to_thread(result.failures)
@@ -248,6 +284,10 @@ class JobManager:
                 await self.db.finish_job(job, JobState.SUCCEEDED)
                 self._emit(updated, job)
             except asyncio.CancelledError:
+                if self._shutting_down and job.id not in self._cancel_actor:
+                    # a deploy / restart: the crawl carries on on the host, so the job stays
+                    # 'running' and the next engine start picks it up (recover → _resume_scrape)
+                    raise
                 await self.db.finish_job(job, JobState.FAILED, error=f"cancelled by {self._cancel_actor.pop(job.id, None) or 'shutdown'}")
                 self._emit(c, job)
                 raise
@@ -379,7 +419,7 @@ class JobManager:
             progress = self._progress_cb(c, job)
             await progress({"llm": "patterns", "urls": len(all_urls), "candidates": len(cand_urls), "unique": len(unique),
                             "calls": len(chunks), "total": len(chunks), "done": 0, "failed": 0, "global": n_global,
-                            "suggestions": n_global, "tokens_in": 0, "tokens_out": 0})
+                            "suggestions": n_global, "tokens_in": 0, "tokens_out": 0, "tokens_reasoning": 0})
             llm = self.llm()
 
             async def one(item):
@@ -399,6 +439,9 @@ class JobManager:
                 job.progress["suggestions"] = job.progress.get("suggestions", 0) + added
                 job.progress["tokens_in"] = job.progress.get("tokens_in", 0) + done.tokens_in
                 job.progress["tokens_out"] = job.progress.get("tokens_out", 0) + done.tokens_out
+                job.progress["tokens_cache_write"] = (job.progress.get("tokens_cache_write", 0)
+                                                      + done.tokens_cache_write)
+                job.progress["tokens_reasoning"] = job.progress.get("tokens_reasoning", 0) + done.tokens_reasoning
 
             await run_pool(list(enumerate(chunks)), one, workers=self.s.llm_workers, on_result=on_result,
                            on_progress=progress, total=len(chunks), **self._retry())
@@ -418,7 +461,8 @@ class JobManager:
                 raise LLMError("no delta URLs to classify — Start curating (recompute) first (or all already have suggestions)")
             progress = self._progress_cb(c, job)
             await progress({"llm": "metadata", "total": total, "done": 0, "failed": 0, "inflight": 0,
-                            "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
+                            "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
+                            "tokens_cache_write": 0, "tokens_reasoning": 0})
             llm = self.llm()
             buf: list[dict[str, Any]] = []
             errs: list[tuple[str, str]] = []
@@ -472,7 +516,8 @@ class JobManager:
         """Regenerate duplicate titles, on demand: the same pass Suggest metadata ends with, over every title +
         document type that a delta URL shares with another page (whoever set them: AI, a rule, a curator)."""
         async def body():
-            await self._progress_cb(c, job)({"llm": "titles", "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
+            await self._progress_cb(c, job)({"llm": "titles", "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
+                                                 "tokens_cache_write": 0, "tokens_reasoning": 0})
             if not await self._retitle_duplicates(c, job, self.llm()):
                 raise LLMError("no delta URL shares its title and document type with another page")
         await self._guarded(c, job, body)
@@ -586,7 +631,8 @@ class JobManager:
                     settled = title_siblings(settled, docs[0]["url"])
                 row = await suggest_distinct_titles(
                     llm, docs, shared_title=g["origin"], document_type=g["document_type"],
-                    sharing=len(g["members"]), settled=settled, previous=g["previous"], collection=c)
+                    sharing=len(g["members"]), settled=settled, previous=g["previous"], collection=c,
+                    settings=self.s)
                 given |= {u: {**t, "model": row["model"]} for u, t in row["titles"].items()}
                 same_pages += row["same_page_groups"]
                 made += 1
@@ -1062,7 +1108,7 @@ def _expected_docs(summary: dict[str, Any], progress: dict[str, Any]) -> int | N
 def _add_tokens(job: JobRun, row: dict[str, Any]) -> None:
     """Move a call's token usage from its result row onto the job's running totals."""
     p = job.progress
-    for k in ("tokens_in", "tokens_out", "tokens_cached"):
+    for k in ("tokens_in", "tokens_out", "tokens_cached", "tokens_cache_write", "tokens_reasoning"):
         p[k] = p.get(k, 0) + row.pop(k, 0)
 
 

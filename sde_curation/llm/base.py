@@ -18,6 +18,15 @@ class LLMError(RuntimeError):
     that does not match the schema."""
 
 
+class LLMInputTooLong(LLMError):
+    """The provider refused the prompt as longer than the model takes. `got` / `limit` are the
+    token counts from its error message when it gave them, so the caller can cut and ask again."""
+
+    def __init__(self, msg: str, *, got: int | None = None, limit: int | None = None):
+        super().__init__(msg)
+        self.got, self.limit = got, limit
+
+
 class LLMRetryable(LLMError):
     """The provider was unavailable (rate limit, 5xx, timeout, connection) even after the
     client's own retries — the item can be re-tried later; the job as a whole is still healthy."""
@@ -30,6 +39,8 @@ class Completion[T: BaseModel]:
     tokens_in: int = 0
     tokens_out: int = 0
     tokens_cached: int = 0  # prompt tokens served from the provider's prompt cache
+    tokens_cache_write: int = 0  # prompt tokens written to it (gpt-5.6+: billed at 1.25× input)
+    tokens_reasoning: int = 0  # the part of tokens_out the model spent reasoning (billed as output)
 
 
 class LLMProvider(Protocol):

@@ -201,6 +201,10 @@ class CurationEngineStack(Stack):
         }
         if cfg.prod_publish_via_role:
             environment["PROD_INDEX_ROLE_ARN"] = p["prod_index_role_arn"]
+        if cfg.llm_reasoning_effort:
+            environment["LLM_REASONING_EFFORT"] = cfg.llm_reasoning_effort
+        if cfg.llm_service_tier:
+            environment["LLM_SERVICE_TIER"] = cfg.llm_service_tier
         container = task_def.add_container(
             "engine",
             image=ecs.ContainerImage.from_docker_image_asset(image),

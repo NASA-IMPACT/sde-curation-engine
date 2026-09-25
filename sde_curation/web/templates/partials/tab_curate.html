@@ -157,7 +157,7 @@
       {% set assigned = c.division and c.division != 'General' %}
       <b>✨ Suggest metadata</b> — asks {{ llm_model }} for a title{% if not assigned %}, division{% endif %} and document type
       for each of the <b>{{ classifiable }}</b> included delta URL{{ 's' if classifiable != 1 }} not yet classified (or whose text changed since):
-      one call per URL with the <b>full page text</b> (never cut), {{ llm_workers }} in parallel. Each answer carries a confidence per field. Nothing is applied until you accept.
+      one call per URL with the <b>full page text</b> (cut from the end only when a page is too long for the model), {{ llm_workers }} in parallel. Each answer carries a confidence per field. Nothing is applied until you accept.
       {% if assigned %}<br><small class="muted">The division is yours — <b>{{ c.division }}</b>, assigned for the whole collection — so it is not asked for and never turns up as a suggestion: every URL has it already, and a division rule still overrides it where you want an exception. <a href="/collections/{{ cid }}?tab=overview">Change it under Overview › Details</a>.</small>{% endif %}
       <details class="prompt"><summary class="muted small">Show the prompt</summary><pre class="prompt">{{ prompts.metadata.system }}
 

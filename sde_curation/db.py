@@ -400,6 +400,13 @@ class Database:
             )
             return cur.rowcount > 0
 
+    async def set_curated_by(self, collection_id: str, actor: str) -> None:
+        """Who is curating the collection now: the last user to start (or re-start) curating it."""
+        async with self._conn() as conn:
+            await conn.execute(
+                "UPDATE collections SET curated_by=%s WHERE collection_id=%s", (actor, collection_id),
+            )
+
     async def set_last_scraped(self, collection_id: str, at: datetime, *, capped: bool = False) -> None:
         """When the dump was crawled, and whether that crawl stopped at its page cap (then a curated
         URL missing from the dump is not evidence that it is gone)."""
