@@ -315,8 +315,21 @@ ALTER TABLE dump_urls DROP COLUMN full_text;
 ALTER TABLE curated_urls DROP COLUMN full_text;
 """
 
+# Who is curating a collection: whoever last pressed Start curating / Check for changes /
+# Re-curate everything (the recompute endpoint), so the dashboard's Curator filter follows the work
+# rather than whoever added the collection. Existing rows take the last recompute in the audit log;
+# a collection nobody has curated stays NULL and the dashboard falls back to `created_by`.
+V10 = """
+ALTER TABLE collections ADD COLUMN curated_by text;
+UPDATE collections c SET curated_by = a.actor FROM (
+  SELECT DISTINCT ON (collection_id) collection_id, actor FROM audit_log
+   WHERE action IN ('recompute', 'recompute.all') AND collection_id IS NOT NULL
+   ORDER BY collection_id, id DESC
+) a WHERE a.collection_id = c.collection_id;
+"""
+
 MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8),
-                                     (9, V9)]
+                                     (9, V9), (10, V10)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).

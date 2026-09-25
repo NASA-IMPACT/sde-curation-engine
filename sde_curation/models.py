@@ -287,6 +287,8 @@ class Collection(BaseModel):
     updated_at: datetime = Field(default_factory=utcnow)
     last_run_id: str | None = None  # most recent index run (test or prod)
     created_by: str | None = None  # username; None on rows that predate provenance
+    # Who last started curating it (the recompute endpoint); the dashboard's Curator filter.
+    curated_by: str | None = None
     # The OpenSearch collection this one is indexed as. Normally None: the key follows the name by
     # the COSMOS rule and the first index run pins what it used. Set by hand when a collection's
     # folder does not follow from its current name.
