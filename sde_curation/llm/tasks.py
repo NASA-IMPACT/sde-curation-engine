@@ -464,7 +464,7 @@ async def suggest_distinct_titles(
         "titles": titles, "same_page_groups": [g for g in done.parsed.same_page_groups if len(g) > 1],
         "model": done.model,
         "tokens_in": done.tokens_in, "tokens_out": done.tokens_out, "tokens_cached": done.tokens_cached,
-        "tokens_cache_write": done.tokens_cache_write,
+        "tokens_cache_write": done.tokens_cache_write, "tokens_reasoning": done.tokens_reasoning,
     }
 
 
@@ -552,7 +552,7 @@ async def suggest_metadata_one(
         "document_type": r.document_type, "document_type_conf": r.document_type_confidence,
         "model": done.model, "content_hash": doc.get("content_hash"),
         "tokens_in": done.tokens_in, "tokens_out": done.tokens_out, "tokens_cached": done.tokens_cached,
-        "tokens_cache_write": done.tokens_cache_write,
+        "tokens_cache_write": done.tokens_cache_write, "tokens_reasoning": done.tokens_reasoning,
     }
 
 

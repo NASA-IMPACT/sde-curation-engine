@@ -105,8 +105,8 @@ appear without a manual reload:
   dismisses it. Include / title / division / type rules remain curator tools (the add-rule form).
 - **✨ Suggest metadata** — **one call per included delta URL with the full page text**, up to
   `LLM_WORKERS` (default 16) in flight. A page goes whole unless the call would pass
-  `LLM_MAX_INPUT_TOKENS` (default 270,000: the default model `gpt-5-nano` refuses more than 272K, and
-  on gpt-5.6 it also keeps every call out of the 2× long-context tier). Then its text is cut from the
+  `LLM_MAX_INPUT_TOKENS` (default 270,000: it keeps every call to the default model `gpt-6-luna`
+  out of its 2× long-context tier, and gpt-5-nano refuses more than 272K). Then its text is cut from the
   end to fit — counted with the GPT-5 tokenizer (`tiktoken`, o200k_base) — and the model is told
   (`text_cut`, with the whole `text_chars`); if the provider still refuses it as too long, it is cut
   by the count in its error and asked once more, so no page fails for its length. On ascl.net those
@@ -177,7 +177,7 @@ appear without a manual reload:
   the group is. `LLM_DEDUPE_TITLES=true` makes Suggest metadata run that pass by itself at the end
   (a failure there never fails the classification: the duplicates simply stay flagged).
 
-Provider is pluggable (`LLM_PROVIDER`): `openai` (default model `gpt-5-nano`; any
+Provider is pluggable (`LLM_PROVIDER`): `openai` (default model `gpt-6-luna`; any
 OpenAI-compatible endpoint via `OPENAI_BASE_URL`; structured outputs parsed straight into Pydantic
 models — a malformed reply fails the job and writes nothing) or `fake` (deterministic heuristics,
 used in tests and demos; no key needed). Adding a provider = one module implementing
@@ -466,7 +466,8 @@ current after a promote and at shutdown). A Suggest-metadata job interrupted by 
 | `SCRAPE_POLL_INTERVAL_S` | `ssm` backend: how often to look at the crawler host. A queued job waits indefinitely (the UI shows for how long); only a dead `watch_inbox.sh` fails it |
 | `VALIDATION_DELAY_S`, `VALIDATION_POLL_INTERVAL_S`, `VALIDATION_TIMEOUT_S`, `VALIDATION_TITLE_MATCH_THRESHOLD`, `VALIDATION_ASSUME_ROLE_ARN` | validation gate: initial wait, then re-check cadence and window for OpenSearch to become consistent |
 | `NOTIFY_WEBHOOK_URL`, `PUBLIC_BASE_URL` | Slack-compatible notifications on every status change |
-| `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5-nano`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` (per attempt), `LLM_MAX_RETRIES`, `LLM_TEMPERATURE` (unset = model default; reasoning models reject any other value) | LLM assist; any OpenAI-compatible endpoint |
+| `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-6-luna`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` (per attempt), `LLM_MAX_RETRIES`, `LLM_TEMPERATURE` (unset = model default; reasoning models reject any other value) | LLM assist; any OpenAI-compatible endpoint |
+| `LLM_REASONING_EFFORT` (unset = model default, medium on gpt-5.6+), `LLM_MAX_COMPLETION_TOKENS` (4000), `LLM_SERVICE_TIER` (unset; `flex` ≈ 50% off, slower) | reasoning effort per call; the output budget (answer + reasoning; a call cut off by it is asked again with 4×, then recorded as failed); OpenAI service tier. Reasoning tokens show in the job's token counts |
 | `PROMOTE_REMOVAL_WARN_RATIO` (0.25) | share of the curated set that must vanish from a crawl before Promote warns |
 | `LLM_WORKERS` (16), `LLM_RETRY_PASSES` (1), `LLM_RETRY_DELAY_S` (30), `LLM_PATTERN_BATCH_URLS` (1000), `LLM_DEDUPE_TITLES` (false), `GLOBAL_EXCLUDES_PATH` | calls in flight per LLM job; end-of-job retries of rate-limited / 5xx / timed-out calls (a quarter of the workers, after the delay); URLs per Suggest-patterns call; true: Suggest metadata re-titles same title + doc type pages by itself (default: flag only); override the packaged global exclude YAML |
 | `APP_PASSWORD`, `SESSION_SECRET`, `SESSION_TTL_S`, `AUTH_COOKIE_SECURE` | login with local accounts (off when `APP_PASSWORD` is empty; the value seeds the bootstrap `admin`); `/health` stays open |

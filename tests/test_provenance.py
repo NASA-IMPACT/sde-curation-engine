@@ -115,3 +115,26 @@ async def test_unauthenticated_mode_uses_anonymous_actor(crawler_client):
     await c.post("/api/collections/ex.org/scrape"); await wait_job(c, "ex.org")
     hist = (await c.get("/api/collections/ex.org/history")).json()
     assert [h["actor"] for h in hist] == ["anonymous", "system"]
+
+
+async def test_dashboard_curator_is_whoever_last_pressed_curate(authed_crawler_client):
+    """The Curator filter follows the curate button, not who added the collection: until someone
+    starts curating it the collection sits under its creator, then under the last to press it."""
+    c = authed_crawler_client
+    await add_user(c, "alice", "alicepass1")
+    await c.post("/api/collections", json=COLL)
+    await c.post("/api/collections/ex.org/scrape"); await wait_job(c, "ex.org")
+
+    async def listed_under(who):
+        return "/collections/ex.org" in (await c.get("/", params={"curator": who})).text
+
+    assert await listed_under("admin") and not await listed_under("alice")
+    a = type(c)(transport=c._transport, base_url="http://t"); a.app = c.app
+    await login(a, "alice", "alicepass1")
+    assert (await a.post("/api/collections/ex.org/recompute")).status_code == 200
+    assert (await c.get("/api/collections/ex.org")).json()["curated_by"] == "alice"
+    assert await listed_under("alice") and not await listed_under("admin")
+    # admin takes it over with Re-curate everything
+    await classify(a); await a.post("/api/collections/ex.org/promote")
+    assert (await c.post("/api/collections/ex.org/recompute?all=true")).status_code == 200
+    assert await listed_under("admin") and not await listed_under("alice")

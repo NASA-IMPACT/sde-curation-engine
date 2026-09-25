@@ -208,7 +208,7 @@ Driven by `suggestions and questions.md` (Bernard's "Recommended Updates").
   `LLM_PATTERN_BATCH_URLS`) through the worker pool; a glob is kept only if it matches a URL in its
   batch; merged by (type, match) with match counts over the whole dump.
 - **Suggest metadata = one call per URL with the full text**: `llm/tasks.py::suggest_metadata_one`,
-  one model (`gpt-5-nano` since 2026-09-25, 272K-token input cap; was `gpt-5.6-luna`); cut from the end only past `llm_max_input_tokens` (270K), per-field confidence
+  one model (`gpt-6-luna` since 2026-09-25; `gpt-5.6-luna` before, and briefly `gpt-5-nano`, which retires 2026-12-11); cut from the end only past `llm_max_input_tokens` (270K), per-field confidence
   (`*_ai_conf`, `ai_model`, `ai_content_hash` on `delta_urls`), candidates streamed
   from SQLite (`iter_deltas_for_llm`), answers flushed every 25 rows / 2 s so cancel keeps them and
   re-runs resume; content-changed rows are re-classified.

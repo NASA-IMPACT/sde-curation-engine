@@ -113,10 +113,25 @@ class Settings(BaseSettings):
     # ── LLM ────────────────────────────────────────────────────────────
     llm_provider: Literal["openai", "fake"] = "openai"
     openai_api_key: str | None = None
-    openai_model: str = "gpt-5-nano"  # $0.05 / $0.40 per 1M in / out; 272K-token input cap (pages
-    # are cut to llm_max_input_tokens to fit). Was gpt-5.6-luna until 2026-09-25: $0.20+ in, 2×
-    # over 272K tokens, and a ~$360 day on ascl.net's multi-megabyte listing pages
+    # $0.10 in / $0.01 cached / $0.125 cache write / $0.50 out per 1M; 922K-token input cap, 2× input
+    # and 1.5× output over 272K (pages are cut to llm_max_input_tokens, below that). Half of
+    # gpt-5.6-luna's price, with the same answers on the 7 pages probed live (2026-09-25); 5.6-luna
+    # has no shutdown date and stays a fallback. gpt-5-nano (briefly, 2026-09-25) retires 2026-12-11,
+    # reasoned ~1,100–1,700 tokens a page and put Hubble in Planetary Science at minimal/low effort.
+    openai_model: str = "gpt-6-luna"
     openai_base_url: str | None = None  # any OpenAI-compatible endpoint
+    # Chat Completions `reasoning_effort`, sent only when set; unset = the model's default (medium
+    # on gpt-5.6 / gpt-6). Values are model-dependent (gpt-5.6+: none, low, medium, high, xhigh, max;
+    # gpt-5-nano: minimal, low, medium, high) and a value the model does not take fails every call.
+    llm_reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    # `max_completion_tokens` for every call: the answer AND the reasoning before it. Answers are
+    # ~50 tokens and luna's reasoning ≤ ~130 on the pages probed, so this only stops a runaway call
+    # (gpt-5.6 can emit 128K, ~$0.15). A call cut off by it is asked once more with 4× the budget.
+    llm_max_completion_tokens: int = Field(default=4_000, ge=64, le=128_000)
+    # Chat Completions `service_tier`, sent only when set. "flex": ~50% off, slower, and a
+    # "resource unavailable" 429 when OpenAI is short of capacity (retried like any rate limit).
+    # Accepted by gpt-5.6-luna and gpt-6-luna (live, 2026-09-25); flex keeps its own prompt cache.
+    llm_service_tier: Literal["auto", "default", "flex", "priority"] | None = None
     # gpt-5.6+ caches implicitly by default: the whole prompt is written to the cache and billed at
     # 1.25× input, but page text is unique per call and never read back (2026-09-24: ~$360 of cache
     # writes in one job). "system" sends `prompt_cache_options.mode=explicit` with one breakpoint at
@@ -127,8 +142,8 @@ class Settings(BaseSettings):
     openai_prompt_cache: Literal["system", "provider_default"] = "system"
     # The most prompt tokens one call may carry: system prompt + header + page text (+ the response
     # schema). A page too long for it is cut from the end and the model is told (`text_cut`), so no
-    # call fails for length. gpt-5-nano refuses more than 272K; 270K leaves room for the chat framing.
-    # On gpt-5.6 it also keeps every call out of the 2× long-context price tier (>272K).
+    # call fails for length. On gpt-5.6 it keeps every call out of the 2× long-context price tier
+    # (>272K); 270K leaves room for the chat framing. (gpt-5-nano refuses more than 272K outright.)
     llm_max_input_tokens: int = Field(default=270_000, ge=1_000)
     # Sent only when set. Reasoning models (gpt-5 family, o-series) reject any value but their
     # default and fail every call with 400; leave unset unless the model is known to accept it.
@@ -157,7 +172,7 @@ class Settings(BaseSettings):
     # llm_max_input_tokens, see tasks.share_budget), so what bounds a call is characters, not
     # pages — a group over the budget is split, and each later call is told the titles the earlier
     # ones already used. 600k chars ≈ 155k tokens at ascl.net's ~3.9
-    # chars/token, leaving room under gpt-5-nano's 272K-token input cap for denser text + the header.
+    # chars/token, leaving room under the 272K-token long-context tier for denser text + the header.
     llm_title_group_chars: int = Field(default=600_000, ge=20_000)
     # How many times the pass may re-ask a group it did not manage to tell apart before the URLs
     # decide it (see tasks.disambiguate). 0 = ask once, then disambiguate.

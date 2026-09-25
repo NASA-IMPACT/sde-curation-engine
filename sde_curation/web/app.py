@@ -605,7 +605,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                  for c in cols}
 
         def curator_of(c: Collection) -> str:
-            return c.created_by or NONE_CURATOR
+            # whoever last started curating it; until someone has, whoever added it
+            return c.curated_by or c.created_by or NONE_CURATOR
 
         def keep(c: Collection) -> bool:
             # status and its curating sub-stages are one facet: any ticked box admits the row
@@ -1366,6 +1367,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ensure_idle(request, c)
         if c.dump_count == 0:
             raise HTTPException(409, "no dump ingested yet — scrape first")
+        # whoever presses it is curating the collection now (the dashboard's Curator filter)
+        await db(request).set_curated_by(collection_id, actor(request))
 
         async def work() -> dict:
             ds = await curation(request).recompute(c, review_all=all)
