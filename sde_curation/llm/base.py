@@ -40,6 +40,7 @@ class Completion[T: BaseModel]:
     tokens_out: int = 0
     tokens_cached: int = 0  # prompt tokens served from the provider's prompt cache
     tokens_cache_write: int = 0  # prompt tokens written to it (gpt-5.6+: billed at 1.25× input)
+    tokens_reasoning: int = 0  # the part of tokens_out the model spent reasoning (billed as output)
 
 
 class LLMProvider(Protocol):

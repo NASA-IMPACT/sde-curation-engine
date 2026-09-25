@@ -309,6 +309,9 @@ async def test_metadata_suggestions_flow(crawler_client):
     assert job["state"] == "succeeded" and p["classified"] == 8 and p["done"] == 8 and p["failed"] == 0, job
     assert p["llm"] == "metadata" and p["tokens_in"] > 0 and p["inflight"] == 0
     assert p["tokens_cache_write"] == 0  # counted per job, next to tokens in / out
+    assert p["tokens_reasoning"] == 8 * 8 and p["tokens_out"] == 32 * 8  # reasoning is part of out
+    jobs_page = (await c.get("/jobs")).text
+    assert f"{p['tokens_out']:,} out ({p['tokens_reasoning']:,} reasoning)" in jobs_page
     d = (await c.get("/api/collections/ex.org/delta?q=p2")).json()["items"][0]
     assert d["title_ai"] == "Page 2" and d["document_type_ai"] == "Documentation"
     assert d["title_ai_conf"] == "high" and d["document_type_ai_conf"] == "low" and d["ai_model"] == "fake"
@@ -565,6 +568,13 @@ async def test_openai_provider_sends_temperature_only_when_configured():
     assert "temperature" not in await run()
     assert (await run(llm_temperature=0))["temperature"] == 0
 
+    # reasoning effort and service tier go only when set; the output budget always goes
+    call = await run()
+    assert "reasoning_effort" not in call and "service_tier" not in call
+    assert call["max_completion_tokens"] == 4_000
+    call = await run(llm_reasoning_effort="low", llm_service_tier="flex", llm_max_completion_tokens=900)
+    assert (call["reasoning_effort"], call["service_tier"], call["max_completion_tokens"]) == ("low", "flex", 900)
+
     # page text is unique per call: only the system prompt may be written to the prompt cache
     call = await run()
     assert call["prompt_cache_options"] == {"mode": "explicit"}
@@ -658,9 +668,57 @@ async def test_metadata_job_resumes_after_an_engine_restart(tmp_path):
         assert jobs[0]["state"] == "failed" and "cancelled by" in jobs[0]["error"] and len(jobs) == 4  # scrape + 3
 
 
-async def test_openai_provider_drops_cache_options_on_a_model_that_rejects_them():
-    """Models before gpt-5.6 answer 400 to `prompt_cache_options` (they have no cache-write charge):
-    the call is re-sent without it, and that model is never sent it again."""
+async def test_openai_provider_asks_again_when_the_output_budget_runs_out(caplog):
+    """A reasoning model can spend the whole `max_completion_tokens` thinking and never write the
+    JSON (the SDK raises LengthFinishReasonError, seen live on gpt-5.6-luna 2026-09-25). The call is
+    asked once more with 4× the budget; both calls are billed, so both count. If that is cut too,
+    the page fails with an LLMError (recorded on its row) instead of an uncaught SDK error."""
+    from types import SimpleNamespace
+
+    from openai import LengthFinishReasonError
+
+    from sde_curation.llm.base import LLMError
+    from sde_curation.llm.openai import OpenAIProvider
+
+    def usage(out, reasoning):
+        return SimpleNamespace(prompt_tokens=3_000, completion_tokens=out,
+                               prompt_tokens_details=SimpleNamespace(cached_tokens=1_873, cache_write_tokens=0),
+                               completion_tokens_details=SimpleNamespace(reasoning_tokens=reasoning))
+
+    def provider(cut_calls):
+        budgets = []
+
+        async def parse(**kw):
+            budgets.append(kw["max_completion_tokens"])
+            if len(budgets) <= cut_calls:
+                raise LengthFinishReasonError(completion=SimpleNamespace(usage=usage(kw["max_completion_tokens"],
+                                                                                     kw["max_completion_tokens"])))
+            msg = SimpleNamespace(parsed=MetadataSuggestion(
+                title="T", title_confidence="high", division="Earth Science", division_confidence="low",
+                document_type="Data", document_type_confidence="low"), refusal=None, content=None)
+            return SimpleNamespace(choices=[SimpleNamespace(message=msg)], model=kw["model"], usage=usage(90, 40))
+
+        p = OpenAIProvider(Settings(openai_api_key="k", llm_provider="openai", llm_max_completion_tokens=500))
+        p.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))
+        return p, budgets
+
+    p, budgets = provider(cut_calls=1)
+    done = await p.complete(system="s", user="u", schema=MetadataSuggestion)
+    assert done.parsed.title == "T" and budgets == [500, 2_000]
+    assert (done.tokens_in, done.tokens_out, done.tokens_reasoning, done.tokens_cached) == (6_000, 590, 540, 3_746)
+    assert any("output cut at 500 of 500 tokens" in r.getMessage() for r in caplog.records)
+
+    p, budgets = provider(cut_calls=2)
+    with pytest.raises(LLMError, match="did not fit in 2,000 output tokens"):
+        await p.complete(system="s", user="u", schema=MetadataSuggestion)
+    assert budgets == [500, 2_000]
+
+
+@pytest.mark.parametrize("param", ["prompt_cache_options", "prompt_cache_breakpoint"])
+async def test_openai_provider_drops_cache_options_on_a_model_that_rejects_them(param):
+    """Models before gpt-5.6 answer 400 to the cache options (they have no cache-write charge):
+    the call is re-sent without them, and that model is never sent them again. gpt-5-nano names
+    `prompt_cache_breakpoint` in its 400 (live, 2026-09-25)."""
     from types import SimpleNamespace
 
     import httpx
@@ -673,9 +731,9 @@ async def test_openai_provider_drops_cache_options_on_a_model_that_rejects_them(
     async def parse(**kw):
         calls.append(kw)
         if "prompt_cache_options" in kw:
-            raise BadRequestError("prompt_cache_options is not supported on this model",
+            raise BadRequestError(f"{param} is not supported on this model",
                                   response=httpx.Response(400, request=httpx.Request("POST", "https://x")),
-                                  body={"message": "not supported", "param": "prompt_cache_options"})
+                                  body={"message": "not supported", "param": param})
         msg = SimpleNamespace(parsed=MetadataSuggestion(
             title="T", title_confidence="high", division="Earth Science", division_confidence="low",
             document_type="Data", document_type_confidence="low"), refusal=None, content=None)

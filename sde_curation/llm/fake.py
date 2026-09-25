@@ -55,7 +55,7 @@ class FakeProvider:
         self.calls.append({"system": system, "user": user, "schema": schema.__name__, "model": model})
         return Completion(
             parsed=self._answer(user, schema), model=model or self.name,
-            tokens_in=len(system + user) // 4, tokens_out=32,
+            tokens_in=len(system + user) // 4, tokens_out=32, tokens_reasoning=8,
         )
 
     def _answer(self, user: str, schema: type[T]) -> T:

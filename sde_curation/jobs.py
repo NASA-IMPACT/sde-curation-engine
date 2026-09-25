@@ -419,7 +419,7 @@ class JobManager:
             progress = self._progress_cb(c, job)
             await progress({"llm": "patterns", "urls": len(all_urls), "candidates": len(cand_urls), "unique": len(unique),
                             "calls": len(chunks), "total": len(chunks), "done": 0, "failed": 0, "global": n_global,
-                            "suggestions": n_global, "tokens_in": 0, "tokens_out": 0})
+                            "suggestions": n_global, "tokens_in": 0, "tokens_out": 0, "tokens_reasoning": 0})
             llm = self.llm()
 
             async def one(item):
@@ -441,6 +441,7 @@ class JobManager:
                 job.progress["tokens_out"] = job.progress.get("tokens_out", 0) + done.tokens_out
                 job.progress["tokens_cache_write"] = (job.progress.get("tokens_cache_write", 0)
                                                       + done.tokens_cache_write)
+                job.progress["tokens_reasoning"] = job.progress.get("tokens_reasoning", 0) + done.tokens_reasoning
 
             await run_pool(list(enumerate(chunks)), one, workers=self.s.llm_workers, on_result=on_result,
                            on_progress=progress, total=len(chunks), **self._retry())
@@ -461,7 +462,7 @@ class JobManager:
             progress = self._progress_cb(c, job)
             await progress({"llm": "metadata", "total": total, "done": 0, "failed": 0, "inflight": 0,
                             "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
-                            "tokens_cache_write": 0})
+                            "tokens_cache_write": 0, "tokens_reasoning": 0})
             llm = self.llm()
             buf: list[dict[str, Any]] = []
             errs: list[tuple[str, str]] = []
@@ -516,7 +517,7 @@ class JobManager:
         document type that a delta URL shares with another page (whoever set them: AI, a rule, a curator)."""
         async def body():
             await self._progress_cb(c, job)({"llm": "titles", "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
-                                                 "tokens_cache_write": 0})
+                                                 "tokens_cache_write": 0, "tokens_reasoning": 0})
             if not await self._retitle_duplicates(c, job, self.llm()):
                 raise LLMError("no delta URL shares its title and document type with another page")
         await self._guarded(c, job, body)
@@ -1107,7 +1108,7 @@ def _expected_docs(summary: dict[str, Any], progress: dict[str, Any]) -> int | N
 def _add_tokens(job: JobRun, row: dict[str, Any]) -> None:
     """Move a call's token usage from its result row onto the job's running totals."""
     p = job.progress
-    for k in ("tokens_in", "tokens_out", "tokens_cached", "tokens_cache_write"):
+    for k in ("tokens_in", "tokens_out", "tokens_cached", "tokens_cache_write", "tokens_reasoning"):
         p[k] = p.get(k, 0) + row.pop(k, 0)
 
 
