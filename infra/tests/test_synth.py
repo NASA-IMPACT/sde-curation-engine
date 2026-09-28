@@ -247,3 +247,15 @@ def test_dev_task_is_sized_like_test():
 
     dev, test = get_config("dev"), get_config("test")
     assert (dev.cpu, dev.memory_mib) == (test.cpu, test.memory_mib)
+
+
+def _waf_rate_limit(template: Template) -> int:
+    [acl] = template.find_resources("AWS::WAFv2::WebACL").values()
+    [rule] = [r for r in acl["Properties"]["Rules"] if r["Name"] == "RateLimit"]
+    return rule["Statement"]["RateBasedStatement"]["Limit"]
+
+
+def test_test_waf_rate_limit_fits_curators_behind_one_ip(template, test_template):
+    # curators share one egress IP; at 1,000 / 5 min a running job's refreshes got them CloudFront 403s
+    assert _waf_rate_limit(test_template) == 10_000
+    assert _waf_rate_limit(template) == 1_000  # dev keeps the default

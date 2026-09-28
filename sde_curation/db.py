@@ -836,6 +836,24 @@ class Database:
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
+    async def count_deltas_by_kind(self, collection_id: str) -> dict[str, int]:
+        """{total, new, modified, deleted, content_changed, renamed} in one pass over the collection's
+        delta rows — the same numbers as list_deltas' totals for those filters, without its sort (it
+        ordered every row to return one). The Overview and Curate tabs show them and the Curate tab
+        is re-fetched every few seconds while a job runs, so they must stay cheap."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS total,"
+                " COUNT(*) FILTER (WHERE kind='new') AS new,"
+                " COUNT(*) FILTER (WHERE kind='modified') AS modified,"
+                " COUNT(*) FILTER (WHERE kind='deleted') AS deleted,"
+                " COUNT(*) FILTER (WHERE content_changed) AS content_changed,"
+                " COUNT(*) FILTER (WHERE renamed_from IS NOT NULL) AS renamed"
+                " FROM delta_urls WHERE collection_id=%s",
+                (collection_id,),
+            )
+            return dict(await cur.fetchone())
+
     _DELTA_COLS = (
         "collection_id", "url", "kind", "renamed_from", "crawl_failure", "scraped_title", "title", "division",
         "document_type", "excluded", "content_changed", "edited_by", "title_ai", "division_ai", "document_type_ai",

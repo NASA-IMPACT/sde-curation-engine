@@ -124,7 +124,8 @@ async def test_pages_poll_only_while_a_job_is_live(crawler_client):
     c = crawler_client
     await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 40})
     page = (await c.get("/collections/ex.org")).text
-    assert "every 10s [jobLive()]" in page and "every 5s [jobLive()]" in page and "every 4s [jobLive()]" in page
+    assert "every 10s [jobLive() && sseQuiet(this, 10000)]" in page and "every 5s [jobLive() && sseQuiet(this, 5000)]" in page
+    assert "every 2s [jobPollDue(this, 10000, 4000)]" in page
     live = " data-job-live>"  # the marker attribute on the header / the jobs strip
     assert live not in page and live not in (await c.get("/jobs/panel")).text
     await c.post("/api/collections/ex.org/scrape")
@@ -132,7 +133,28 @@ async def test_pages_poll_only_while_a_job_is_live(crawler_client):
     await wait_job(c, "ex.org")
     assert live not in (await c.get("/collections/ex.org/header")).text and live not in (await c.get("/jobs/panel")).text
     home = (await c.get("/")).text
-    assert "every 10s [jobLive('#jobs-panel')]" in home and "function jobLive(" in home
+    assert "every 10s [jobLive('#jobs-panel') && sseQuiet(this, 10000)]" in home and "function jobLive(" in home
+
+
+async def test_progress_events_refresh_the_header_and_stepper_at_most_every_few_seconds(crawler_client):
+    """A running job sends a progress event every second to every open tab. The header, the stepper
+    and the jobs panels re-fetched on each one; they now fold a burst into one refresh per
+    SSE_REFRESH_MS (plus a trailing one, so the job's end is never lost), and their poll only runs
+    while SSE has been quiet for its interval. The tab reload polls every 10 s while SSE is live."""
+    c = crawler_client
+    await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 40})
+    page = (await c.get("/collections/ex.org")).text
+    assert page.count("&& sseRefresh(this)], sseRefresh,") == 2  # header + stepper
+    assert "function sseRefresh(" in page and "const SSE_REFRESH_MS = 3000" in page
+    # the tab reload (#job-watch) re-renders the whole tab: every 10 s while SSE is live, 4 s without it,
+    # and at once when the job ends
+    watch = page[page.index('<div id="job-watch"'):]
+    watch = watch[:watch.index("</div>")]
+    assert "&& sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded" in watch
+    assert "every 2s [jobPollDue(this, 10000, 4000)]" in watch and "function jobPollDue(" in page
+    home = (await c.get("/")).text
+    assert "sse:collection[sseRefresh(this)], sseRefresh," in home  # the jobs panel
+    assert "sse:collection[sseRefresh(this)], sseRefresh," in (await c.get("/jobs")).text
 
 
 async def test_documents_file_is_streamed_and_a_broken_one_fails_the_job(crawler_client):
