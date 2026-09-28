@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SDE Curation Engine Workflow</title>
+<style>
+  :root{
+    --ink:#1b2340; --muted:#4a5270; --line:#c9cfdd; --bg:#ffffff;
+    --blue:#2f5bd3; --blue-bg:#eef3ff;
+    --green:#2e8b3e; --green-bg:#eef8ef;
+    --purple:#6b3fb8; --purple-bg:#f4effc;
+    --teal:#1f7a7a; --teal-bg:#ecf7f6;
+    --orange:#e2761b; --orange-bg:#fff4ea;
+    --navy:#1f4e9a; --navy-bg:#edf3fb;
+    --red:#c62828; --red-bg:#fdeeee;
+    --gray:#5b6275; --gray-bg:#f4f5f8;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:12px/1.35 "Helvetica Neue",Arial,sans-serif}
+  .page{width:1720px;padding:14px 18px 16px}
+  h1{margin:0 0 10px;font-size:25px;color:#13306e;letter-spacing:-.2px}
+  h1 small{font-size:13px;color:var(--muted);font-weight:400;margin-left:10px}
+
+  /* stage row */
+  .stages{display:grid;grid-template-columns:1fr 20px 1fr 20px 1.55fr 20px 1.05fr 20px 1.05fr 20px 1.05fr;align-items:stretch}
+  .arrow{display:flex;align-items:center;justify-content:center;font-size:18px;color:#222}
+  .stage{border:2px solid var(--c);border-radius:6px;background:#fff;display:flex;flex-direction:column}
+  .stage .hd{background:var(--cbg);border-bottom:1.5px solid var(--c);padding:7px 8px;text-align:center;border-radius:4px 4px 0 0}
+  .stage .hd .t{font-size:17px;font-weight:700;color:var(--c)}
+  .stage .hd .t b{display:inline-flex;width:24px;height:24px;border-radius:50%;background:var(--c);color:#fff;font-size:14px;align-items:center;justify-content:center;margin-right:7px;vertical-align:2px}
+  .stage .hd .s{font-size:11px;color:var(--muted);margin-top:1px}
+  .icons{display:flex;align-items:center;justify-content:center;gap:8px;padding:9px 6px 3px;min-height:86px}
+  .ic{display:flex;flex-direction:column;align-items:center;font-size:10.5px;color:var(--ink);text-align:center;line-height:1.15}
+  .ic svg{width:40px;height:40px;margin-bottom:3px}
+  .to{font-size:16px;color:#333}
+  .dash{font-size:14px;color:#555;letter-spacing:-1px}
+  .body{padding:4px 10px 8px;flex:1}
+  .body ul{margin:0;padding-left:13px}
+  .body li{margin:3px 0}
+  .sub{font-weight:700;color:var(--c);margin-top:5px}
+  .body .sub:first-child{margin-top:0}
+  .sub span{font-weight:400;color:var(--muted)}
+  .sep{border-top:1px dashed var(--line);margin:5px -10px 4px}
+  .pill{margin:6px auto 9px;padding:5px 12px;border-radius:4px;background:var(--c);color:#fff;font-weight:700;font-size:12px;text-align:center;width:max-content;max-width:90%}
+  code{font:10.5px Menlo,monospace;background:#f1f3f8;padding:0 2px;border-radius:2px}
+  .c-blue{--c:var(--blue);--cbg:var(--blue-bg)}
+  .c-green{--c:var(--green);--cbg:var(--green-bg)}
+  .c-purple{--c:var(--purple);--cbg:var(--purple-bg)}
+  .c-teal{--c:var(--teal);--cbg:var(--teal-bg)}
+  .c-orange{--c:var(--orange);--cbg:var(--orange-bg)}
+  .c-navy{--c:var(--navy);--cbg:var(--navy-bg)}
+
+  /* back-edges */
+  .edges{height:40px;position:relative}
+  .edges svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+
+  /* state bar */
+  .state{border:1.5px solid #8cc68f;background:#f5fbf5;border-radius:6px;display:grid;grid-template-columns:170px repeat(5,1fr);gap:0;padding:8px 10px;align-items:center}
+  .state .lead{display:flex;align-items:center;gap:8px;font-weight:700;font-size:14px;color:#1d5b27}
+  .state .lead svg{width:34px;height:34px}
+  .store{border-left:1px solid #cfe3cf;padding:0 10px;font-size:10.5px;color:var(--ink)}
+  .store .n{font-weight:700;font-size:11.5px;display:flex;align-items:center;gap:5px;margin-bottom:2px}
+  .store .n svg{width:18px;height:18px}
+  .store div{font-family:Menlo,monospace;font-size:9.8px;color:#333}
+
+  /* bottom panels */
+  .grid2{display:grid;grid-template-columns:1.05fr 1.15fr 1fr 1fr;gap:10px;margin-top:10px}
+  .panel{border:1.5px solid var(--line);border-radius:6px;padding:8px 11px;background:#fff}
+  .panel h3{margin:0 0 6px;text-align:center;font-size:13.5px;color:#13306e}
+  .panel ul{margin:0;padding-left:0;list-style:none}
+  .panel li{display:flex;gap:6px;margin:3.5px 0;align-items:flex-start}
+  .panel li svg{flex:none;width:15px;height:15px;margin-top:1px}
+  .sm{display:flex;align-items:center;gap:4px;justify-content:center;margin:8px 0 4px;flex-wrap:nowrap}
+  .st{padding:5px 7px;border-radius:4px;border:1.3px solid var(--c);background:var(--cbg);font-size:10.5px;font-weight:600;white-space:nowrap}
+  .sm .a{color:#333}
+  .flag{margin:6px auto 0;border:1.3px dashed var(--red);color:var(--red);background:var(--red-bg);padding:4px 8px;font-size:10.5px;text-align:center;border-radius:3px;width:max-content;max-width:100%}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:2px;margin-top:2px;flex:none}
+  table.jobs{width:100%;border-collapse:collapse;font-size:10.5px}
+  table.jobs td{padding:2px 4px;border-bottom:1px solid #eef0f5;vertical-align:top}
+  table.jobs td:first-child{font-family:Menlo,monospace;font-size:10px;white-space:nowrap;color:#13306e}
+
+  .grid3{display:grid;grid-template-columns:1.1fr 1fr 1fr;gap:10px;margin-top:10px}
+  .band{border:1.5px solid var(--c);background:var(--cbg);border-radius:6px;padding:8px 12px;display:flex;gap:11px;align-items:flex-start}
+  .band svg{width:36px;height:36px;flex:none}
+  .band h4{margin:0 0 3px;font-size:13.5px;color:var(--c)}
+  .band ul{margin:0;padding-left:13px}
+  .band li{margin:1.5px 0}
+  .c-red{--c:var(--red);--cbg:var(--red-bg)}
+  .c-gray{--c:var(--gray);--cbg:var(--gray-bg)}
+</style>
+</head>
+<body>
+<!-- reusable icons -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-bucket" viewBox="0 0 48 48"><rect x="1" y="1" width="46" height="46" rx="5" fill="#3f8624"/><path d="M12 15h24l-3 22c-.3 2-4 3-9 3s-8.7-1-9-3z" fill="none" stroke="#fff" stroke-width="2.4"/><ellipse cx="24" cy="15" rx="12" ry="3.5" fill="none" stroke="#fff" stroke-width="2.4"/></symbol>
+    <symbol id="i-db" viewBox="0 0 48 48"><rect x="1" y="1" width="46" height="46" rx="5" fill="#2e73b8"/><ellipse cx="24" cy="13" rx="12" ry="4.5" fill="none" stroke="#fff" stroke-width="2.4"/><path d="M12 13v22c0 2.5 5.4 4.5 12 4.5s12-2 12-4.5V13M12 24c0 2.5 5.4 4.5 12 4.5s12-2 12-4.5" fill="none" stroke="#fff" stroke-width="2.4"/></symbol>
+    <symbol id="i-os" viewBox="0 0 48 48"><circle cx="24" cy="24" r="22" fill="#e9f1fb"/><path d="M33 8a17 17 0 0 1-2 28A20 20 0 0 0 33 8z" fill="#005eb8"/><path d="M8 26c3-10 14-14 25-9-8-2-16 1-20 9-2 4-2 9 1 12-4-2-7-7-6-12z" fill="#00a3e0"/><path d="M14 40c9 3 19-1 22-10-4 5-12 9-22 10z" fill="#005eb8"/></symbol>
+    <symbol id="i-cfg" viewBox="0 0 48 48"><path d="M10 4h20l10 10v30H10z" fill="#fff" stroke="#1b2340" stroke-width="2.4"/><path d="M30 4v10h10" fill="none" stroke="#1b2340" stroke-width="2.4"/><path d="M16 20h14M16 26h10M16 32h8" stroke="#1b2340" stroke-width="2.2"/><circle cx="35" cy="36" r="6" fill="#fff" stroke="#1b2340" stroke-width="2.4"/><circle cx="35" cy="36" r="2" fill="#1b2340"/></symbol>
+    <symbol id="i-check" viewBox="0 0 48 48"><rect x="8" y="6" width="32" height="38" rx="3" fill="#fff" stroke="#1b2340" stroke-width="2.6"/><rect x="17" y="3" width="14" height="7" rx="2" fill="#1b2340"/><path d="M13 20l3 3 5-5M13 30l3 3 5-5" fill="none" stroke="#1b2340" stroke-width="2.4"/><path d="M25 21h10M25 31h10" stroke="#1b2340" stroke-width="2.4"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 48 48"><path d="M3 10h15l4 4h23v26H3z" fill="#4a78d8"/><path d="M3 17h42v23H3z" fill="#6d95ea"/><circle cx="34" cy="32" r="9" fill="#fff" stroke="#2f5bd3" stroke-width="2"/><path d="M25 32h18M34 23v18M34 23c-4 5-4 13 0 18M34 23c4 5 4 13 0 18" fill="none" stroke="#2f5bd3" stroke-width="1.5"/></symbol>
+    <symbol id="i-ssm" viewBox="0 0 48 48"><rect x="1" y="1" width="46" height="46" rx="5" fill="#3f8624"/><path d="M14 27a7 7 0 0 1 3-13 9 9 0 0 1 17 2 6 6 0 0 1 0 11" fill="none" stroke="#fff" stroke-width="2.2"/><circle cx="24" cy="30" r="6" fill="none" stroke="#fff" stroke-width="2.2"/><path d="M24 24v-4M24 36v4M18 30h-4M30 30h4" stroke="#fff" stroke-width="2.2"/></symbol>
+    <symbol id="i-ec2" viewBox="0 0 48 48"><rect x="1" y="1" width="46" height="46" rx="5" fill="#e07b14"/><rect x="13" y="13" width="22" height="22" fill="none" stroke="#fff" stroke-width="2.4"/><path d="M18 13V8M24 13V8M30 13V8M18 40v-5M24 40v-5M30 40v-5M13 18H8M13 24H8M13 30H8M40 18h-5M40 24h-5M40 30h-5" stroke="#fff" stroke-width="2.2"/></symbol>
+    <symbol id="i-llm" viewBox="0 0 48 48"><circle cx="24" cy="24" r="22" fill="#fff" stroke="#1b2340" stroke-width="2"/><path d="M24 9c5 0 7 4 6 8 5 0 8 5 5 9 3 4 0 9-5 8 0 5-5 7-8 4-3 3-9 1-8-4-5 0-7-5-4-8-3-4 0-9 5-9-1-4 3-8 9-8z" fill="none" stroke="#1b2340" stroke-width="2"/><path d="M24 12v24M18 20l6 4 6-4M18 30l6-4 6 4" fill="none" stroke="#1b2340" stroke-width="1.6"/></symbol>
+    <symbol id="i-ecs" viewBox="0 0 48 48"><rect x="1" y="1" width="46" height="46" rx="5" fill="#e07b14"/><path d="M12 14l12-6 12 6v20l-12 6-12-6z" fill="none" stroke="#fff" stroke-width="2.4"/><path d="M12 14l12 6 12-6M24 20v20" fill="none" stroke="#fff" stroke-width="2.2"/></symbol>
+    <symbol id="i-user" viewBox="0 0 48 48"><circle cx="24" cy="24" r="22" fill="#f4effc" stroke="#6b3fb8" stroke-width="2"/><circle cx="24" cy="18" r="7" fill="none" stroke="#6b3fb8" stroke-width="2.4"/><path d="M11 38c2-8 7-11 13-11s11 3 13 11" fill="none" stroke="#6b3fb8" stroke-width="2.4"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" fill="none" stroke="#1b2340" stroke-width="1.7"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" stroke="#1b2340" stroke-width="1.7"/></symbol>
+    <symbol id="i-ok" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" fill="none" stroke="#2e8b3e" stroke-width="1.8"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="#2e8b3e" stroke-width="1.9"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3l10 18H2z" fill="none" stroke="#1b2340" stroke-width="1.7"/><path d="M12 10v5M12 17.5v1" stroke="#1b2340" stroke-width="1.9"/></symbol>
+    <symbol id="i-stack" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3" fill="none" stroke="#1b2340" stroke-width="1.7"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" fill="none" stroke="#1b2340" stroke-width="1.7"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="1.5" fill="none" stroke="#1b2340" stroke-width="1.7"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" fill="none" stroke="#1b2340" stroke-width="1.7"/></symbol>
+    <symbol id="i-flow" viewBox="0 0 24 24"><path d="M3 7h13M3 12h16M3 17h10" stroke="#1b2340" stroke-width="1.8"/><path d="M15 4l3 3-3 3M18 14l3 3-3 3" fill="none" stroke="#1b2340" stroke-width="1.7"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z" fill="none" stroke="#1b2340" stroke-width="1.7"/><circle cx="12" cy="12" r="3" fill="none" stroke="#1b2340" stroke-width="1.7"/></symbol>
+  </defs>
+</svg>
+
+<div class="page">
+  <h1>SDE Curation Engine — Top-Level Workflow (6 Stages)<small>as built · schema V9 · 2026-09-28</small></h1>
+
+  <div class="stages">
+    <!-- 1 Collection -->
+    <div class="stage c-blue">
+      <div class="hd"><div class="t"><b>1</b>Collection</div><div class="s">(R1)</div></div>
+      <div class="icons"><div class="ic"><svg><use href="#i-folder"/></svg>Web UI</div></div>
+      <div class="body"><ul>
+        <li>Input: seed URL, name, connector (<code>crawler2</code> | <code>api</code>), <code>max_pages</code></li>
+        <li><code>collection_id</code> = apex host (stable; renames keep the pinned index key)</li>
+        <li>Division is a collection-level choice; <b>General</b> = “not assigned yet”, blocked at promote</li>
+        <li><code>collection.yaml</code> + <code>patterns.yaml</code> on EFS (git-trackable provenance)</li>
+      </ul></div>
+      <div class="pill">Status: Backlog</div>
+    </div>
+    <div class="arrow">➜</div>
+
+    <!-- 2 Scrape -->
+    <div class="stage c-green">
+      <div class="hd"><div class="t"><b>2</b>Scrape</div><div class="s">(R2, R6)</div></div>
+      <div class="icons">
+        <div class="ic"><svg><use href="#i-ssm"/></svg>SSM</div><span class="to">➜</span>
+        <div class="ic"><svg><use href="#i-ec2"/></svg>Crawler EC2</div><span class="to">➜</span>
+        <div class="ic"><svg><use href="#i-bucket"/></svg>S3</div>
+      </div>
+      <div class="body"><ul>
+        <li>Job dropped in crawler inbox via SSM; poll S3 (or load an existing crawl)</li>
+        <li>Survives a deploy: same job resumes, never a second crawl</li>
+        <li><b>Streamed ingest</b>: 500 pages / 1 MB chunks → <code>COPY</code> → <code>DumpUrl</code></li>
+        <li>Duplicate spellings collapse on <code>canonical_key</code>; text stored once per hash in <code>page_text</code></li>
+        <li>Fetch failures → <code>dump_failures</code> (kept curated, flagged)</li>
+        <li>Re-crawl of curated set → <code>needs_recuration</code></li>
+      </ul></div>
+      <div class="pill">Status: Scraped</div>
+    </div>
+    <div class="arrow">➜</div>
+
+    <!-- 3 Curate -->
+    <div class="stage c-purple">
+      <div class="hd"><div class="t"><b>3</b>Curate</div><div class="s">(R3, R4, R9) · recompute loop</div></div>
+      <div class="icons">
+        <div class="ic"><svg><use href="#i-db"/></svg>RDS</div><span class="dash">◂- - -▸</span>
+        <div class="ic"><svg><use href="#i-llm"/></svg>OpenAI<br>(gpt-6-luna)</div><span class="dash">◂- - -▸</span>
+        <div class="ic"><svg><use href="#i-user"/></svg>SME</div>
+      </div>
+      <div class="body">
+        <div class="sub">A. Recompute <span>(pure, whole-set, idempotent)</span></div>
+        <ul><li><code>diff(dump, curated) + resolve(patterns)</code> → <code>DeltaUrl</code> new / modified / deleted + <code>pattern_effects</code> (“why”)</li>
+        <li>Deleted only on evidence (404/410 or complete crawl); capped crawl ⇒ <i>not_visited</i></li></ul>
+        <div class="sep"></div>
+        <div class="sub">B. Exclusions stage <span>— decide what is in</span></div>
+        <ul><li>Exclude/include rules; include always wins. Excluded URLs get <b>no delta row</b></li>
+        <li>AI <i>Suggest patterns</i>: exclude-only globs, keep-by-default</li></ul>
+        <div class="sep"></div>
+        <div class="sub">C. Metadata stage <span>— title · division · doc type</span></div>
+        <ul><li>Field rules: <b>newest matching rule wins</b>; value = rule → curated → NULL</li>
+        <li>AI metadata per URL from full page text (≤270K tokens) + confidence; per-URL failures, <i>Retry blanks</i></li>
+        <li>AI retitles duplicate (title + doc type) groups; AI-edited labels kept</li></ul>
+        <div class="sep"></div>
+        <div class="sub">D. SME review &amp; promote</div>
+        <ul><li>Paged Workbench; accept-all skips SME-decided fields</li>
+        <li>Promote all or a picked subset → <code>CuratedUrl</code> (keeps content hash). Refuses blanks, General, duplicates</li></ul>
+      </div>
+      <div class="pill">Status: Curating → Curated</div>
+    </div>
+    <div class="arrow">➜</div>
+
+    <!-- 4 Index test -->
+    <div class="stage c-teal">
+      <div class="hd"><div class="t"><b>4</b>Index to test</div><div class="s">(R5, R6)</div></div>
+      <div class="icons">
+        <div class="ic"><svg><use href="#i-cfg"/></svg>Export</div><span class="to">➜</span>
+        <div class="ic"><svg><use href="#i-ecs"/></svg>Indexer<br>(ECS)</div><span class="to">➜</span>
+        <div class="ic"><svg><use href="#i-os"/></svg>AOSS<br>(test)</div>
+      </div>
+      <div class="body"><ul>
+        <li>Pin index key</li>
+        <li>Stream curated set + approved text → <code>documents.jsonl</code>, then <code>manifest.json</code> last (= export complete)</li>
+        <li>Dispatch WEB_COSMOS indexer via <code>ecs:RunTask</code>; poll S3 for <code>status.json</code></li>
+        <li>Vectors land in <code>vectorized/</code></li>
+      </ul></div>
+      <div class="pill">Status: Config Generated</div>
+    </div>
+    <div class="arrow">➜</div>
+
+    <!-- 5 Validation -->
+    <div class="stage c-orange">
+      <div class="hd"><div class="t"><b>5</b>Validation gate</div><div class="s">(R7) · test and prod</div></div>
+      <div class="icons">
+        <div class="ic"><svg><use href="#i-os"/></svg>AOSS<br>read-back</div><span class="to">➜</span>
+        <div class="ic"><svg><use href="#i-check"/></svg>Compare</div>
+      </div>
+      <div class="body"><ul>
+        <li>Wait <code>VALIDATION_DELAY_S</code>, then read the index back directly (the indexer's own report is pre-refresh)</li>
+        <li>Counts + titles vs curated set; pass at ≥ 0.99 title match, retry until timeout</li>
+        <li>Fail ⇒ derived chip <i>needs re-indexing</i> / <i>prod not validated</i> — <b>never</b> <code>needs_recuration</code></li>
+      </ul></div>
+      <div class="pill">Pass → next stage</div>
+    </div>
+    <div class="arrow">➜</div>
+
+    <!-- 6 Prod -->
+    <div class="stage c-navy">
+      <div class="hd"><div class="t"><b>6</b>Index to prod</div><div class="s">(R5, R10)</div></div>
+      <div class="icons">
+        <div class="ic"><svg><use href="#i-bucket"/></svg>Test run<br>vectors</div><span class="to">➜</span>
+        <div class="ic"><svg><use href="#i-os"/></svg>SMCE prod<br>AOSS</div>
+      </div>
+      <div class="body"><ul>
+        <li>Republish the <b>latest validated</b> test run's vectors via prod-account role — no re-export, no re-vectorizing</li>
+        <li>Bulk upsert (100 docs / 8 MB); <b>hard deletes</b>, no tombstones</li>
+        <li><code>modified_date</code> copied from test, never stamped</li>
+        <li>Same validation gate against prod</li>
+      </ul></div>
+      <div class="pill">Status: Live</div>
+    </div>
+  </div>
+
+  <!-- back edges -->
+  <div class="edges">
+    <svg viewBox="0 0 1684 40">
+      <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0L8 4L0 8z" fill="#c62828"/></marker></defs>
+      <path d="M1291 1 V13 H1035 V4" fill="none" stroke="#c62828" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+      <path d="M1560 1 V27 H1010 V4" fill="none" stroke="#c62828" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+      <text x="1070" y="24" fill="#c62828" font-size="11">test fail → stays Curated · “needs re-indexing”</text>
+      <text x="1300" y="38" fill="#c62828" font-size="11">prod fail → back to Config Generated · “prod not validated”</text>
+      <path d="M696 1 V13" fill="none" stroke="#6b3fb8" stroke-width="1.4" stroke-dasharray="4 3"/>
+      <text x="540" y="26" fill="#6b3fb8" font-size="11">re-scrape / “Re-curate everything” → back to Curating</text>
+    </svg>
+  </div>
+
+  <!-- state bar -->
+  <div class="state">
+    <div class="lead"><svg><use href="#i-db"/></svg>State &amp; Artifacts</div>
+    <div class="store"><div class="n"><svg><use href="#i-db"/></svg>RDS Postgres (all state)</div>
+      <div>collections · dump_urls · page_text</div><div>delta_urls · curated_urls · patterns</div><div>pattern_effects · job_runs · audit_log</div></div>
+    <div class="store"><div class="n"><svg><use href="#i-bucket"/></svg>S3 crawler bucket</div>
+      <div>crawl documents (JSON array)</div><div>failure logs</div></div>
+    <div class="store"><div class="n"><svg><use href="#i-bucket"/></svg>S3 cosmos bucket</div>
+      <div>curated_collections/{key}/{run}/</div><div>index_runs/ (status.json)</div><div>vectorized/</div></div>
+    <div class="store"><div class="n"><svg><use href="#i-folder"/></svg>EFS /data</div>
+      <div>collections/&lt;id&gt;/collection.yaml</div><div>collections/&lt;id&gt;/patterns.yaml</div><div>index + scrape logs</div></div>
+    <div class="store"><div class="n"><svg><use href="#i-os"/></svg>AOSS</div>
+      <div>sde-web (test)</div><div>sde-web (SMCE prod)</div></div>
+  </div>
+
+  <!-- bottom panels -->
+  <div class="grid2">
+    <div class="panel">
+      <h3>Status Machine (6 States)</h3>
+      <div class="sm">
+        <span class="st c-gray">Backlog</span><span class="a">➜</span>
+        <span class="st c-green">Scraped</span><span class="a">➜</span>
+        <span class="st c-purple">Curating</span><span class="a">➜</span>
+        <span class="st c-purple">Curated</span><span class="a">➜</span>
+        <span class="st c-teal">Config Gen.</span><span class="a">➜</span>
+        <span class="st c-navy">Live</span>
+      </div>
+      <div style="text-align:center;font-size:10.5px;color:var(--muted)">Curating sub-stages: <b>exclusions</b> → <b>metadata</b></div>
+      <div class="flag"><code>needs_recuration</code> set only by re-crawl or SME — never by an index failure</div>
+      <div style="font-size:10.5px;color:var(--muted);text-align:center;margin-top:5px">Every transition written to <code>status_history</code> + <code>audit_log</code></div>
+    </div>
+
+    <div class="panel">
+      <h3>Cross-Cutting Principles</h3>
+      <ul>
+        <li><svg><use href="#i-flow"/></svg><span>Recompute stays whole (no pagination) but carries no page text</span></li>
+        <li><svg><use href="#i-stack"/></svg><span>Text paths stream: ingest, LLM (keyset 200), export (pages of 500)</span></li>
+        <li><svg><use href="#i-gear"/></svg><span>Pure engine (<code>patterns</code>, <code>diff</code>, <code>urls</code>): unapply = delete rule + recompute</span></li>
+        <li><svg><use href="#i-warn"/></svg><span>Every job records explicit failure; scrape + AI metadata resume after a restart</span></li>
+        <li><svg><use href="#i-lock"/></svg><span>One job per collection; one engine task (in-process registry + SSE)</span></li>
+        <li><svg><use href="#i-eye"/></svg><span>Blank metadata is never promoted; AI fills every field</span></li>
+      </ul>
+    </div>
+
+    <div class="panel">
+      <h3>Jobs (JobManager)</h3>
+      <table class="jobs">
+        <tr><td>scrape</td><td>crawl / load crawl → ingest dump</td></tr>
+        <tr><td>llm_patterns</td><td>exclude-glob suggestions</td></tr>
+        <tr><td>llm_metadata</td><td>title · division · doc type (16 workers)</td></tr>
+        <tr><td>llm_titles</td><td>retitle duplicate groups</td></tr>
+        <tr><td>index_test</td><td>export → indexer → validate</td></tr>
+        <tr><td>index_prod</td><td>republish vectors → validate</td></tr>
+        <tr><td>validate(_prod)</td><td>re-run the gate on a run</td></tr>
+      </table>
+      <div style="font-size:10.5px;color:var(--muted);margin-top:4px">Progress via SSE; Slack-compatible webhook on each status transition</div>
+    </div>
+
+    <div class="panel">
+      <h3>Key Outputs / Artifacts</h3>
+      <ul>
+        <li><span class="sw" style="background:#2e8b3e"></span>DumpUrl + page_text: crawl, one text per hash</li>
+        <li><span class="sw" style="background:#6b3fb8"></span>DeltaUrl: new / modified / deleted + AI suggestions</li>
+        <li><span class="sw" style="background:#8e6bd1"></span>CuratedUrl: approved set + content hash</li>
+        <li><span class="sw" style="background:#1f7a7a"></span>documents.jsonl + manifest.json (WEB_COSMOS)</li>
+        <li><span class="sw" style="background:#e2761b"></span>index_runs: test/prod validation results</li>
+        <li><span class="sw" style="background:#5b6275"></span>status_history + audit_log (append-only)</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="grid3">
+    <div class="band c-blue">
+      <svg viewBox="0 0 48 48"><path d="M24 3l17 6v13c0 11-7 19-17 23C14 41 7 33 7 22V9z" fill="#2f5bd3"/><path d="M16 24l6 6 11-12" fill="none" stroke="#fff" stroke-width="3.5"/></svg>
+      <div><h4>Verification</h4><ul>
+        <li>pytest on real Postgres (Docker), driven through API flows, not DB shortcuts</li>
+        <li>Rule semantics, diff, promote, duplicates, blank metadata, scale (100K URLs)</li>
+        <li>e2e: seed collection through all 6 stages against test AOSS (<code>docs/e2e-test.md</code>)</li>
+      </ul></div>
+    </div>
+    <div class="band c-gray">
+      <svg viewBox="0 0 48 48"><rect x="4" y="8" width="40" height="30" rx="3" fill="none" stroke="#5b6275" stroke-width="2.6"/><path d="M4 16h40M14 42h20M24 38v4" stroke="#5b6275" stroke-width="2.6"/></svg>
+      <div><h4>Runtime</h4><ul>
+        <li>CloudFront + WAF → ALB → one ECS task (FastAPI + HTMX + SSE)</li>
+        <li>psycopg pool (16); migrations at boot; per-user logins (admin / curator)</li>
+        <li>Infra as CDK (<code>infra/stacks/engine_stack.py</code>)</li>
+      </ul></div>
+    </div>
+    <div class="band c-red">
+      <svg viewBox="0 0 48 48"><circle cx="24" cy="24" r="21" fill="#c62828"/><path d="M16 16l16 16M32 16L16 32" stroke="#fff" stroke-width="4"/></svg>
+      <div><h4>Dropped (Out of Scope)</h4><ul>
+        <li>TDAMM tagging, feedback app, EJ app, dashboards, backup tooling</li>
+        <li>20-state workflow / 7-state reindexing machine</li>
+        <li>Tombstones in prod; SQLite/Parquet state store (now RDS)</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -263,9 +263,11 @@ def test_test_waf_rate_limit_fits_curators_behind_one_ip(template, test_template
 
 def test_waf_lets_crawled_urls_with_dot_segments_through(template):
     # an exclude on https://simbad.cds.unistra.fr/simbad/../guide/otypes.htx got a CloudFront 403
+    # (body), and so did its rule's match-count link on the Rules tab (?match=<url>, query string)
     [acl] = template.find_resources("AWS::WAFv2::WebACL").values()
     [rule] = [r for r in acl["Properties"]["Rules"] if r["Name"] == "AWSManagedRulesCommonRuleSet"]
     overrides = rule["Statement"]["ManagedRuleGroupStatement"]["RuleActionOverrides"]
     assert {o["Name"]: o["ActionToUse"] for o in overrides} == {
         "SizeRestrictions_BODY": {"Count": {}}, "GenericLFI_BODY": {"Count": {}},
+        "GenericLFI_QUERYARGUMENTS": {"Count": {}},
     }
