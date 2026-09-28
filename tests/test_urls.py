@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from sde_curation.engine.urls import batches, canonical_key, dedupe_variants, duplicate_docs
+from sde_curation.engine.urls import (
+    batches,
+    canonical_key,
+    dedupe_variants,
+    duplicate_docs,
+    resolve_dot_segments,
+)
 from sde_curation.llm.global_excludes import DEFAULT_PATH, global_exclude_hits, load_global_excludes
 from sde_curation.models import GlobalExcludeList
 
@@ -16,6 +22,18 @@ def test_canonical_key_ignores_scheme_www_slash_and_fragment():
     assert canonical_key("https://wwwx.org/a") == "wwwx.org/a"  # only a www. label, not any www prefix
     assert canonical_key("https://ex.org/") == "ex.org/"
     assert canonical_key("https://ex.org/map?obs=1") == "ex.org/map?obs=1" != canonical_key("https://ex.org/map")
+
+
+def test_dot_segments_resolve_like_a_browser():
+    r = resolve_dot_segments
+    assert r("https://simbad.cds.unistra.fr/simbad/../guide/otypes.htx") == "https://simbad.cds.unistra.fr/guide/otypes.htx"
+    assert r("https://ex.org/a/./b/../c?q=../x#f") == "https://ex.org/a/c?q=../x#f"  # query/fragment untouched
+    assert r("https://ex.org/../../a") == "https://ex.org/a"  # never above the root
+    assert r("https://ex.org/a/b/..") == "https://ex.org/a/"
+    assert r("https://ex.org/v1.2/..hidden/x.") == "https://ex.org/v1.2/..hidden/x."  # dots inside names stay
+    assert r("https://ex.org/a") == "https://ex.org/a"
+    # a rule or curated row written with the dotted spelling is still the same page
+    assert canonical_key("https://ex.org/simbad/../guide/") == canonical_key("http://www.ex.org/guide")
 
 
 def test_dedupe_prefers_https_and_sorts_by_path():

@@ -84,6 +84,24 @@ async def test_ingest_keeps_one_spelling_per_page(crawler_client):
     ]
 
 
+async def test_ingest_resolves_dot_segments_and_the_curator_can_exclude_the_page(crawler_client):
+    """Regression: simbad.cds.unistra.fr links /simbad/../guide/otypes.htx, the crawler kept that
+    spelling, and excluding it sent "../" in the request body (a CloudFront WAF 403). The page is
+    stored as the browser would request it, and a spelling that is also crawled plainly is one row."""
+    await crawler_client.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 5})
+    jobs = crawler_client.app.state.jobs
+    docs = [
+        {"url": "https://ex.org/simbad/../guide/otypes.htx", "title": "Otypes", "full_text": "o"},
+        {"url": "https://ex.org/guide/otypes.htx", "title": "Otypes", "full_text": "o"},
+        {"url": "https://ex.org/simbad/./../tools/manage?x=1", "title": "Manage", "full_text": "m"},
+    ]
+    failures = [{"url": "https://ex.org/a/../gone", "reason": "http_error", "status": 404}]
+    assert await jobs.ingest_dump("ex.org", docs, failures) == 2
+    dump = (await crawler_client.get("/api/collections/ex.org/dump?limit=10")).json()
+    assert sorted(i["url"] for i in dump["items"]) == ["https://ex.org/guide/otypes.htx", "https://ex.org/tools/manage?x=1"]
+    assert not any(".." in i["url"] for i in dump["items"])
+
+
 async def test_dashboard_row_polls_only_while_its_job_is_live(crawler_client):
     """Regression: every row polled every 10s, so a dashboard of hundreds of collections tripped
     the WAF rate limit (CloudFront 403 for everyone behind that IP). Idle rows ride on SSE alone."""

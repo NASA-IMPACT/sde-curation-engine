@@ -19,6 +19,9 @@ async def test_create_list_get(client, settings):
 
     assert (await client.post("/api/collections", json={"seed_url": "science.nasa.gov", "name": "dup"})).status_code == 409
     assert (await client.post("/api/collections", json={"seed_url": "ftp://x", "name": "bad"})).status_code == 422
+    for bad_id in ("..", ".", "a/b"):  # ".." would name the parent directory
+        r = await client.post("/api/collections", json={"seed_url": "https://x.org", "name": "bad", "collection_id": bad_id})
+        assert r.status_code == 422, bad_id
 
     assert [c["collection_id"] for c in (await client.get("/api/collections")).json()] == ["science.nasa.gov"]
     assert (await client.get("/api/collections/nope")).status_code == 404
