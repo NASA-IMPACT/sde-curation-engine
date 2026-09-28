@@ -57,6 +57,7 @@ from ..models import (
     IndexRun,
     JobKind,
     JobRun,
+    NameUpdate,
     PatternCreate,
     PatternType,
     Role,
@@ -1591,6 +1592,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await db(request).set_index_key(collection_id, body.index_key, name)
         await audit(request, "index.key", collection_id, f"set by hand: '{body.index_key}' ({name})")
         c = await must_get(request, collection_id)
+        emit_collection(request, c)
+        return htmx_done(request, c)
+
+    @app.post("/api/collections/{collection_id}/name", response_model=None)
+    async def api_set_name(request: Request, collection_id: str, body: NameUpdate):
+        """Rename the collection — only until its first index run. The index key and the name the
+        index carries are the name as it was when indexing started, so once any run exists (test or
+        prod, whatever its outcome) the name is locked to match them. The id (and so every URL and
+        file keyed on it) never changes. Title rules that render {collection} pick the new name up: a
+        recompute applies it right away, and curated rows whose title changes come back as modified
+        deltas to promote."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        if c.last_run_id:
+            raise HTTPException(409, f"'{c.name}' has been indexed (as '{c.collection_key}'), so its name can no"
+                                     " longer change: it has to match the collection key and name it was indexed with")
+        if body.name == c.name:
+            return htmx_done(request, c)
+        old = c.name
+        await db(request).set_name(collection_id, body.name)
+        c = await must_get(request, collection_id)
+        if (c.delta_count or c.curated_rows) and await db(request).title_rules_use_collection_name(collection_id):
+            ds = await curation(request).recompute(c)
+            await _after_curation_change(request, c, ds)
+            c = await must_get(request, collection_id)
+        write_collection_yaml(settings.collections_dir, c, await db(request).status_history(collection_id))
+        await audit(request, "collection.name", collection_id, f"{old} → {body.name}")
         emit_collection(request, c)
         return htmx_done(request, c)
 
