@@ -19,11 +19,6 @@ async def test_jobs_panel_and_page(crawler_client):
     assert "All jobs" not in panel  # the link only shows on the compact dashboard strip
     strip = (await c.get("/jobs/panel", headers={"HX-Request": "true", "HX-Target": "jobs-panel"})).text
     assert "All jobs" in strip
-    # a queued crawl (crawler-host inbox) is labelled as such
-    job = (await c.get("/api/collections/ex.org/jobs")).json()[0]
-    await c.app.state.db.update_job(_with_progress(job))
-    panel = (await c.get("/jobs/panel")).text
-    assert "queued" in panel and "behind 2 crawls" in panel
     await wait_job(c, "ex.org")
     # a failed job is not shown in the running-jobs strip — only in /jobs → Recent
     await c.post("/api/collections/b.org/scrape"); await wait_job(c, "b.org")
@@ -34,12 +29,20 @@ async def test_jobs_panel_and_page(crawler_client):
     assert "Jobs" in (await c.get("/")).text.split('role="menu"')[1]
 
 
-def _with_progress(job: dict):
-    from sde_curation.models import JobRun
+async def test_queued_crawl_is_labelled(crawler_client):
+    """A crawl waiting in the crawler host's inbox shows as queued, with how many are ahead."""
+    from sde_curation.models import JobKind, JobRun, JobState
 
-    j = JobRun(**job)
-    j.progress = {**j.progress, "queued": True, "queue_ahead": 2}
-    return j
+    c = crawler_client
+    await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 40})
+    # Synthetic, like the LLM case below: a live scrape's own poll loop rewrites its job's progress
+    # every tick, which raced with the progress set here (flaked on CI).
+    await c.app.state.db.insert_job(JobRun(
+        collection_id="ex.org", kind=JobKind.SCRAPE, state=JobState.RUNNING,
+        progress={"processed": 0, "docs": 0, "failed": 0, "queued": True, "queue_ahead": 2},
+    ))
+    panel = (await c.get("/jobs/panel")).text
+    assert "queued" in panel and "behind 2 crawls" in panel
 
 
 async def test_cancel_from_jobs_panel(crawler_client):
