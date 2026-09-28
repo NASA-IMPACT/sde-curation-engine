@@ -2,9 +2,11 @@
 
 import asyncio
 import json
+import time
 
 import pytest
 
+from sde_curation.engine.text import content_hash
 from sde_curation.models import Collection, Division
 from tests.conftest import wait_job
 from tests.test_scrape_backend import _docs_text, aws, ssm_env  # noqa: F401 - pytest fixtures
@@ -50,6 +52,47 @@ async def test_reuse_local_crawl_output(crawler_client):
     hist = (await c.get("/collections/ex.org?tab=activity")).text
     assert "loaded existing crawl from" in hist and "scrape.reuse" in hist
 
+
+
+async def test_a_huge_binary_page_loads_while_the_engine_keeps_answering(crawler_client):
+    """uavsar.jpl.nasa.gov, 2026-09-28: its crawl kept a PowerPoint deck as 72M characters of
+    "text" — one 175 MB JSON string, nearly all \\uXXXX escapes. The old parser was quadratic in
+    the length of one string; the load pinned a core, /health stopped answering, and ECS killed
+    the engine, which resumed the load and died again. The page is loaded like any other, and
+    the engine answers while it is."""
+    c = crawler_client
+    await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 10})
+    junk = "".join(map(chr, range(0x20))) + '\\"{}[],' + "PK\u0003\u0004\ufffd"  # a binary file, decoded
+    deck = junk * (8_000_000 // len(junk))  # ~40 MB of JSON: ~25 s for the old parser, ~1 s now
+    pages = [
+        {"url": "https://ex.org/a", "title": "A", "full_text": "a", "content_type": "text/html"},
+        {"url": "https://ex.org/deck.pps", "title": "Deck", "full_text": deck, "content_type": "text/html"},
+        {"url": "https://ex.org/b", "title": "B", "full_text": "b", "content_type": "text/html"},
+    ]
+    docs = c.app.state.settings.crawler_root / "output" / "collections" / "https_ex.org.json"
+    docs.parent.mkdir(parents=True, exist_ok=True)
+    docs.write_text("[\n" + ",\n".join(json.dumps(p) for p in pages) + "\n]\n")  # the crawler's layout
+
+    assert (await c.post("/api/collections/ex.org/scrape?reuse=true")).status_code == 202
+    started = time.monotonic()
+    slowest = 0.0
+    while True:
+        t = time.monotonic()
+        assert (await c.get("/health")).json()["ok"]
+        slowest = max(slowest, time.monotonic() - t)
+        job = (await c.get("/api/collections/ex.org/jobs")).json()[0]
+        if job["state"] != "running" or t - started > 10:
+            break
+        await asyncio.sleep(0.05)
+    assert job["state"] == "succeeded", f"after {time.monotonic() - started:.0f}s: {job}"
+    assert slowest < 2, f"/health took {slowest:.1f}s during the load"
+
+    kept = deck.replace("\x00", "")  # PostgreSQL text cannot hold NUL; the ingest drops it
+    dump = (await c.get("/api/collections/ex.org/dump")).json()
+    assert dump["total"] == 3
+    assert {r["url"]: r["text_len"] for r in dump["items"]}["https://ex.org/deck.pps"] == len(kept)
+    stored = {r.url: r.content_hash for r in await c.app.state.db.load_dump("ex.org")}
+    assert stored["https://ex.org/deck.pps"] == content_hash(kept)
 
 async def test_ssm_existing_and_fetch(ssm_env, tmp_path):  # noqa: F811
     _host, make, upload = ssm_env

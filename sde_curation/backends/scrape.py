@@ -23,8 +23,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Protocol
 
-import ijson
-
 from ..config import Settings
 from ..models import Collection, crawl_file_stem
 
@@ -207,36 +205,89 @@ def iter_documents(source: DocumentSource) -> Iterator[dict[str, Any]]:
     """The crawl's documents, one at a time. The source is a single JSON array with the full text
     of up to 100k pages; read whole and parsed whole it was held in memory three times over during
     ingest, which is what decided the engine's memory size. Read once, forwards only — an S3 body
-    cannot be rewound, so the opening bracket is checked from a buffer rather than by seeking."""
+    cannot be rewound, so the opening bracket is checked from the first read rather than by seeking."""
     where = source.describe()
     with source.open() as raw:
         head = raw.read(256)
         if not head.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"["):
             raise ScrapeError(f"documents file is not a JSON array: {where}")
-        try:
-            yield from ijson.items(_Pushback(raw, head), "item", use_float=True)
-        except ijson.JSONError as e:
-            raise ScrapeError(f"documents file is not valid JSON: {where} ({e})") from e
+        for item in _array_items(raw, head, where):
+            try:
+                yield json.loads(item)
+            except ValueError as e:
+                raise ScrapeError(f"documents file is not valid JSON: {where} ({e})") from e
 
 
-class _Pushback:
-    """`raw` with `head` put back in front of it. An S3 body is forwards-only — it cannot be
-    seeked back to 0 after the opening bracket has been sniffed — and this is the whole of what
-    ijson asks of a stream (`read(n)`), so it costs one small object instead of a second GET."""
+_READ_CHUNK = 4 * 1024 * 1024
+_STRUCTURAL = re.compile(rb'["{}\[\]]')
 
-    def __init__(self, raw: IO[bytes], head: bytes):
-        self._raw, self._head = raw, head
 
-    def read(self, size: int = -1) -> bytes:
-        if not self._head:
-            return self._raw.read(size)
-        if size is None or size < 0:
-            out, self._head = self._head + self._raw.read(), b""
-            return out
-        out, self._head = self._head[:size], self._head[size:]
-        if len(out) < size:
-            out += self._raw.read(size - len(out))
-        return out
+def _array_items(raw: IO[bytes], head: bytes, where: str) -> Iterator[bytes]:
+    """The objects of the JSON array `head` + `raw`, each as its own bytes, cut out without being
+    parsed — `json.loads` then parses each one whole.
+
+    This replaced ijson, whose lexer re-scans a token that spans reads from the token's start on
+    every read: parsing is quadratic in the length of one string. A 16 MB page took 8 s, and
+    uavsar.jpl.nasa.gov's crawl holds a binary .pps kept as 72M characters of text (175 MB of
+    JSON) — ~15 minutes of CPU in C that starved the event loop until ECS killed the engine for
+    failing its health check (2026-09-28). Here only the bytes that open or close a string, object
+    or array are looked at, found by `bytes.find` and a regex search (both C, both linear), and
+    `json.loads` takes that page in under a second.
+
+    Layout does not matter (the crawler writes one document per line; a single-line or indented
+    array reads the same). Only a string can hide a bracket, and a quote inside one is escaped by
+    an odd run of backslashes — the run is counted back from the quote, which is always inside
+    the element still being cut, so it is never cut short by the buffer being trimmed."""
+    buf = bytearray(head)
+    pos = 0  # next byte of buf to look at
+    depth = 0  # 1 = inside the top-level array, 2+ = inside one of its elements
+    in_str = False
+    start = -1  # where the element being cut begins in buf; -1 = between elements
+    while True:
+        while pos < len(buf):
+            if in_str:
+                q = buf.find(b'"', pos)
+                if q < 0:
+                    pos = len(buf)
+                    break
+                k = q
+                while buf[k - 1] == 0x5C:  # backslash
+                    k -= 1
+                pos = q + 1
+                in_str = (q - k) % 2 == 1  # an odd run escapes the quote
+                continue
+            m = _STRUCTURAL.search(buf, pos)
+            if m is None:
+                pos = len(buf)
+                break
+            c, pos = buf[m.start()], m.end()
+            if c == 0x22:  # "
+                if depth < 2:
+                    raise ScrapeError(f"documents file holds something other than objects: {where}")
+                in_str = True
+            elif c in (0x7B, 0x5B):  # { [
+                depth += 1
+                if depth == 2:
+                    start = m.start()
+            else:
+                depth -= 1
+                if depth == 1:
+                    yield bytes(buf[start:pos])
+                    start = -1
+                elif depth == 0:
+                    return  # the array is closed; anything after it is not ours
+                elif depth < 0:
+                    raise ScrapeError(f"documents file is not valid JSON: {where} (unbalanced ']')")
+        if start >= 0:  # keep the element being cut; everything before it has been handed out
+            del buf[:start]
+            pos, start = pos - start, 0
+        else:
+            del buf[:pos]
+            pos = 0
+        chunk = raw.read(_READ_CHUNK)
+        if not chunk:
+            raise ScrapeError(f"documents file is not valid JSON: {where} (ends before the array is closed)")
+        buf += chunk
 
 
 def parse_failures(data: bytes) -> list[dict[str, Any]]:

@@ -8,12 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from sde_curation.backends import scrape
 from sde_curation.backends.scrape import (
+    FileDocuments,
     LocalSubprocessScraper,
     LogProgress,
     ScrapeError,
     SsmRemoteScraper,
     build_job,
+    iter_documents,
     parse_poll,
 )
 from sde_curation.config import Settings
@@ -574,3 +577,54 @@ async def test_ssm_resume_ingests_a_crawl_that_finished_just_as_the_engine_came_
     res = await s.resume(coll(5), datetime.now(UTC) - timedelta(minutes=5), cb)
     assert _drops(s) == [] and seen[-1] == {"resumed": True, "finished_while_down": True}
     assert json.loads(_docs_text(res))[0]["url"] == "https://ex.org/a"
+
+
+# ── reading the documents file ────────────────────────────────────────
+
+# Strings that look like structure: quotes, brackets and braces inside text, backslash runs of
+# every parity right before a quote, and the control characters a binary file kept as text is
+# made of — JSON escapes all of them, so the raw bytes are full of \ and \uXXXX.
+TRICKY = [
+    {"url": "https://ex.org/a", "title": 'say "hi" {not} [an] ,array', "full_text": "a"},
+    {"url": "https://ex.org/b", "title": "ends in a backslash \\", "full_text": "\\\\"},
+    {"url": "https://ex.org/c", "title": '\\"', "full_text": '\\\\\\"}]'},
+    {"url": "https://ex.org/d", "title": "é ✓ \ufffd", "full_text": "".join(map(chr, range(0x20))) * 3,
+     "depth": 2, "tags": [{"k": ["[", "]"]}], "score": 0.5},
+    {"url": "https://ex.org/e", "title": "", "full_text": ""},
+]
+
+
+@pytest.mark.parametrize("layout", [
+    lambda docs: json.dumps(docs),  # one line (what the tests and older crawlers write)
+    lambda docs: "[\n" + ",\n".join(json.dumps(d) for d in docs) + "\n]\n",  # the crawler: one per line
+    lambda docs: "\ufeff " + json.dumps(docs, indent=2, ensure_ascii=False),  # BOM, indented, raw UTF-8
+])
+@pytest.mark.parametrize("chunk", [1, 2, 3, 7, 4096])
+def test_documents_read_back_exactly_whatever_the_layout_and_read_size(tmp_path, monkeypatch, layout, chunk):
+    """Every read boundary (chunk=1 puts one between every pair of bytes) and every layout gives
+    back exactly the documents that were written."""
+    monkeypatch.setattr(scrape, "_READ_CHUNK", chunk)
+    p = tmp_path / "docs.json"
+    p.write_bytes(layout(TRICKY).encode())
+    assert list(iter_documents(FileDocuments(p))) == TRICKY
+
+
+@pytest.mark.parametrize("body, error", [
+    ("", "not a JSON array"),
+    ('{"url": "https://ex.org/a"}', "not a JSON array"),
+    ('[{"url": "https://ex.org/a"}, {"url": "https://ex.org/b"', "ends before the array is closed"),
+    ('[{"url": "https://ex.org/a", "title": "unterminated}]', "ends before the array is closed"),
+    ('[{"url": "https://ex.org/a" "title": "x"}]', "not valid JSON"),
+    ('["https://ex.org/a"]', "something other than objects"),
+])
+def test_a_broken_documents_file_fails_the_load(tmp_path, body, error):
+    p = tmp_path / "docs.json"
+    p.write_text(body)
+    with pytest.raises(ScrapeError, match=error):
+        list(iter_documents(FileDocuments(p)))
+
+
+def test_an_empty_crawl_has_no_documents(tmp_path):
+    p = tmp_path / "docs.json"
+    p.write_text("[]\n")
+    assert list(iter_documents(FileDocuments(p))) == []
