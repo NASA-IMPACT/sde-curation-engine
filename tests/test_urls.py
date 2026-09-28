@@ -10,7 +10,7 @@ from sde_curation.engine.urls import (
     canonical_key,
     dedupe_variants,
     duplicate_docs,
-    resolve_dot_segments,
+    spellings,
 )
 from sde_curation.llm.global_excludes import DEFAULT_PATH, global_exclude_hits, load_global_excludes
 from sde_curation.models import GlobalExcludeList
@@ -24,16 +24,17 @@ def test_canonical_key_ignores_scheme_www_slash_and_fragment():
     assert canonical_key("https://ex.org/map?obs=1") == "ex.org/map?obs=1" != canonical_key("https://ex.org/map")
 
 
-def test_dot_segments_resolve_like_a_browser():
-    r = resolve_dot_segments
-    assert r("https://simbad.cds.unistra.fr/simbad/../guide/otypes.htx") == "https://simbad.cds.unistra.fr/guide/otypes.htx"
-    assert r("https://ex.org/a/./b/../c?q=../x#f") == "https://ex.org/a/c?q=../x#f"  # query/fragment untouched
-    assert r("https://ex.org/../../a") == "https://ex.org/a"  # never above the root
-    assert r("https://ex.org/a/b/..") == "https://ex.org/a/"
-    assert r("https://ex.org/v1.2/..hidden/x.") == "https://ex.org/v1.2/..hidden/x."  # dots inside names stay
-    assert r("https://ex.org/a") == "https://ex.org/a"
-    # a rule or curated row written with the dotted spelling is still the same page
-    assert canonical_key("https://ex.org/simbad/../guide/") == canonical_key("http://www.ex.org/guide")
+def test_dot_segments_are_part_of_the_url():
+    """/simbad/../guide/x and /guide/x are separate URLs to the curator. The engine (canonical_key)
+    and SQL (spellings, behind ?match=) must fold exactly the same spellings, or a rule's match
+    count and the list behind it disagree."""
+    dotted, plain = "https://ex.org/simbad/../guide/otypes.htx", "https://ex.org/guide/otypes.htx"
+    assert canonical_key(dotted) == "ex.org/simbad/../guide/otypes.htx" != canonical_key(plain)
+    assert canonical_key("https://ex.org/a/./b") != canonical_key("https://ex.org/a/b")
+    for url in (dotted, "https://www.ex.org/a/./b/", plain):
+        sp = spellings(url)
+        assert {canonical_key(u) for u in sp} == {canonical_key(url)}
+    assert plain not in spellings(dotted) and dotted not in spellings(plain)
 
 
 def test_dedupe_prefers_https_and_sorts_by_path():

@@ -10,47 +10,22 @@ from __future__ import annotations
 from collections.abc import Iterable
 from functools import lru_cache
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 
 @lru_cache(maxsize=1 << 19)  # every recompute asks for the same URLs again; urlsplit is the cost
 def canonical_key(url: str) -> str:
     """host + path (+ query): lower-cased host without a leading www., no scheme, no fragment,
     no trailing slash. www. and the apex host are one site everywhere else in the app too
-    (a collection id is the apex host)."""
+    (a collection id is the apex host). "." and ".." path segments are kept as written: a
+    curator treats /simbad/../guide/x and /guide/x as separate URLs, and `spellings` (the SQL
+    side of an exact rule) must fold exactly what this folds."""
     p = urlsplit(url.strip())
-    path = _without_dot_segments(p.path).rstrip("/") or "/"
+    path = p.path.rstrip("/") or "/"
     key = f"{p.netloc.lower().removeprefix('www.')}{path}"
     if p.query:
         key += "?" + p.query
     return key
-
-
-def resolve_dot_segments(url: str) -> str:
-    """`url` with its path's "." and ".." segments resolved, as a browser would request it:
-    https://simbad.cds.unistra.fr/simbad/../guide/otypes.htx -> https://simbad.cds.unistra.fr/guide/otypes.htx.
-    Some sites link that way and the crawler keeps the link as written; a URL without dot
-    segments comes back unchanged (same string, query and fragment untouched)."""
-    p = urlsplit(url)
-    path = _without_dot_segments(p.path)
-    return url if path == p.path else urlunsplit(p._replace(path=path))
-
-
-def _without_dot_segments(path: str) -> str:
-    """RFC 3986 5.2.4 remove_dot_segments for an absolute path; ".." never climbs above the root."""
-    if not path.startswith("/"):
-        return path
-    segs = path.split("/")[1:]
-    if "." not in segs and ".." not in segs:
-        return path
-    out: list[str] = []
-    for s in segs:
-        if s == "..":
-            if out:
-                out.pop()
-        elif s != ".":
-            out.append(s)
-    return "/" + "/".join(out) + ("/" if segs[-1] in (".", "..") else "")
 
 
 def spellings(url: str) -> list[str]:
