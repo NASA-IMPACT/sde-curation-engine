@@ -259,3 +259,13 @@ def test_test_waf_rate_limit_fits_curators_behind_one_ip(template, test_template
     # curators share one egress IP; at 1,000 / 5 min a running job's refreshes got them CloudFront 403s
     assert _waf_rate_limit(test_template) == 10_000
     assert _waf_rate_limit(template) == 1_000  # dev keeps the default
+
+
+def test_waf_lets_crawled_urls_with_dot_segments_through(template):
+    # an exclude on https://simbad.cds.unistra.fr/simbad/../guide/otypes.htx got a CloudFront 403
+    [acl] = template.find_resources("AWS::WAFv2::WebACL").values()
+    [rule] = [r for r in acl["Properties"]["Rules"] if r["Name"] == "AWSManagedRulesCommonRuleSet"]
+    overrides = rule["Statement"]["ManagedRuleGroupStatement"]["RuleActionOverrides"]
+    assert {o["Name"]: o["ActionToUse"] for o in overrides} == {
+        "SizeRestrictions_BODY": {"Count": {}}, "GenericLFI_BODY": {"Count": {}},
+    }

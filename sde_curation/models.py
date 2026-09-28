@@ -244,7 +244,8 @@ class CollectionCreate(BaseModel):
     division: Division = Division.GENERAL
     document_type: DocumentType | None = None
     connector: ConnectorType = ConnectorType.CRAWLER
-    collection_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9._-]+$")
+    # at least one character that is not a dot: "." and ".." would be directory names
+    collection_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9._-]*[a-zA-Z0-9_-][a-zA-Z0-9._-]*$")
     max_pages: int = Field(default=100_000, ge=1, le=100_000)
 
     @field_validator("seed_url")
