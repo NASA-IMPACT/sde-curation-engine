@@ -190,6 +190,11 @@ async def test_scrape_stores_failures_and_the_flow_keeps_unreachable_rows(crawle
     ])
     r = await c.post("/api/collections/ex.org/recompute")
     assert r.json() == {"new": 0, "modified": 2, "deleted": 2, "excluded": 0, "content_changed": 0, "renamed": 2, "kept": 1}
+    # the Overview and Curate tabs show the same counts (one grouped query, not a sort per count)
+    overview = (await c.get("/collections/ex.org?step=curating&tab=overview")).text
+    assert "(0 new, 2 modified incl. 2 renamed, 2 removed; 1 curated kept" in overview
+    curate = (await c.get("/collections/ex.org?tab=curate")).text
+    assert ">2 renamed</a>" in curate and ">2 removed ↗</a>" in curate and ">1 kept ↗</a>" in curate
     renamed = (await c.get("/api/collections/ex.org/delta?renamed=true")).json()
     assert {d["url"]: d["renamed_from"] for d in renamed["items"]} == {
         "https://ex.org/p1/": "https://ex.org/p1", "https://ex.org/p2#top": "https://ex.org/p2"}

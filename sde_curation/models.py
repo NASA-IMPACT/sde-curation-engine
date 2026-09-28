@@ -348,6 +348,20 @@ class DivisionUpdate(BaseModel):
     division: Division
 
 
+class NameUpdate(BaseModel):
+    """Rename a collection after it was created. The id, seed and pinned index key stay as they are."""
+
+    name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("name")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("name must not be blank")
+        return v
+
+
 class IndexKeyUpdate(BaseModel):
     """Set by hand which OpenSearch collection this one is indexed as."""
 

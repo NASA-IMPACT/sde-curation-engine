@@ -122,9 +122,11 @@ CONFIGS: dict[Environment, EnvConfig] = {
     # 500 GB: test holds every collection's crawl text at once and is where the big sites land
     # (ascl.net alone crawls to 6.7 GB of JSON). Autoscaling only ever raises the volume, and
     # gp3 is billed on what is allocated, not on the ceiling.
+    # WAF 10,000 / 5 min / IP: the curators share one egress IP (207.157.81.66), and during a job each
+    # open tab's refreshes put that IP over 1,000 — 1,590 blocked requests (CloudFront 403s) on 2026-09-28.
     Environment.TEST: EnvConfig(env=Environment.TEST, crawler_s3_prefix="",
                                 prod_publish_via_role=True, cpu=4096, memory_mib=16384,
-                                db_max_storage_gib=500),
+                                db_max_storage_gib=500, waf_rate_limit_per_5min=10_000),
     Environment.PROD: EnvConfig(
         env=Environment.PROD, cpu=2048, memory_mib=4096,
         db_multi_az=True, db_backup_days=35, db_deletion_protection=True,

@@ -7,7 +7,7 @@
 <div id="pipeline-{{ c.collection_id|dom_id }}" class="pipeline-wrap"
      hx-get="/collections/{{ c.collection_id }}/pipeline"
      hx-on::config-request="if (event.detail.elt === this) event.detail.parameters.step = new URLSearchParams(location.search).get('step') || ''"
-     hx-trigger="sse:collection[detail.data.includes('&quot;{{ c.collection_id }}&quot;')], every 5s [jobLive()], sseReopen from:body"
+     hx-trigger="sse:collection[detail.data.includes('&quot;{{ c.collection_id }}&quot;') && sseRefresh(this)], sseRefresh, every 5s [jobLive() && sseQuiet(this, 5000)], sseReopen from:body"
      hx-sync="this:replace" hx-swap="innerHTML">
 {% include "partials/pipeline_inner.html" %}
 </div>
