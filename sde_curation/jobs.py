@@ -30,7 +30,7 @@ from .engine.export import (
 )
 from .engine.patterns import match_counts
 from .engine.text import content_hash
-from .engine.urls import batches, dedupe_variants, resolve_dot_segments
+from .engine.urls import batches, dedupe_variants
 from .events import EventBus
 from .llm.base import LLMError, LLMProvider
 from .llm.global_excludes import global_exclude_hits, load_global_excludes
@@ -1034,8 +1034,8 @@ class JobManager:
                     text = _no_nul(d.get("full_text"))
                     size += len(text or "")
                     rows.append(DumpUrl(
-                        collection_id=collection_id, url=_url(d["url"]),
-                        final_url=_url(d.get("final_url")), scraped_title=_no_nul(d.get("title")),
+                        collection_id=collection_id, url=_no_nul(d["url"]),
+                        final_url=_no_nul(d.get("final_url")), scraped_title=_no_nul(d.get("title")),
                         full_text=text, content_type=_no_nul(d.get("content_type")), depth=d.get("depth"),
                         content_hash=content_hash(text),
                     ))
@@ -1070,7 +1070,7 @@ class JobManager:
 
         fails = [
             DumpFailure(
-                collection_id=collection_id, url=_url(f["url"]), reason=_no_nul(str(f["reason"])),
+                collection_id=collection_id, url=_no_nul(f["url"]), reason=_no_nul(str(f["reason"])),
                 status=f["status"] if isinstance(f.get("status"), int) else None,
                 detail=(_no_nul(str(f.get("detail") or ""))[:500] or None),
             )
@@ -1110,12 +1110,6 @@ def _add_tokens(job: JobRun, row: dict[str, Any]) -> None:
     p = job.progress
     for k in ("tokens_in", "tokens_out", "tokens_cached", "tokens_cache_write", "tokens_reasoning"):
         p[k] = p.get(k, 0) + row.pop(k, 0)
-
-
-def _url(v: Any) -> Any:
-    """A crawled URL as stored: no NUL, "." and ".." segments resolved (engine.urls.resolve_dot_segments)."""
-    v = _no_nul(v)
-    return resolve_dot_segments(v) if isinstance(v, str) else v
 
 
 def _no_nul(v: Any) -> Any:

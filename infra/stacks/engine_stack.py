@@ -447,12 +447,15 @@ class CurationEngineStack(Stack):
                             # GenericLFI_BODY blocks any body with "../" in it, and crawled page
                             # URLs are sent in bodies as data (an exclude on
                             # https://simbad.cds.unistra.fr/simbad/../guide/otypes.htx got a 403).
-                            # The engine never opens a path from a request body.
+                            # GenericLFI_QUERYARGUMENTS does the same to ?match=<url> links (a rule's
+                            # match count on the Rules tab), the URL-table pager and search.
+                            # The engine never opens a path from a request body or query argument;
+                            # collection ids in the URI path stay covered by GenericLFI_URIPATH.
                             rule_action_overrides=[
                                 wafv2.CfnWebACL.RuleActionOverrideProperty(
                                     name=rule, action_to_use=wafv2.CfnWebACL.RuleActionProperty(count={}),
                                 )
-                                for rule in ("SizeRestrictions_BODY", "GenericLFI_BODY")
+                                for rule in ("SizeRestrictions_BODY", "GenericLFI_BODY", "GenericLFI_QUERYARGUMENTS")
                             ],
                         ),
                     ),

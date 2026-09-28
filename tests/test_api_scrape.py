@@ -84,22 +84,37 @@ async def test_ingest_keeps_one_spelling_per_page(crawler_client):
     ]
 
 
-async def test_ingest_resolves_dot_segments_and_the_curator_can_exclude_the_page(crawler_client):
-    """Regression: simbad.cds.unistra.fr links /simbad/../guide/otypes.htx, the crawler kept that
-    spelling, and excluding it sent "../" in the request body (a CloudFront WAF 403). The page is
-    stored as the browser would request it, and a spelling that is also crawled plainly is one row."""
+async def test_dot_segment_urls_are_their_own_pages(crawler_client):
+    """Regression: simbad.cds.unistra.fr links /simbad/../guide/otypes.htx as well as
+    /guide/otypes.htx. The curator treats them as separate URLs: both are loaded as crawled, an
+    exclude on one leaves the other a delta, and the rule's match count (engine) and its
+    ?match= list (SQL) both show that one URL."""
     await crawler_client.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 5})
-    jobs = crawler_client.app.state.jobs
+    dotted, plain = "https://ex.org/simbad/../guide/otypes.htx", "https://ex.org/guide/otypes.htx"
     docs = [
-        {"url": "https://ex.org/simbad/../guide/otypes.htx", "title": "Otypes", "full_text": "o"},
-        {"url": "https://ex.org/guide/otypes.htx", "title": "Otypes", "full_text": "o"},
+        {"url": dotted, "title": "Otypes", "full_text": "o"},
+        {"url": plain, "title": "Otypes", "full_text": "o"},
         {"url": "https://ex.org/simbad/./../tools/manage?x=1", "title": "Manage", "full_text": "m"},
     ]
-    failures = [{"url": "https://ex.org/a/../gone", "reason": "http_error", "status": 404}]
-    assert await jobs.ingest_dump("ex.org", docs, failures) == 2
+    assert await crawler_client.app.state.jobs.ingest_dump("ex.org", docs) == 3
     dump = (await crawler_client.get("/api/collections/ex.org/dump?limit=10")).json()
-    assert sorted(i["url"] for i in dump["items"]) == ["https://ex.org/guide/otypes.htx", "https://ex.org/tools/manage?x=1"]
-    assert not any(".." in i["url"] for i in dump["items"])
+    assert sorted(i["url"] for i in dump["items"]) == sorted(d["url"] for d in docs)
+    assert (await crawler_client.post("/api/collections/ex.org/recompute")).json()["new"] == 3
+
+    r = await crawler_client.post("/api/collections/ex.org/urls", json={"url": dotted, "type": "exclude"})
+    assert r.status_code == 200, r.text
+    excluded = (await crawler_client.get("/api/collections/ex.org/dump?excluded=true")).json()["items"]
+    assert [i["url"] for i in excluded] == [dotted]
+    deltas = (await crawler_client.get("/api/collections/ex.org/delta?q=otypes")).json()["items"]
+    assert [d["url"] for d in deltas] == [plain]
+
+    [rule] = [p for p in (await crawler_client.get("/api/collections/ex.org/patterns")).json() if p["match"] == dotted]
+    assert rule["matches"] == 1
+    listed = (await crawler_client.get("/collections/ex.org", params={"tab": "dump", "match": dotted})).text
+    assert dotted in listed and plain not in listed
+
+    await crawler_client.post("/api/collections/ex.org/urls", json={"url": dotted, "type": "include"})
+    assert (await crawler_client.get("/api/collections/ex.org/delta?q=otypes")).json()["total"] == 2
 
 
 async def test_dashboard_row_polls_only_while_its_job_is_live(crawler_client):
