@@ -443,11 +443,17 @@ class CurationEngineStack(Stack):
                     statement=wafv2.CfnWebACL.StatementProperty(
                         managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
                             vendor_name="AWS", name="AWSManagedRulesCommonRuleSet",
-                            # SizeRestrictions_BODY (8 KB) would block large pattern/URL edits
-                            rule_action_overrides=[wafv2.CfnWebACL.RuleActionOverrideProperty(
-                                name="SizeRestrictions_BODY",
-                                action_to_use=wafv2.CfnWebACL.RuleActionProperty(count={}),
-                            )],
+                            # SizeRestrictions_BODY (8 KB) would block large pattern/URL edits.
+                            # GenericLFI_BODY blocks any body with "../" in it, and crawled page
+                            # URLs are sent in bodies as data (an exclude on
+                            # https://simbad.cds.unistra.fr/simbad/../guide/otypes.htx got a 403).
+                            # The engine never opens a path from a request body.
+                            rule_action_overrides=[
+                                wafv2.CfnWebACL.RuleActionOverrideProperty(
+                                    name=rule, action_to_use=wafv2.CfnWebACL.RuleActionProperty(count={}),
+                                )
+                                for rule in ("SizeRestrictions_BODY", "GenericLFI_BODY")
+                            ],
                         ),
                     ),
                     visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
