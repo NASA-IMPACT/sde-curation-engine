@@ -112,6 +112,50 @@
     // Polling is the safety net for a live job only: `every Ns [jobLive()]` on the pollers. The header
     // and the jobs strip carry data-job-live while something is queued or running.
     function jobLive(scope) { return !!document.querySelector((scope ? scope + ' ' : '') + '[data-job-live]'); }
+    // A running job sends a progress event every second to every open tab, and each one re-fetched
+    // the header and the stepper. `sse:collection[… && sseRefresh(this)], sseRefresh` refreshes at
+    // most once per SSE_REFRESH_MS per element: the first event of a burst at once, the rest folded
+    // into one trailing refresh, so the last event (the job's end) is never dropped — htmx's own
+    // `throttle:` drops it. `every Ns [… && sseQuiet(this, N000)]` keeps the poll for when SSE is silent.
+    // Kept per element id, not on the element: a dashboard row swaps itself out (outerHTML), and the
+    // trailing refresh must reach the row now on the page.
+    const SSE_REFRESH_MS = 3000;
+    const sseState = new Map();  // element id → {last, timer}
+    function sseRefresh(elt) {
+      const s = sseState.get(elt.id) || {last: 0, timer: null};
+      sseState.set(elt.id, s);
+      if (s.timer) return false;  // a trailing refresh is already queued
+      const wait = s.last + SSE_REFRESH_MS - Date.now();
+      if (wait <= 0) { s.last = Date.now(); return true; }
+      s.timer = setTimeout(() => {
+        s.timer = null; s.last = Date.now();
+        const now = document.getElementById(elt.id);
+        if (now) htmx.trigger(now, 'sseRefresh');
+      }, wait);
+      return false;
+    }
+    function sseQuiet(elt, ms) { return Date.now() - ((sseState.get(elt.id) || {}).last || 0) >= ms; }
+    // A job poll that slows down while SSE is live: `sse:collection[… && sseSeen(this) && …], every 2s
+    // [jobPollDue(this, 10000, 4000)]` fetches once per 10 s while the element's SSE events keep
+    // arriving, and once per 4 s after they have been silent for 10 s (a dead stream). The tick is
+    // short so both intervals land on it; 500 ms of slack absorbs timer jitter. With a dead stream,
+    // the header's own poll can clear data-job-live before this poll sees the job's end, so the first
+    // tick after the job stops being live fetches once more; with a live stream the end event did.
+    const pollState = new Map();  // element id → {seen, polled, live}
+    function pollEntry(elt) { const s = pollState.get(elt.id) || {seen: 0, polled: 0, live: false}; pollState.set(elt.id, s); return s; }
+    function sseSeen(elt) { pollEntry(elt).seen = Date.now(); return true; }
+    function jobPollDue(elt, liveMs, deadMs) {
+      const s = pollEntry(elt), now = Date.now(), sseLive = now - s.seen < liveMs, wasLive = s.live;
+      s.live = jobLive();
+      if (!s.live) {
+        if (!wasLive || sseLive) return false;
+        s.polled = now;
+        return true;
+      }
+      if (now - s.polled < (sseLive ? liveMs : deadMs) - 500) return false;
+      s.polled = now;
+      return true;
+    }
     // A reconnect after a drop fires `sseReopen`: events sent meanwhile are gone, so lists that rely
     // on them (the dashboard table) re-fetch once instead of polling all the time.
     let sseDropped = false;

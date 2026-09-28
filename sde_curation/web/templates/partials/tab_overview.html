@@ -9,6 +9,17 @@
   <section class="card">
     <h2>Details</h2>
     <dl class="meta">
+      {# The name can change only until the first index run (test or prod, any outcome): from then on
+         it has to match the collection key and name the collection was indexed with. #}
+      <dt>Name</dt>
+      <dd>{% if c.last_run_id %}{{ c.name }} <span class="muted small" title="The collection key and name are fixed by the first index run, so the name can no longer change.">locked — indexed</span>
+          {% else %}<form hx-post="/api/collections/{{ c.collection_id }}/name" hx-ext="json-enc" hx-swap="none" class="inline"
+                hx-confirm="Rename this collection? {% if c.index_key %}The index key was set by hand ({{ c.index_key }}) and stays as it is.{% else %}The index key will follow the new name.{% endif %} Once the collection is indexed the name can no longer change. Title rules that use {collection} are re-applied."
+                hx-vals='js:{name: document.getElementById("cname").value}'>
+            <input id="cname" name="name" size="32" maxlength="200" required value="{{ c.name }}"
+                   {% if job and job.state == 'running' %}disabled{% endif %}>
+            <button class="secondary mini" {% if job and job.state == 'running' %}disabled{% endif %}>Rename</button>
+          </form>{% endif %}</dd>
       <dt>Seed</dt><dd><a href="{{ c.seed_url }}" target="_blank" rel="noopener">{{ c.seed_url }}</a></dd>
       <dt>Index key</dt><dd><code>{{ c.collection_key }}</code> <span class="muted">{{ c.collection_name }}</span>{% if not c.index_key %} <span class="muted small" title="The collection name, slugified — the same key COSMOS uses. Pinned by the first index run.">from the name</span>{% endif %}</dd>
       {# The division can be changed at any time, to any of the six. One of the five real divisions

@@ -57,6 +57,7 @@ from ..models import (
     IndexRun,
     JobKind,
     JobRun,
+    NameUpdate,
     PatternCreate,
     PatternType,
     Role,
@@ -992,8 +993,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                           {"c": c, "job": job, **await rules_context(request, c)})
 
     async def header_context(request: Request, c: Collection) -> dict[str, Any]:
-        ctx = await step_context(request, c, c.status)
-        return {"c": c, "job": ctx["job"], "stats": ctx["stats"]}
+        """What the header and the pipeline stepper show: the latest job, the validation chips and,
+        before curating, a crawl already on the crawler host. Every open tab re-fetches both while a
+        job runs, so none of step_context's URL counts are worked out here."""
+        job = await db(request).latest_job(c.collection_id)
+        stats: dict[str, Any] = {}
+        if c.status in (Status.BACKLOG, Status.SCRAPED):
+            stats["existing_crawl"] = await existing_crawl(request, c)
+        await with_validation(request, c, job)
+        return {"c": c, "job": job, "stats": stats}
 
     @app.get("/collections/{collection_id}", response_class=HTMLResponse)
     async def collection_page(request: Request, collection_id: str, tab: str = "overview", set: str | None = None,
@@ -1002,6 +1010,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sel, tab = selected_step(c, step, norm_tab(tab, set))
         ctx = await header_context(request, c)
         ctx.update(await tab_context(request, c, tab, sel))
+        if ctx["tabbed"] and "pattern_count" not in ctx["stats"]:  # the Rules tab's count; Overview/Curate have it
+            ctx["stats"] = {**ctx["stats"], "pattern_count": await db(request).count_patterns(c.collection_id)}
         return templates.TemplateResponse(request, "collection.html", ctx)
 
     @app.get("/collections/{collection_id}/header", response_class=HTMLResponse)
@@ -1071,14 +1081,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def step_context(request: Request, c: Collection, step: Status) -> dict:
         d = db(request)
         jobs = await d.list_jobs(c.collection_id, limit=20)
-        _, total = await d.list_deltas(c.collection_id, limit=1)
-        counts = {"new": 0, "modified": 0, "deleted": 0, "excluded": 0, "content_changed": 0, "renamed": 0,
-                  "kept": 0}
-        if total:
-            for k in ("new", "modified", "deleted"):
-                counts[k] = (await d.list_deltas(c.collection_id, kind=k, limit=1))[1]
-            counts["content_changed"] = (await d.list_deltas(c.collection_id, content_changed=True, limit=1))[1]
-            counts["renamed"] = (await d.list_deltas(c.collection_id, renamed=True, limit=1))[1]
+        counts = await d.count_deltas_by_kind(c.collection_id)
+        del counts["total"]
         counts["excluded"] = await d.count_excluded_by_rules(c.collection_id)  # rules, not deltas
         counts["kept"] = await d.count_curated_unreachable(c.collection_id) if c.curated_rows else 0
         runs = await d.list_index_runs(c.collection_id, limit=5)
@@ -1109,7 +1113,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def collection_pipeline(request: Request, collection_id: str, step: str | None = None):
         """The stepper alone (refreshed on SSE / polling); `step` keeps the curator's selection lit."""
         c = await must_get(request, collection_id)
-        ctx = await step_context(request, c, c.status)
+        ctx = await header_context(request, c)
         ctx["selected"] = Status(step) if step in {s.value for s in Status} else c.status
         return templates.TemplateResponse(request, "partials/pipeline_inner.html", ctx)
 
@@ -1588,6 +1592,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await db(request).set_index_key(collection_id, body.index_key, name)
         await audit(request, "index.key", collection_id, f"set by hand: '{body.index_key}' ({name})")
         c = await must_get(request, collection_id)
+        emit_collection(request, c)
+        return htmx_done(request, c)
+
+    @app.post("/api/collections/{collection_id}/name", response_model=None)
+    async def api_set_name(request: Request, collection_id: str, body: NameUpdate):
+        """Rename the collection — only until its first index run. The index key and the name the
+        index carries are the name as it was when indexing started, so once any run exists (test or
+        prod, whatever its outcome) the name is locked to match them. The id (and so every URL and
+        file keyed on it) never changes. Title rules that render {collection} pick the new name up: a
+        recompute applies it right away, and curated rows whose title changes come back as modified
+        deltas to promote."""
+        c = await must_get(request, collection_id)
+        ensure_idle(request, c)
+        if c.last_run_id:
+            raise HTTPException(409, f"'{c.name}' has been indexed (as '{c.collection_key}'), so its name can no"
+                                     " longer change: it has to match the collection key and name it was indexed with")
+        if body.name == c.name:
+            return htmx_done(request, c)
+        old = c.name
+        await db(request).set_name(collection_id, body.name)
+        c = await must_get(request, collection_id)
+        if (c.delta_count or c.curated_rows) and await db(request).title_rules_use_collection_name(collection_id):
+            ds = await curation(request).recompute(c)
+            await _after_curation_change(request, c, ds)
+            c = await must_get(request, collection_id)
+        write_collection_yaml(settings.collections_dir, c, await db(request).status_history(collection_id))
+        await audit(request, "collection.name", collection_id, f"{old} → {body.name}")
         emit_collection(request, c)
         return htmx_done(request, c)
 

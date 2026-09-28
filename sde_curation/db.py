@@ -424,6 +424,24 @@ class Database:
                 (index_key, index_name, utcnow(), collection_id),
             )
 
+    async def set_name(self, collection_id: str, name: str) -> None:
+        """Rename the collection. Its id never changes; see api_set_name for the index key."""
+        async with self._conn() as conn:
+            await conn.execute(
+                "UPDATE collections SET name=%s, updated_at=%s WHERE collection_id=%s",
+                (name, utcnow(), collection_id),
+            )
+
+    async def title_rules_use_collection_name(self, collection_id: str) -> bool:
+        """Whether any title rule renders `{collection}`: only then does a rename change a title."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM patterns WHERE collection_id=%s AND type='title'"
+                " AND position('{collection}' in value) > 0) AS hit", (collection_id,),
+            )
+            row = await cur.fetchone()
+            return bool(row["hit"] if isinstance(row, dict) else row[0])
+
     async def set_division(self, collection_id: str, division: Division) -> None:
         """The curator's division for the whole collection (General = not assigned, so the AI is
         asked per page). The next recompute applies it to every URL no division rule decides."""
@@ -835,6 +853,24 @@ class Database:
                 [*args, limit, offset],
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
+
+    async def count_deltas_by_kind(self, collection_id: str) -> dict[str, int]:
+        """{total, new, modified, deleted, content_changed, renamed} in one pass over the collection's
+        delta rows — the same numbers as list_deltas' totals for those filters, without its sort (it
+        ordered every row to return one). The Overview and Curate tabs show them and the Curate tab
+        is re-fetched every few seconds while a job runs, so they must stay cheap."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS total,"
+                " COUNT(*) FILTER (WHERE kind='new') AS new,"
+                " COUNT(*) FILTER (WHERE kind='modified') AS modified,"
+                " COUNT(*) FILTER (WHERE kind='deleted') AS deleted,"
+                " COUNT(*) FILTER (WHERE content_changed) AS content_changed,"
+                " COUNT(*) FILTER (WHERE renamed_from IS NOT NULL) AS renamed"
+                " FROM delta_urls WHERE collection_id=%s",
+                (collection_id,),
+            )
+            return dict(await cur.fetchone())
 
     _DELTA_COLS = (
         "collection_id", "url", "kind", "renamed_from", "crawl_failure", "scraped_title", "title", "division",
