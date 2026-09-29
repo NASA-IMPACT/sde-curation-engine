@@ -1,7 +1,8 @@
-"""The collection's division: General until a curator assigns one, editable at any time, and — once
-assigned — applied to every URL and never asked of the model."""
+"""The collection's division: General until a curator assigns one, editable under Backlog / Scraped /
+Curating until the first index run, and — once assigned — applied to every URL and never asked of the
+model."""
 
-from tests.conftest import wait_job
+from tests.conftest import prepare, wait_job
 
 
 async def setup(c, division=None, n=6):
@@ -152,3 +153,33 @@ async def test_a_division_rule_still_overrides_the_collection_division(crawler_c
     rows = await deltas(c)
     assert rows["https://ex.org/p2"]["division"] == "Planetary Science"  # the rule still decides it
     assert rows["https://ex.org/p3"]["division"] == "Earth Science"
+
+
+async def test_the_division_is_read_only_on_the_curated_test_index_and_live_pages(crawler_client):
+    """The Details panel offers the division under Backlog / Scraped / Curating only; after promote the
+    Curated page shows it read-only and points back to Curating, where it can still change."""
+    c = crawler_client
+    await prepare(c)  # promoted: status curated, not indexed
+    assert (await c.get("/api/collections/ex.org")).json()["status"] == "curated"
+    for step in ("curated", "config_generated", "live"):
+        page = (await c.get(f"/collections/ex.org?tab=overview&step={step}")).text
+        assert 'id="cdiv"' not in page and "locked — change it under Curating" in page, step
+    for step in ("backlog", "scraped", "curating"):
+        assert 'id="cdiv"' in (await c.get(f"/collections/ex.org?tab=overview&step={step}")).text, step
+
+
+async def test_the_division_is_refused_once_the_collection_has_been_indexed(index_client):
+    """Same lock as the name: the first index run fixes the division the index carries."""
+    c = index_client
+    await prepare(c)  # division Heliophysics
+    r = await c.post("/api/collections/ex.org/index?target=test")
+    assert r.status_code == 202, r.text
+    assert (await wait_job(c, "ex.org", timeout=30))["state"] == "succeeded"
+
+    r = await c.post("/api/collections/ex.org/division", json={"division": "Earth Science"})
+    assert r.status_code == 409 and "indexed" in r.text
+    assert (await c.get("/api/collections/ex.org")).json()["division"] == "Heliophysics"
+    for step in ("curating", "config_generated"):
+        page = (await c.get(f"/collections/ex.org?tab=overview&step={step}")).text
+        assert 'id="cdiv"' not in page and "locked — indexed" in page, step
+    assert not any(a["action"] == "collection.division" for a in (await c.get("/api/collections/ex.org/audit")).json())
