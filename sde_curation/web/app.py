@@ -1628,9 +1628,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         curator's decision for the whole collection: every URL that no division rule decides takes it
         (a recompute applies it right away, so rows already curated become modified deltas and reach
         the index on the next promote), and Suggest metadata stops asking the model for one. Putting
-        it back to General means "not assigned": the model is asked for a division per page again."""
+        it back to General means "not assigned": the model is asked for a division per page again.
+        Like the name, it is locked by the first index run (test or prod, whatever its outcome): the
+        index already carries the division the collection was indexed with."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
+        if c.last_run_id:
+            raise HTTPException(409, f"'{c.name}' has been indexed (as '{c.collection_key}') with division"
+                                     f" '{c.division}', so its division can no longer change")
         if body.division == c.division:
             return htmx_done(request, c)
         old = c.division
