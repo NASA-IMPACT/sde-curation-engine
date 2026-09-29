@@ -483,7 +483,7 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `GET /api/collections/{id}` | read |
 | `DELETE /api/collections/{id}` | delete the collection and all its data (admin only; 409 if busy) |
 | `POST …/index-key` | `{index_key, index_name?}` — index this collection as another `collection_key` |
-| `POST …/division` | `{division}` — the curator's division for the whole collection: applied to every URL no division rule decides, and never asked of the model; `General` puts it back to "not assigned" and the AI decides per page |
+| `POST …/division` | `{division}` — the curator's division for the whole collection: applied to every URL no division rule decides, and never asked of the model; `General` puts it back to "not assigned" and the AI decides per page; 409 once the collection has been indexed (like the name) |
 | `POST …/status` | `{status, note?, force?}` — transition + data rules enforced |
 | `GET …/history`, `…/jobs`, `…/dump` | audit trail, job runs, ingested URLs |
 | `POST …/scrape` | run the crawl → job (202; 409 if busy) |
