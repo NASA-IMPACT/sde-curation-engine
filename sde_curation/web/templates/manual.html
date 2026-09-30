@@ -185,7 +185,7 @@
 <p>Every URL's effective title, division, document type, and included or excluded state is computed from the rules of its own collection; a rule never reaches another collection. When several rules match the same URL:</p>
 <ul>
   <li><b>The newest rule wins.</b> For titles, divisions and document types the rule added last decides, whatever its shape: a glob you type by hand takes effect on every URL it matches, including URLs whose value came from an accepted AI suggestion or an earlier edit. Accepting a suggestion afterwards is the newest decision again, on that one URL.</li>
-  <li><b>Include always beats exclude</b>, however old it is. Use include rules to carve exceptions out of broad excludes; a later exclude never undoes them.</li>
+  <li><b>Include beats exclude</b>, however old it is. Use include rules to carve exceptions out of broad excludes; a later exclude glob never undoes them. <b>A per-URL rule beats any glob</b>, though: the ✗ exclude on a row takes that one URL out even when an include glob covers it (and ✓ include lets one URL through an exclude glob).</li>
   <li><b>No rule, then the curated value, then nothing.</b> Deleting a rule falls back to the next newest rule, then to whatever was last promoted, then to blank. Deleting <em>is</em> the undo.</li>
 </ul>
 <p>Title rules are templates. <code>{title}</code> is the scraped title, <code>{url}</code> the URL, <code>{collection}</code> the collection name. A rule with value <code>{title} | GES DISC</code> appends a suffix to every matching page.</p>

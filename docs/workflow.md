@@ -29,7 +29,7 @@ Collection → Scrape → Curate → Indexing (test) → Validation → Prod Ind
 - **Calculate deltas**: diff dump vs. curated on `title, division, doc_type`; emit
   new / modified / deleted (tombstone) `DeltaUrl` rows. Bulk set operations, no per-URL writes.
 - **Apply patterns** (in this order, deterministically):
-  1. Exclude / Include patterns — include always wins over exclude.
+  1. Exclude / Include patterns — include wins over exclude; a per-URL include/exclude beats any glob.
   2. Title generation — substitution engine (`{url}`, `{title}`, `{collection}`, batched xpath).
   3. Division assignment.
   4. Document type assignment.

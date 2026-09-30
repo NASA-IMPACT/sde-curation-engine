@@ -10,8 +10,12 @@ Semantics (from COSMOS README_PATTERN_* specs, as distilled in docs/plan.md):
     suggestion or a glob typed by hand. A hand-typed glob therefore takes effect on every URL it
     matches, including the ones an earlier accepted suggestion had set; accepting a suggestion
     later overrides the glob on that one URL again. Specificity plays no part.
-  * exclude/include are NOT ranked by age: an include is an explicit exception and keeps winning
-    however old it is, so a later exclude glob cannot silently undo a batch of force-includes.
+  * exclude/include are NOT ranked by age: an include glob is an explicit exception and keeps
+    winning however old it is, so a later exclude glob cannot silently undo a batch of
+    force-includes. A per-URL (exact) exclude or include outranks every glob, though: it is the
+    one-off decision on that row, so a one-off ✗ exclude takes a URL back out of an include glob
+    (and a one-off ✓ include lets one URL through an exclude glob). Two exact rules for one page:
+    the newest wins.
   * title values are templates: {url} {title} {collection}; xpath:// is not supported here
   * effective value = winning pattern value, else the curated value, else NULL — except division,
     where a collection-wide division set by the curator (`division_default`) sits between the two:
@@ -116,6 +120,8 @@ def resolve_all(
     # url -> the (first) rule that excludes / includes it; the include wins for the effect
     excluded: dict[str, int] = {}
     included: dict[str, int] = {}
+    # canonical key -> the newest exact exclude / include rule for that page: it beats the globs
+    exact_in_out: dict[str, Compiled] = {}
     per_field: dict[str, list[Compiled]] = {t: [] for t in FIELD_TYPES}
     # exact patterns are resolved by dict lookup on (type, canonical key) instead of scanning the
     # glob list per URL (there can be one per URL). Two exact rules for different spellings of one
@@ -123,6 +129,12 @@ def resolve_all(
     exact: dict[tuple[str, str], Compiled] = {}
     key_of = {u: canonical_key(u) for u in urls}
     for c in compiled:
+        if c.pattern.type in (PatternType.EXCLUDE, PatternType.INCLUDE) and is_exact(c.pattern.match):
+            if c.matches:
+                k = canonical_key(c.pattern.match)
+                if k not in exact_in_out or (c.pattern.id or 0) > (exact_in_out[k].pattern.id or 0):
+                    exact_in_out[k] = c
+            continue
         if c.pattern.type is PatternType.EXCLUDE:
             for u in c.matches:
                 excluded.setdefault(u, c.pattern.id)  # type: ignore[arg-type]
@@ -143,9 +155,16 @@ def resolve_all(
 
     out: dict[str, Resolved] = {}
     for u in urls:
-        r = Resolved(excluded=(u in excluded) and (u not in included))
-        if u in excluded:  # an include that overrides nothing has no effect worth recording
-            r.effects["excluded"] = included.get(u, excluded[u])
+        one_off = exact_in_out.get(key_of[u])
+        if one_off is not None:
+            r = Resolved(excluded=one_off.pattern.type is PatternType.EXCLUDE)
+            # an exact include that overrides nothing has no effect worth recording
+            if r.excluded or u in excluded:
+                r.effects["excluded"] = one_off.pattern.id  # type: ignore[assignment]
+        else:
+            r = Resolved(excluded=(u in excluded) and (u not in included))
+            if u in excluded:  # an include that overrides nothing has no effect worth recording
+                r.effects["excluded"] = included.get(u, excluded[u])
         b = base.get(u, {})
         for t in FIELD_TYPES:
             e = exact.get((t, key_of[u]))
