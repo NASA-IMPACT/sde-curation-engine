@@ -332,7 +332,7 @@ way the **needs re-indexing** chip goes up (the first is a run that failed or di
 
 Effective value per URL = the newest matching pattern (highest id — the curator's latest decision,
 whether a per-URL edit, an accepted AI suggestion or a glob typed by hand) → the curated value →
-NULL. `include` always beats `exclude`, however old. Title values are templates (`{title}` =
+NULL. `include` beats `exclude`, however old — except that a per-URL (exact) include/exclude beats any glob, so a one-off ✗ exclude can take a URL out of an include glob. Title values are templates (`{title}` =
 scraped title, `{url}`, `{collection}`). A per-URL edit is just an exact-URL pattern. Deleting a
 pattern recomputes — that *is* the unapply (next newest → curated → NULL). Promote takes the whole
 delta queue (Curate tab) or a ticked selection of it (Delta URLs tab, `POST …/promote/urls`); the

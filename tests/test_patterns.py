@@ -39,6 +39,18 @@ def test_include_always_wins_over_exclude():
     assert r["https://x.org/docs/d"].excluded is False
 
 
+def test_per_url_exclude_or_include_beats_globs():
+    r = resolve([
+        P(1, PatternType.INCLUDE, "https://x.org/data/*"),
+        P(2, PatternType.EXCLUDE, "https://x.org/data/a"),  # one-off exclude inside an include glob
+        P(3, PatternType.EXCLUDE, "https://x.org/docs/*"),
+        P(4, PatternType.INCLUDE, "https://x.org/docs/d"),  # one-off include inside an exclude glob
+    ])
+    assert r["https://x.org/data/a"].excluded is True and r["https://x.org/data/a"].effects["excluded"] == 2
+    assert r["https://x.org/data/b"].excluded is False
+    assert r["https://x.org/docs/d"].excluded is False and r["https://x.org/docs/d"].effects["excluded"] == 4
+
+
 def test_glob_to_like():
     assert glob_to_like("*/login*") == "%/login%"
     assert glob_to_like("https://x.org/a_b%c\\d*") == "https://x.org/a\\_b\\%c\\\\d%"  # LIKE wildcards literal

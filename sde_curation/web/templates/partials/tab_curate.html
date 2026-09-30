@@ -77,7 +77,7 @@
   <h2><span class="n">1</span> Exclusions <small class="muted">decide what must never be indexed</small> <span class="state-tag {{ s1 }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[s1] }}</span>{{ expand_link('exclusions', suggestion_counts.total) }}</h2>
   <p class="muted">{{ c.dump_count }} dump URLs → {{ c.delta_count }} delta URL{{ 's' if c.delta_count != 1 }}
     ({{ dc.new }} new · {{ dc.modified }} modified{% if dc.renamed %} · <a href="/collections/{{ cid }}?tab=delta&renamed=true" title="same page, new URL spelling (http→https, trailing slash, #fragment): one modified delta, not a new row plus a removal">{{ dc.renamed }} renamed</a>{% endif %}{% if dc.content_changed %} · <a href="/collections/{{ cid }}?tab=delta&changed=true">{{ dc.content_changed }} text changed</a>{% endif %} · {{ dc.deleted }} removed{% if dc.kept %} · <a href="/collections/{{ cid }}?tab=curated&unreachable=true" title="curated URLs the last crawl could not fetch or never reached: kept as approved, not removed">{{ dc.kept }} kept</a>{% endif %}).{% if dc.excluded %} <a href="/collections/{{ cid }}?tab=dump&excluded=true" title="dump URLs an exclude rule keeps out: decided by the rule, never queued as delta URLs"><b>{{ dc.excluded }} excluded</b> by rules</a>.{% endif %}
-    Exclude what should never be searchable (login, feeds, tag pages…); <code>include</code> always beats <code>exclude</code>.</p>
+    Exclude what should never be searchable (login, feeds, tag pages…); <code>include</code> beats <code>exclude</code>; a per-URL ✗ exclude still takes one URL out of an include glob.</p>
 
   <div class="next"><div class="next-inner">
     <div>

@@ -123,6 +123,25 @@ async def test_full_flow(crawler_client):
     assert d["total"] == 0
 
 
+async def test_one_off_exclude_inside_an_include_glob(crawler_client):
+    """An include glob does not lock its URLs in: the row's ✗ exclude takes one of them out, and
+    ✓ include puts it back without leaving a rule behind."""
+    await setup(crawler_client)
+    await crawler_client.post("/api/collections/ex.org/recompute")
+    await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": "https://ex.org/*"})
+    await crawler_client.post("/api/collections/ex.org/patterns", json={"type": "include", "match": "https://ex.org/p*"})
+    excluded = lambda: crawler_client.get("/api/collections/ex.org/dump?excluded=true")
+    before = (await excluded()).json()["total"]
+    await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "exclude"})
+    assert [i["url"] for i in (await excluded()).json()["items"] if i["url"] == "https://ex.org/p3"]
+    assert (await excluded()).json()["total"] == before + 1
+    assert (await crawler_client.get("/api/collections/ex.org/delta?q=p3")).json()["total"] == 0
+    await crawler_client.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p3", "type": "include"})
+    assert (await excluded()).json()["total"] == before
+    assert (await crawler_client.get("/api/collections/ex.org/delta?q=p3")).json()["total"] == 1
+    assert not [p for p in (await crawler_client.get("/api/collections/ex.org/patterns")).json() if p["match"] == "https://ex.org/p3"]
+
+
 async def test_shrunk_dump_after_promote_yields_tombstones(crawler_client):
     await setup(crawler_client, n=10)
     await crawler_client.post("/api/collections/ex.org/recompute")
