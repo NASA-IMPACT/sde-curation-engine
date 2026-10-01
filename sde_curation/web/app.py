@@ -260,7 +260,8 @@ class SuggestionBulk(BaseModel):
 
 
 AI_FIELDS = ("title", "division", "document_type")
-RULES_PAGE = 200  # per-URL rules the Rules tab shows at a time (the glob rules are always all shown)
+RULES_PAGE = 200  # rules the Rules tab shows at a time unless ?rper= picks another of RULES_PERS
+RULES_PERS = (25, 50, 100, 200, 500)
 CURATE_PREVIEW_ROWS = 50  # rows each Curate list shows in place; ⤢ Expand pages through all of them
 CURATE_FOCUS = ("exclusions", "metadata")  # ?focus=: one Curate list on its own page, paginated
 
@@ -968,19 +969,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     async def rules_context(request: Request, c: Collection) -> dict[str, Any]:
-        """The rules (patterns) table: every rule with its match count over the set the count
-        links to (CurationService.rows_set) and how many URLs it still decides."""
+        """The rules (patterns) table: one filtered, sorted page of rules (?rq= ?rtype= ?rsource=
+        ?rscope= ?rsort= ?rdir= ?rper= ?rpage=) with each one's match count over the set
+        the count links to (CurationService.rows_set) and how many URLs it still decides."""
+        qp = request.query_params
+
+        def pick(name: str, allowed) -> str | None:
+            v = qp.get(name) or None
+            return v if v in allowed else None
+
+        def num(name: str, default: int) -> int:
+            try:
+                return int(qp.get(name, default))
+            except ValueError:
+                return default
+
+        f = {
+            "q": (qp.get("rq") or "").strip() or None,
+            "type_": pick("rtype", {str(t) for t in PatternType}),
+            "source": pick("rsource", {str(s) for s in RuleSource}),
+            "scope": pick("rscope", {"glob", "url"}),
+            "sort": pick("rsort", Database.RULE_SORTS),
+        }
+        desc = f["sort"] is not None and qp.get("rdir") == "desc"
+        per = num("rper", RULES_PAGE)
+        per = per if per in RULES_PERS or per == RULES_PAGE else RULES_PAGE
+        page = max(1, num("rpage", 1))
+        patterns, total = await curation(request).rules_page(c, **f, desc=desc, limit=per, offset=(page - 1) * per)
+        pages = max(1, -(-total // per))
+        if page > pages:  # past the end (a filter shrank the list): show the last page
+            page = pages
+            patterns, total = await curation(request).rules_page(c, **f, desc=desc, limit=per, offset=(page - 1) * per)
         n = await db(request).pattern_counts(c.collection_id)
-        try:
-            page = max(1, int(request.query_params.get("rpage", 1)))
-        except ValueError:
-            page = 1
-        pages = max(1, -(-n["exact"] // RULES_PAGE))
-        page = min(page, pages)
-        patterns = await curation(request).pattern_stats(c, exact_limit=RULES_PAGE, exact_offset=(page - 1) * RULES_PAGE)
         return {
             "patterns": patterns, "source_label": SOURCE_LABEL, "source_counts": n["by_source"],
-            "rules_paging": {"page": page, "pages": pages, "per": RULES_PAGE, "total": n["exact"]},
+            "rules_total": n["total"],
+            "rules_paging": {"page": page, "pages": pages, "per": per, "total": total},
+            "rules_filter": {"rq": f["q"], "rtype": f["type_"], "rsource": f["source"], "rscope": f["scope"],
+                             "rsort": f["sort"], "rdir": "desc" if desc else "asc" if f["sort"] else None},
+            "rules_pers": RULES_PERS, "pattern_types": list(PatternType),
             "rows_set": CurationService.rows_set(c), "divisions": list(Division), "doc_types": list(DocumentType),
         }
 

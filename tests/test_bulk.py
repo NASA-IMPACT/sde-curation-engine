@@ -185,12 +185,12 @@ async def test_curate_lists_expand_to_their_own_paginated_page(crawler_client):
     page = (await c.get("/collections/ex.org?tab=curate&focus=exclusions&per=25&page=2")).text
     assert 'id="exclusions"' in page and 'id="metadata"' not in page and 'id="promote"' not in page
     assert "⤡ Collapse" in page and 'href="/collections/ex.org?tab=curate#exclusions"' in page
-    assert "26–50 of 60" in page and "page 2 / 3" in page and 'class="sugg-page"' in page
+    assert "26–50 of 60" in page and 'data-page="2"' in page and "/ 3</span>" in page and 'class="sugg-page"' in page
     assert "*/s25*" in page and "*/s24*" not in page and "*/s50*" not in page
     assert "focus=exclusions&per=25&page=3" in page
     # past the end (rows were decided meanwhile): the last page
     page = (await c.get("/collections/ex.org?tab=curate&focus=exclusions&per=25&page=9")).text
-    assert "51–60 of 60" in page and "page 3 / 3" in page
+    assert "51–60 of 60" in page and 'data-page="3"' in page
     # expanded metadata
     page = (await c.get("/collections/ex.org?tab=curate&focus=metadata")).text
     assert 'id="metadata"' in page and 'id="exclusions"' not in page and "1–3 of 3" in page and "AI: AI 2" in page
