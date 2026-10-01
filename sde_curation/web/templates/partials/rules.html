@@ -2,16 +2,41 @@
    p.set = the URL set the rule's match count is over and links to: rows_set (delta while reviewing,
    curated once promoted, dump before curating), except exclude rules — always the dump, since the
    URLs they keep out have no delta row. #}
-{# Every glob rule is listed; the per-URL rules (one per field per URL once AI metadata is
-   accepted — 300k on a 100k collection) come a page at a time: rules_paging, ?rpage=. #}
+{# A collection can hold 300k rules (one per field per URL once AI metadata is accepted), so the
+   table is filtered, sorted and paged in SQL: rules_filter (?rq= ?rtype= ?rsource= ?rscope=
+   ?rsort= ?rdir=), rules_paging (?rper= ?rpage=). Unsorted = glob rules first, oldest first. #}
 {% from "partials/pager.html" import pager %}
 {% set cid = c.collection_id %}
 {% set running = job and job.state == 'running' %}
-{% macro rules_href(n) %}/collections/{{ cid }}?tab=rules&rpage={{ n }}{% endmacro %}
+{% set f = rules_filter %}
+{% set base = '/collections/' ~ cid ~ '?tab=rules' %}
+{% macro filters_qs() -%}
+rq={{ (f.rq or '')|urlencode }}&rtype={{ f.rtype or '' }}&rsource={{ f.rsource or '' }}&rscope={{ f.rscope or '' }}
+{%- endmacro %}
+{% macro rules_href(n) %}{{ base }}&{{ filters_qs() }}&rsort={{ f.rsort or '' }}&rdir={{ f.rdir or '' }}&rper={{ rules_paging.per }}&rpage={{ n }}{% endmacro %}
+{# a sortable header: click sorts ascending, again flips; keeps every filter, back to page 1 #}
+{% macro th(key, label, title='') -%}
+{% set on = f.rsort == key %}{% set next = 'desc' if on and f.rdir == 'asc' else 'asc' %}
+<th {% if on %}class="sorted" aria-sort="{{ 'ascending' if f.rdir == 'asc' else 'descending' }}"{% endif %}{% if title %} title="{{ title }}"{% endif %}><a class="sort" href="{{ base }}&{{ filters_qs() }}&rsort={{ key }}&rdir={{ next }}&rper={{ rules_paging.per }}&rpage=1">{{ label }}<span class="arrow">{% if on %}{{ '▲' if f.rdir == 'asc' else '▼' }}{% else %}⇅{% endif %}</span></a></th>
+{%- endmacro %}
+{% set filtered = f.rq or f.rtype or f.rsource or f.rscope %}
+{% if rules_total %}
+<p class="muted small">Rules belong to this collection only. {% for src, n in source_counts.items() %}<a class="edited e-src-{{ src }}" href="{{ base }}&rsource={{ src }}" title="show only these rules">{{ source_label.get(src, src) }} {{ n }}</a> {% endfor %}</p>
+<form method="get" action="/collections/{{ cid }}" class="tbl-toolbar" hx-boost="true" hx-target="#tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-push-url="true">
+  <input type="hidden" name="tab" value="rules">{% if f.rsort %}<input type="hidden" name="rsort" value="{{ f.rsort }}"><input type="hidden" name="rdir" value="{{ f.rdir }}">{% endif %}
+  <input type="search" name="rq" value="{{ f.rq or '' }}" placeholder="search match / value" size="26" aria-label="search rules">
+  <select name="rtype" aria-label="rule type"><option value="">any type</option>{% for t in pattern_types %}<option {% if f.rtype == t %}selected{% endif %}>{{ t }}</option>{% endfor %}</select>
+  <select name="rscope" aria-label="rule scope"><option value="">globs + per-URL</option><option value="glob" {% if f.rscope == 'glob' %}selected{% endif %}>glob rules only</option><option value="url" {% if f.rscope == 'url' %}selected{% endif %}>per-URL rules only</option></select>
+  <select name="rsource" aria-label="rule source"><option value="">any source</option>{% for src in source_label %}<option value="{{ src }}" {% if f.rsource == src %}selected{% endif %}>{{ source_label[src] }}</option>{% endfor %}</select>
+  <select name="rper" aria-label="rules per page">{% for n in rules_pers %}<option {% if rules_paging.per == n %}selected{% endif %}>{{ n }}</option>{% endfor %}</select>
+  <button class="secondary">Filter</button>
+  {% if filtered or f.rsort %}<a class="muted" href="{{ base }}">clear</a>{% endif %}
+  <span class="grow"></span>
+  {{ pager(rules_paging.page, rules_paging.pages, rules_paging.per, rules_paging.total, rules_href) }}
+</form>
 {% if patterns %}
-<p class="muted small">Rules belong to this collection only. {% for src, n in source_counts.items() %}<span class="edited e-src-{{ src }}">{{ source_label.get(src, src) }} {{ n }}</span> {% endfor %}</p>
 <table>
-  <thead><tr><th>Type</th><th>Match</th><th>Value</th><th title="{{ rows_set }} URLs this rule matches — click to open them. A rule marked superseded matches URLs but a newer rule wins on every one of them">Matches</th><th title="AI = accepted suggestion · AI, edited = suggestion changed before accepting · SME = typed or toggled by a curator · global list = shared exclude list">Source</th><th>Added</th><th>By</th><th></th></tr></thead>
+  <thead><tr>{{ th('type', 'Type') }}{{ th('match', 'Match') }}{{ th('value', 'Value') }}<th title="{{ rows_set }} URLs this rule matches — click to open them. A rule marked superseded matches URLs but a newer rule wins on every one of them">Matches</th>{{ th('source', 'Source', 'AI = accepted suggestion · AI, edited = suggestion changed before accepting · SME = typed or toggled by a curator · global list = shared exclude list') }}{{ th('added', 'Added') }}{{ th('by', 'By') }}<th></th></tr></thead>
   <tbody>{% for p in patterns %}
     <tr><td><span class="ptype {{ p.type }}">{{ p.type }}</span></td><td class="match"><code>{{ p.match }}</code></td><td>{{ p.value or '' }}</td>
         <td class="num nowrap"><a href="/collections/{{ cid }}?tab={{ p.set }}&match={{ p.match|urlencode }}" title="show the matching {{ p.set }} URLs">{{ p.matches }}</a>{% if p.matches and not p.in_effect %} <span class="kind k-ok" title="a newer rule wins on every URL this one matches">superseded</span>{% endif %}</td>
@@ -21,8 +46,6 @@
         <td><button class="danger" aria-label="delete rule" {% if running %}disabled{% endif %} hx-delete="/api/collections/{{ cid }}/patterns/{{ p.id }}" hx-swap="none" hx-confirm="Delete this rule? Its effects are unapplied (next newest rule → curated value → empty).">×</button></td></tr>
   {% endfor %}</tbody>
 </table>
-{% if rules_paging and rules_paging.pages > 1 %}
-<div class="inline pager"><span class="muted small">Per-URL rules (inline edits and accepted AI suggestions):</span>
-  {{ pager(rules_paging.page, rules_paging.pages, rules_paging.per, rules_paging.total, rules_href) }}</div>
-{% endif %}
+{% if rules_paging.pages > 1 %}<div class="inline pager">{{ pager(rules_paging.page, rules_paging.pages, rules_paging.per, rules_paging.total, rules_href) }}</div>{% endif %}
+{% else %}<p class="empty">No rule matches these filters. <a href="{{ base }}">Clear them</a>.</p>{% endif %}
 {% else %}<p class="empty">No rules yet. Accept suggestions or add one above.</p>{% endif %}

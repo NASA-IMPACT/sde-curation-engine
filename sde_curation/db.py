@@ -9,7 +9,7 @@ import logging
 import sys
 from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import psycopg
 from psycopg import AsyncConnection
@@ -1857,6 +1857,38 @@ class Database:
         async with self._conn() as conn:
             cur = await conn.execute(q, args)
             return [Pattern(**r) for r in await cur.fetchall()]
+
+    RULE_SORTS: ClassVar[dict[str, str]] = {  # Rules table ?rsort= -> ORDER BY expression (whitelisted: never the raw param)
+        "type": "p.type", "match": "lower(p.match)", "value": "lower(coalesce(p.value, ''))",
+        "source": "p.source", "added": "p.id", "by": "lower(coalesce(p.created_by, ''))",
+    }
+
+    async def rules_page(self, collection_id: str, *, q: str | None = None, type_: str | None = None,
+                         source: str | None = None, scope: str | None = None,
+                         sort: str | None = None, desc: bool = False, limit: int = 200,
+                         offset: int = 0) -> tuple[list[Pattern], int]:
+        """One page of the Rules table and how many rules pass the filters. `q` searches the match
+        and the value, `scope` = glob | url (per-URL). Sorted by a RULE_SORTS key, then by id;
+        unsorted = the glob rules first, oldest first."""
+        where, args = ["p.collection_id=%s"], [collection_id]
+        if q:
+            where.append("(p.match ILIKE %s OR p.value ILIKE %s)"); args += [f"%{q}%"] * 2
+        if type_:
+            where.append("p.type=%s"); args.append(type_)
+        if source:
+            where.append("p.source=%s"); args.append(source)
+        if scope in ("glob", "url"):
+            where.append(f"position('*' in p.match) {'>' if scope == 'glob' else '='} 0")
+        sort = sort if sort in self.RULE_SORTS else None
+        sql_where = " WHERE " + " AND ".join(where)
+        order = (f"{self.RULE_SORTS[sort]} {'DESC' if desc else 'ASC'}, p.id {'DESC' if desc else 'ASC'}" if sort
+                 else "position('*' in p.match) = 0, p.id")
+        async with self._conn() as conn:
+            cur = await conn.execute(f"SELECT COUNT(*) AS n FROM patterns p{sql_where}", args)
+            total = (await cur.fetchone())["n"]
+            cur = await conn.execute(f"SELECT p.* FROM patterns p{sql_where} ORDER BY {order} LIMIT %s OFFSET %s",
+                                     args + [limit, offset])
+            return [Pattern(**r) for r in await cur.fetchall()], total
 
     async def pattern_counts(self, collection_id: str) -> dict[str, Any]:
         """How many rules there are, how many of them per-URL (exact), and how many per source."""

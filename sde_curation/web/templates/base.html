@@ -48,6 +48,22 @@
         return `The server is temporarily unavailable (HTTP ${status}). Please try again in a moment.`;
       return m;
     }
+    // The pagers' page box (partials/pager.html): jump to the typed page, clamped to 1..pages. It
+    // clicks a new link placed beside the box, so the jump is boosted exactly when the pager's own
+    // links are (a boosted link's URL is read when htmx processes it: re-pointing › does nothing).
+    function jumpPage(input) {
+      const max = +input.max || 1;
+      const n = Math.min(max, Math.max(1, Math.round(+input.value) || 1));
+      input.value = n;
+      if (String(n) === input.dataset.page) return;
+      input.dataset.page = String(n);  // the blur after an Enter must not jump a second time
+      const link = document.createElement('a');
+      link.href = input.dataset.href.replace('__PAGE__', n);
+      link.hidden = true;
+      input.after(link);
+      htmx.process(link);
+      link.click();
+    }
     async function postJson(path, body) {
       const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
       if (!r.ok) { alert(errorText(r.status, r.statusText, await r.text())); return false; }

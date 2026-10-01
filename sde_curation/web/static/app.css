@@ -107,6 +107,8 @@ a.chip:hover { border-color: var(--accent); color: var(--fg); }
 .tbl-toolbar .grow { flex: 1; }
 .tbl-toolbar .page, .pager .page { padding: 0 .5rem; border: 1px solid var(--line); border-radius: 4px; text-decoration: none; color: var(--fg); }
 .tbl-toolbar .page.off, .pager .page.off { pointer-events: none; opacity: .35; }
+.page-jump { width: 4.5em; padding: 0 .25rem; font: inherit; text-align: right; }
+.rules a.edited { text-decoration: none; }
 .tbl-wrap { overflow-x: auto; }
 table.urls { font-size: .8125rem; } table.urls th { position: sticky; top: 0; background: var(--bg); z-index: 1; }
 table.urls td.url { max-width: 34rem; overflow-wrap: anywhere; } table.urls td.url a { color: var(--link); }
