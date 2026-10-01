@@ -108,10 +108,24 @@ async def test_rules_tab_pages_the_per_url_rules(crawler_client, monkeypatch):
     await c.post("/api/collections/ex.org/recompute")
     await c.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": "*/p9"})
     await classify(c)  # 7 URLs × 2 fields = 14 per-URL rules (the collection's division is not the AI's)
+    # one list, paged in SQL: unsorted, the glob rules come first
     page1 = (await c.get("/collections/ex.org?tab=rules")).text
-    assert page1.count("<code>https://ex.org/") == 10 and "<code>*/p9</code>" in page1 and "1–10 of 14" in page1
+    assert page1.count("<code>https://ex.org/") == 9 and "<code>*/p9</code>" in page1 and "1–10 of 15" in page1
     last = (await c.get("/collections/ex.org?tab=rules&rpage=2")).text
-    assert last.count("<code>https://ex.org/") == 4 and "<code>*/p9</code>" in last  # glob rules on every page
+    assert last.count("<code>https://ex.org/") == 5 and "<code>*/p9</code>" not in last and 'data-page="2"' in last
+    assert 'data-page="2"' in (await c.get("/collections/ex.org?tab=rules&rpage=99")).text  # past the end: the last page
+    # filters (they narrow the count the pager shows) and sorts
+    globs = (await c.get("/collections/ex.org?tab=rules&rscope=glob")).text
+    assert "<code>*/p9</code>" in globs and "<code>https://ex.org/" not in globs and "1–1 of 1" in globs
+    urls = (await c.get("/collections/ex.org?tab=rules&rscope=url&rper=25")).text
+    assert urls.count("<code>https://ex.org/") == 14 and "1–14 of 14" in urls
+    assert "1–1 of 1" in (await c.get("/collections/ex.org?tab=rules&rtype=exclude")).text
+    hit = (await c.get("/collections/ex.org?tab=rules&rq=ex.org/p3&rper=25")).text
+    assert "<code>*/p9</code>" not in hit and hit.count("<code>https://ex.org/p3") == 2
+    asc = (await c.get("/collections/ex.org?tab=rules&rsort=match&rdir=asc&rper=25")).text
+    desc = (await c.get("/collections/ex.org?tab=rules&rsort=match&rdir=desc&rper=25")).text
+    assert asc.index("<code>*/p9</code>") < asc.index("<code>https://") and desc.index("<code>*/p9</code>") > desc.index("<code>https://")
+    assert "1–15 of 15" in (await c.get("/collections/ex.org?tab=rules&rsort=source&rdir=desc&rper=25")).text
     # counts are right for the rules shown, the tab badge counts them all, the API still lists all
     assert 'title="show the matching delta URLs">1</a>' in last and ">Rules" in page1
     api = (await c.get("/api/collections/ex.org/patterns")).json()

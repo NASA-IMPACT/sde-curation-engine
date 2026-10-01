@@ -1,8 +1,13 @@
-{# Paging controls shared by the URL tables (partials/urls_table.html) and the expanded Curate lists
-   (partials/tab_curate.html). `href` is a macro or callable: page number -> URL. #}
+{# Paging controls shared by the URL tables (partials/urls_table.html), the expanded Curate lists
+   (partials/tab_curate.html) and the Rules table (partials/rules.html). `href` is a macro or
+   callable: page number -> URL. The page number is an input: type one and press Enter (or leave the
+   box) to jump there — jumpPage (base.html) clicks the › link re-pointed at that page, so the jump
+   goes the same way (boosted or not) as every other paging link. #}
 {% macro pager(page, pages, per, total, href) -%}
   <span class="muted small nowrap">{% if total %}{{ (page - 1) * per + 1 }}–{{ [page * per, total]|min }} of {{ total }}{% else %}0 rows{% endif %}</span>
+  <a class="page {% if page <= 1 %}off{% endif %}" href="{{ href(1) }}" aria-label="first page" title="first page">«</a>
   <a class="page {% if page <= 1 %}off{% endif %}" href="{{ href(page - 1) }}" aria-label="previous page">‹</a>
-  <span class="small nowrap">page {{ page }} / {{ pages }}</span>
+  <span class="small nowrap">page <input class="page-jump" type="number" min="1" max="{{ pages }}" value="{{ page }}" aria-label="page number (type one and press Enter)" title="type a page number and press Enter" data-href="{{ href('__PAGE__') }}" data-page="{{ page }}" onkeydown="if (event.key === 'Enter') { event.preventDefault(); jumpPage(this); }" onchange="jumpPage(this)"> / {{ pages }}</span>
   <a class="page {% if page >= pages %}off{% endif %}" href="{{ href(page + 1) }}" aria-label="next page">›</a>
+  <a class="page {% if page >= pages %}off{% endif %}" href="{{ href(pages) }}" aria-label="last page" title="last page">»</a>
 {%- endmacro %}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from .db import Database
 from .engine.diff import DeltaSet, promote, recompute
@@ -199,10 +200,19 @@ class CurationService:
         Every rule by default; with `exact_limit` every glob rule plus that page of the per-URL
         rules — there can be three of those per URL, and the Rules tab shows them a page at a time."""
         if exact_limit is None:
-            patterns = await self.db.list_patterns(c.collection_id)
-        else:
-            patterns = (await self.db.list_patterns(c.collection_id, exact=False)
-                        + await self.db.list_patterns(c.collection_id, exact=True, limit=exact_limit, offset=exact_offset))
+            return await self._with_stats(c, await self.db.list_patterns(c.collection_id), every=True)
+        patterns = (await self.db.list_patterns(c.collection_id, exact=False)
+                    + await self.db.list_patterns(c.collection_id, exact=True, limit=exact_limit, offset=exact_offset))
+        return await self._with_stats(c, patterns)
+
+    async def rules_page(self, c: Collection, **filters: Any) -> tuple[list[dict], int]:
+        """One filtered, sorted page of the Rules table (Database.rules_page) with pattern_stats'
+        counts for the rules on it, and how many rules pass the filters."""
+        patterns, total = await self.db.rules_page(c.collection_id, **filters)
+        return await self._with_stats(c, patterns), total
+
+    async def _with_stats(self, c: Collection, patterns: list[Pattern], *, every: bool = False) -> list[dict]:
+        """pattern_stats' counts for these rules (`every`: they are all the collection's rules)."""
         set_ = self.rows_set(c)
         counts = await asyncio.to_thread(match_counts, patterns, await self.db.set_urls(c.collection_id, set_))
         # exclude rules keep URLs out of the delta URLs altogether, so theirs are counted over the dump
@@ -210,7 +220,7 @@ class CurationService:
         if excludes and set_ != "dump":
             counts.update(await asyncio.to_thread(match_counts, excludes, await self.db.set_urls(c.collection_id, "dump")))
         effects = await self.db.effect_counts(
-            c.collection_id, None if exact_limit is None else [p.id for p in patterns if p.id is not None])
+            c.collection_id, None if every else [p.id for p in patterns if p.id is not None])
         return [{**p.model_dump(mode="json"), "matches": counts.get(p.id, 0), "in_effect": effects.get(p.id, 0),
                  "set": "dump" if p.type is PatternType.EXCLUDE else set_}
                 for p in patterns]
