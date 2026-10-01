@@ -9,7 +9,7 @@ import logging
 import sys
 from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import psycopg
 from psycopg import AsyncConnection
@@ -1858,7 +1858,7 @@ class Database:
             cur = await conn.execute(q, args)
             return [Pattern(**r) for r in await cur.fetchall()]
 
-    RULE_SORTS = {  # Rules table ?rsort= -> ORDER BY expression (whitelisted: never the raw param)
+    RULE_SORTS: ClassVar[dict[str, str]] = {  # Rules table ?rsort= -> ORDER BY expression (whitelisted: never the raw param)
         "type": "p.type", "match": "lower(p.match)", "value": "lower(coalesce(p.value, ''))",
         "source": "p.source", "added": "p.id", "by": "lower(coalesce(p.created_by, ''))",
     }
