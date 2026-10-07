@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import functools
 import hashlib
 import logging
@@ -463,6 +464,36 @@ def configure_logging() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
+class RequestMemo:
+    """One page render asks the database for the same few things several times: the header, the
+    stepper, the tab and the validation chips each want the latest job and the latest index runs. A
+    Curate page asked for the latest job three times and the last index run four times. Within one
+    page request (the read scope only, see `db`) each of `MEMOIZED` runs once per set of arguments
+    and the answer is reused; every other attribute is the Database's own. An action or a job never
+    goes through this: it may write between two reads and must see its own write."""
+
+    MEMOIZED = frozenset({"latest_job", "last_index_run", "list_jobs", "list_index_runs", "latest_job_of_kind",
+                          "count_deltas_for_llm", "job_exists"})
+
+    def __init__(self, database: Database):
+        self._db = database
+        self._results: dict[Any, Any] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._db, name)
+        if name not in self.MEMOIZED:
+            return attr
+
+        async def memoized(*args: Any, **kwargs: Any) -> Any:
+            key = (name, args, tuple(sorted(kwargs.items())))
+            if key not in self._results:
+                self._results[key] = await attr(*args, **kwargs)
+            value = self._results[key]
+            return copy.copy(value) if isinstance(value, (list, dict)) else value  # each caller its own list
+
+        return memoized
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging()
@@ -492,9 +523,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # first start with login enabled: APP_PASSWORD seeds the bootstrap admin account
             await db.create_user("admin", auth.hash_password(settings.app_password), Role.ADMIN)
         app.state.bus = EventBus()
-        # a job's progress, a finished job, a curator's change: whatever is announced about a
-        # collection makes its coalesced reads stale for whoever asks next
+        # A curator's change or a finished job makes the collection's coalesced reads stale for whoever
+        # asks next. A running job's progress event changes nothing a page counts and does not: the
+        # job's writes mark the collection themselves when they commit (db._touches).
         def touch_collection(_event: str, data: dict) -> None:
+            job = data.get("job")
+            if isinstance(job, dict) and job.get("state") not in ("succeeded", "failed"):
+                return
             if isinstance(cid := data.get("collection_id"), str):
                 db.touch(cid)
 
@@ -537,7 +572,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ── helpers ────────────────────────────────────────────────────────
 
     def db(request: Request) -> Database:
-        return request.app.state.db
+        """The database, through a per-request memo for page reads (RequestMemo)."""
+        if db_scope.get() != "read":
+            return request.app.state.db
+        memo = getattr(request.state, "db_memo", None)
+        if memo is None:
+            memo = request.state.db_memo = RequestMemo(request.app.state.db)
+        return memo  # type: ignore[return-value]
 
     def bus(request: Request) -> EventBus:
         return request.app.state.bus

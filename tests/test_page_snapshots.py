@@ -149,3 +149,29 @@ async def test_pages_look_exactly_as_before(crawler_client, tmp_path, fixed_elap
             changed.append(f"{name} ({path}):\n{diff}")
     assert not missing, f"no snapshot yet for {missing}: run with UPDATE_SNAPSHOTS=1 once"
     assert not changed, "pages changed — curators would see this:\n\n" + "\n\n".join(changed)
+
+
+async def test_one_page_asks_for_the_latest_job_and_index_runs_once(crawler_client, monkeypatch):
+    """The header, the stepper, the tab and the validation chips all want the latest job and the
+    latest index runs; one page view fetches each of them once (web.app.RequestMemo)."""
+    from sde_curation.db import Database
+
+    c = crawler_client
+    await build_fixture(c)
+    calls: dict[str, int] = {}
+    for name in ("latest_job", "last_index_run", "list_jobs"):
+        original = getattr(Database, name)
+
+        def counting(original, name):
+            async def wrapper(self, *args, **kwargs):
+                calls[name] = calls.get(name, 0) + 1
+                return await original(self, *args, **kwargs)
+            return wrapper
+
+        monkeypatch.setattr(Database, name, counting(original, name))
+    for path in ("/collections/ex.org?tab=curate", "/collections/ex.org?tab=overview"):
+        calls.clear()
+        assert (await c.get(path)).status_code == 200
+        # latest_job is list_jobs(limit=1) inside the Database, so it counts once under each name
+        assert calls.get("latest_job", 0) <= 1, (path, calls)
+        assert calls.get("last_index_run", 0) <= 2, (path, calls)  # test and prod

@@ -91,7 +91,8 @@ def _is_open(path: str) -> bool:
 
 class AuthMiddleware:
     """Pure ASGI so it wraps the whole app (StaticFiles included) without touching routes.
-    Resolves the session to a `User` (one primary-key lookup) and exposes it as
+    Resolves the session to a `User` (Database.session_user: a primary-key lookup, cached for 30 s
+    and dropped at once when the user's password, role or active flag changes) and exposes it as
     `request.state.user`; a disabled user or a changed password ends the session at once."""
 
     def __init__(self, app: ASGIApp, *, secret: str):
@@ -104,7 +105,7 @@ class AuthMiddleware:
             return
         request = Request(scope)
         claims = verify(self.secret, request.cookies.get(COOKIE))
-        user = await scope["app"].state.db.get_user(claims[0]) if claims else None
+        user = await scope["app"].state.db.session_user(claims[0]) if claims else None
         if user and user.active and user.session_version == claims[1]:
             scope.setdefault("state", {})["user"] = user
             await self.app(scope, receive, send)

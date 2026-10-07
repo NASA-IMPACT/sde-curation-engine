@@ -207,3 +207,30 @@ async def test_big_rule_sets_get_the_same_patterns_yaml_from_the_fast_writer(cra
     assert yaml.safe_load(fast_text) == slow and len(slow) == 10 and fast_text.startswith("- type: \"title\"")
     api = (await c.get("/api/collections/ex.org/patterns")).json()
     assert [(r["id"], r["match"], r["value"], r["created_at"]) for r in slow] == [(p["id"], p["match"], p["value"], p["created_at"]) for p in api]
+
+
+async def test_a_promote_rewrites_only_the_curated_rows_that_changed(crawler_client):
+    """replace_curated writes the difference too: after one row is edited and promoted again, only
+    that curated row gets a new physical version (xmin); the others keep theirs."""
+    c, db = crawler_client, crawler_client.app.state.db
+    await start(c)
+    await c.post("/api/collections/ex.org/recompute")
+    await classify(c)
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
+
+    async def versions():
+        return {r["url"]: r["v"] for r in await db.fetch(
+            "SELECT url, xmin::text AS v FROM curated_urls WHERE collection_id='ex.org'")}
+
+    before = await versions()
+    assert len(before) >= 6
+    r = await c.post("/api/collections/ex.org/urls", json={"url": "https://ex.org/p2", "type": "title", "value": "Two"})
+    assert r.status_code == 200, r.text
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
+    after = await versions()
+    assert set(after) == set(before)
+    assert {u for u in before if before[u] != after[u]} == {"https://ex.org/p2"}
+    cur = {r["url"]: r for r in (await c.get("/api/collections/ex.org/curated?limit=100")).json()["items"]}
+    assert cur["https://ex.org/p2"]["title"] == "Two"
+    assert (await c.get("/api/collections/ex.org")).json()["curated_count"] == len(
+        [r for r in cur.values() if not r["excluded"]])

@@ -196,3 +196,35 @@ def test_hash_verify_password():
     assert h.startswith("scrypt$14$8$1$") and h != auth.hash_password("correct horse")  # random salt
     assert auth.verify_password(h, "correct horse") and not auth.verify_password(h, "wrong")
     assert not auth.verify_password("garbage", "x") and not auth.verify_password("", "x")
+
+
+async def test_a_session_looks_its_user_up_once_not_on_every_request(secured, monkeypatch):
+    """Every poll and SSE connect carries the cookie; the user row is read once and reused for
+    Database.SESSION_USER_TTL_S."""
+    from sde_curation.db import Database
+
+    await login(secured, "admin", "s3cret")
+    calls = []
+    original = Database.get_user
+
+    async def counting(self, user_id):
+        calls.append(user_id)
+        return await original(self, user_id)
+
+    monkeypatch.setattr(Database, "get_user", counting)
+    secured.app.state.db._session_users.clear()
+    for _ in range(10):
+        assert (await secured.get("/api/collections")).status_code == 200
+    assert len(calls) == 1
+
+
+async def test_a_role_change_takes_effect_on_the_next_request(secured):
+    bob = await add_user(secured, "bob", "bobpassword")
+    bobc = AsyncClient(transport=ASGITransport(app=secured.app), base_url="http://t")
+    await login(bobc, "bob", "bobpassword")
+    assert (await bobc.get("/users")).status_code == 403  # a curator: cached as one now
+    await login(secured, "admin", "s3cret")
+    assert (await secured.post(f"/users/{bob.id}/role", data={"role": "admin"})).status_code == 303
+    assert (await bobc.get("/users")).status_code == 200
+    assert (await secured.post(f"/users/{bob.id}/role", data={"role": "curator"})).status_code == 303
+    assert (await bobc.get("/users")).status_code == 403

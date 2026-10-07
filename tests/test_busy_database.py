@@ -291,3 +291,33 @@ async def test_pages_answer_503_when_no_read_connection_frees_up_even_before_the
             if token is not None:
                 db_scope.reset(token)
         assert (await c.get("/api/collections")).status_code == 200
+
+
+async def test_progress_events_do_not_end_sharing_but_a_jobs_writes_do(crawler_client):
+    """A running job announces progress about once a second. Those events change nothing a page
+    counts, so they no longer mark the collection changed (which ended the sharing of slow counts
+    between open tabs every second). The job's own writes do, when they commit."""
+    c = crawler_client
+    db, bus = c.app.state.db, c.app.state.bus
+    await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "ex.org", "max_pages": 10})
+    await c.post("/api/collections/ex.org/scrape")
+    await wait_job(c, "ex.org")
+    await c.post("/api/collections/ex.org/recompute")
+
+    gen = db._gens.get("ex.org", 0)
+    bus.publish("collection", {"collection_id": "ex.org", "status": "curating",
+                               "job": {"id": 9, "kind": "llm_metadata", "state": "running", "progress": {"done": 3}}})
+    assert db._gens.get("ex.org", 0) == gen
+
+    before = (await c.get("/collections/ex.org?tab=curate")).text
+    url = (await c.get("/api/collections/ex.org/delta?limit=1")).json()["items"][0]["url"]
+    await db.set_delta_ai("ex.org", [{"url": url, "title": "From the model", "title_conf": "high",
+                                      "division": None, "document_type": None, "model": "fake"}])
+    assert db._gens.get("ex.org", 0) > gen
+    after = (await c.get("/collections/ex.org?tab=curate")).text
+    assert "From the model" not in before and "From the model" in after
+
+    gen = db._gens["ex.org"]
+    bus.publish("collection", {"collection_id": "ex.org", "status": "curating",
+                               "job": {"id": 9, "kind": "llm_metadata", "state": "succeeded", "progress": {}}})
+    assert db._gens["ex.org"] > gen  # a finished job still marks it

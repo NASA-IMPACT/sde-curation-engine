@@ -273,8 +273,10 @@ class CurationService:
                 return c.curated_count, DeltaSet(left)
             await self._check_complete(c, [d.url for d in picked])
             hashes = await self.db.dump_content_hashes(c.collection_id)
-            curated = promote(
-                await self.db.load_curated(c.collection_id), picked,
+            # pure CPU over the whole curated set: in a thread, as _promote does, so the event loop
+            # keeps serving everyone else meanwhile
+            curated = await asyncio.to_thread(
+                promote, await self.db.load_curated(c.collection_id), picked,
                 content_hashes={u: h for u, h in hashes.items() if u in wanted},
             )
             picked_urls = [d.url for d in picked]

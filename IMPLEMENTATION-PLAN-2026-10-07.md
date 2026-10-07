@@ -67,13 +67,13 @@ Read these before starting. They apply to every step.
 | 0 | #15 Autovacuum tuning | [x] | [x] |
 | 1 | #1 Recompute stops overwriting AI columns | [x] | [x] |
 | 1 | #18 Fix "Re-curate everything" | [x] | [x] |
-| 2 | #3 Row objects and COPY data off the event loop | [ ] | [ ] |
-| 2 | #4 Partial promote computed in a thread | [ ] | [ ] |
-| 2 | #5 Repeated lookups fetched once per page | [ ] | [ ] |
-| 2 | #7 Mark data changed only on real writes | [ ] | [ ] |
-| 2 | #8 Job progress sent at most every 3 s | [ ] | [ ] |
-| 2 | #9 Promote writes only changed curated rows | [ ] | [ ] |
-| 2 | #16 Login lookups cached for 30 s | [ ] | [ ] |
+| 2 | #3 Row objects and COPY data off the event loop | [x] | [x] |
+| 2 | #4 Partial promote computed in a thread | [x] | [x] |
+| 2 | #5 Repeated lookups fetched once per page | [x] | [x] |
+| 2 | #7 Mark data changed only on real writes | [x] | [x] |
+| 2 | #8 Job progress sent at most every 3 s | [x] | [x] |
+| 2 | #9 Promote writes only changed curated rows | [x] | [x] |
+| 2 | #16 Login lookups cached for 30 s | [x] | [x] |
 | 3 | #11 Indexes, including the duplicate-title check | [ ] | [ ] |
 | 3 | #10 Exact stored counts | [ ] | [ ] |
 | 3 | #6 `#job-watch` fetches only the tab body | [ ] | [ ] |
@@ -294,8 +294,8 @@ All items in this tier are invisible to curators. Each one must leave the snapsh
 
 ### #3 Row objects and COPY data off the event loop
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **Depends on.** #2.
 
@@ -314,17 +314,18 @@ All items in this tier are invisible to curators. Each one must leave the snapsh
 5. Do not change any SQL.
 
 **Validation.**
-- [ ] New test: seed a 20,000-URL collection through `seed_dump`, run one per-URL edit, and read
-      `loop_lag_ms.max` from `/health/db`. It is under 250 ms.
-- [ ] T0.2 measurement at 100K: worst freeze during a per-URL edit is at most 0.3 s. Record the
+- [x] New test: seed a 100,000-URL collection through `seed_dump`, run one per-URL edit, and read
+      `loop_lag_ms.max` from `/health/db`. It is under 200 ms. (Changed from "20,000 URLs, under
+      250 ms", which the old code also passed; see the validation log.)
+- [x] T0.2 measurement at 100K: worst freeze during a per-URL edit is at most 0.3 s. Record the
       before and after numbers. (The 2026-09-18 audit measured 2.8 s worst.)
-- [ ] The per-URL edit's own server time is not worse than the baseline by more than 10 %.
-- [ ] Snapshot guard unchanged.
+- [x] The per-URL edit's own server time is not worse than the baseline by more than 10 %.
+- [x] Snapshot guard unchanged.
 
 ### #4 Partial promote computed in a thread
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **What curators see.** Faster only.
 
@@ -333,14 +334,14 @@ All items in this tier are invisible to curators. Each one must leave the snapsh
    `asyncio.to_thread`, as `_promote` already does.
 
 **Validation.**
-- [ ] Existing `tests/test_promote_selection.py` passes.
-- [ ] Code check: no call to `promote(` in `curation.py` outside `asyncio.to_thread`.
-- [ ] Snapshot guard unchanged.
+- [x] Existing `tests/test_promote_selection.py` passes.
+- [x] Code check: no call to `promote(` in `curation.py` outside `asyncio.to_thread`.
+- [x] Snapshot guard unchanged.
 
 ### #5 Repeated lookups fetched once per page
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **What curators see.** None.
 
@@ -354,16 +355,16 @@ All items in this tier are invisible to curators. Each one must leave the snapsh
 3. Hand each caller its own copy of a list or dict result, as `_coalesced` already does.
 
 **Validation.**
-- [ ] New test: count calls to `Database.latest_job` and `Database.last_index_run` during one
+- [x] New test: count calls to `Database.latest_job` and `Database.last_index_run` during one
       Curate page GET (monkeypatch wrappers). `latest_job` at most 1. `last_index_run` at most 2
       (test and prod).
-- [ ] T0.2 statement count for one Curate render drops. Record the number.
-- [ ] Snapshot guard unchanged.
+- [x] T0.2 statement count for one Curate render drops. Record the number.
+- [x] Snapshot guard unchanged.
 
 ### #7 Mark data changed only on real writes
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **What curators see.** None. Counts still update when the data changes.
 
@@ -376,16 +377,16 @@ All items in this tier are invisible to curators. Each one must leave the snapsh
 3. `DbScope` keeps touching after every non-GET request, as today.
 
 **Validation.**
-- [ ] New test: publish a progress event for a running job. `Database._gens[cid]` does not change.
-- [ ] New test: a fake-LLM metadata flush changes `_gens[cid]`, and the next Curate render shows the
+- [x] New test: publish a progress event for a running job. `Database._gens[cid]` does not change.
+- [x] New test: a fake-LLM metadata flush changes `_gens[cid]`, and the next Curate render shows the
       new suggestion count.
-- [ ] Existing `tests/test_busy_database.py` passes.
-- [ ] Snapshot guard unchanged, including the "job running" snapshot.
+- [x] Existing `tests/test_busy_database.py` passes.
+- [x] Snapshot guard unchanged, including the "job running" snapshot.
 
 ### #8 Job progress sent at most every 3 s
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **What curators see.** None. The browser already shows at most one refresh per 3 s per element.
 
@@ -399,18 +400,18 @@ All items in this tier are invisible to curators. Each one must leave the snapsh
    progress first.
 
 **Validation.**
-- [ ] New test: ten progress updates within one second produce at most two publishes, and the last
+- [x] New test: ten progress updates within one second produce at most two publishes, and the last
       value published equals the last update.
-- [ ] New test: a job that finishes 0.5 s after a progress update publishes its final state without
+- [x] New test: a job that finishes 0.5 s after a progress update publishes its final state without
       waiting.
-- [ ] Existing `test_progress_events_refresh_the_header_and_stepper_at_most_every_few_seconds`
+- [x] Existing `test_progress_events_refresh_the_header_and_stepper_at_most_every_few_seconds`
       passes.
-- [ ] Snapshot guard unchanged.
+- [x] Snapshot guard unchanged.
 
 ### #9 Promote writes only changed curated rows
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **What curators see.** Faster only. Promote stays in the request.
 
@@ -421,18 +422,18 @@ All items in this tier are invisible to curators. Each one must leave the snapsh
 2. Check that the returned count and `_recount_curated` stay correct when few rows change.
 
 **Validation.**
-- [ ] New test, same shape as `test_an_edit_rewrites_only_the_rows_it_changes`: promote, edit one
+- [x] New test, same shape as `test_an_edit_rewrites_only_the_rows_it_changes`: promote, edit one
       row, promote again. Only that curated row gets a new row version (`xmin`); the others keep
       theirs.
-- [ ] Existing promote and curated-count tests pass.
-- [ ] T0.2: time one full promote on the 100K collection after a one-row change. Record before and
+- [x] Existing promote and curated-count tests pass.
+- [x] T0.2: time one full promote on the 100K collection after a one-row change. Record before and
       after.
-- [ ] Snapshot guard unchanged.
+- [x] Snapshot guard unchanged.
 
 ### #16 Login lookups cached for 30 s
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **What curators see.** None. An admin who deactivates a user sees it take effect up to 30 s later
 on other engine tasks; on the same task it is immediate.
@@ -446,10 +447,10 @@ on other engine tasks; on the same task it is immediate.
    treated exactly as today.
 
 **Validation.**
-- [ ] New test: ten authenticated GETs run `get_user` once.
-- [ ] New test: deactivating a user, then a request with their cookie, is refused at once.
-- [ ] New test: a password change ends the old session at once.
-- [ ] Existing `tests/test_auth.py` passes.
+- [x] New test: ten authenticated GETs run `get_user` once.
+- [x] New test: deactivating a user, then a request with their cookie, is refused at once.
+- [x] New test: a password change ends the old session at once.
+- [x] Existing `tests/test_auth.py` passes.
 
 ---
 
@@ -1149,3 +1150,11 @@ Add one line per validated item or sub-step. Do not edit earlier lines.
 | 2026-10-07 | #1 | New `tests/test_concurrent_writes.py` run on the unchanged code, then with the change; `pytest` on test_scale, test_llm, test_review_round, test_collection_division, test_duplicate_titles, test_page_snapshots | Before the change both race tests failed: a suggestion written mid-recompute was overwritten (`'Page 1' == 'Newer suggestion'`) and a rejected one came back. After: 4/4 pass (both races, suggestions kept through recomputes, AI column list equals `engine.diff._AI_FIELDS`). 82 related tests pass; snapshots unchanged. Every reader of the AI columns already skips removed rows, so the one case where a row turns into a removal is not visible either. | agent |
 | 2026-10-07 | #18 | 6 new tests in `tests/test_review_round.py`; the fix switched off for one run (`keep_queued=False`) and restored | Migration V15 adds `collections.review_round` (default false). New tests pass: one edit keeps the whole queue and every other suggestion; an exclude rule removes only its page; partly promoted pages do not come back; promote (full, or the last rows one by one) closes the round; a new crawl closes it. With the fix off, the edit and partial-promote tests fail. Existing re-curate test passes unchanged; snapshots unchanged. | agent |
 | 2026-10-07 | Tier 1 | `make lint`; `make test` | lint clean; 400 passed (390 + 10 new). | agent |
+| 2026-10-07 | #3 | `tests/test_event_loop.py` against new and old `db.py` (old restored from git stash, then put back); profiler `results/local-20261007T214108Z/` | Loads now fetch in 2,000-row slices with a yield between, build models in a thread; COPY rows are built in a thread and written in 2,000-row slices. Loop freeze for one per-URL edit (test, laptop): 20K 33–46 → 13–14 ms, 50K 83–96 → 28–70 ms, 100K 338–359 → 86–94 ms. The plan's "20K under 250 ms" passed on the old code too, so it proved nothing; the test runs at 100K with a 200 ms limit (5.6 s). Profiler at 100K: worst freeze per edit A 393 → 147 ms, B 429 → 187 ms (target ≤ 300 ms); edit time A 2.72 → 2.63 s, B 5.74 → 5.54 s (not worse). Seen but outside #3: bulk accept still freezes the loop up to ~0.7 s (it builds 300K rule objects in the request path; audit R1), and the profiler's own blocking EXPLAIN calls show as 0.6–0.7 s freezes. | agent |
+| 2026-10-07 | #4 | `pytest tests/test_promote_selection.py`; grep | `promote()` in `promote_urls` runs in `asyncio.to_thread`; no bare call left in `curation.py`. 9 passed. | agent |
+| 2026-10-07 | #5 | New test in `tests/test_page_snapshots.py`, also run with the memo switched off; profiler `results/local-20261007T215934Z/` | `RequestMemo` (read scope only) for latest_job, last_index_run, list_jobs, list_index_runs, latest_job_of_kind, count_deltas_for_llm, job_exists. Per Curate GET: latest_job 1, last_index_run 2; without the memo 2 / 4 and the test fails. Statements per render at 100K: Curate 97.2 → 85.2, Overview 36.2 → 27.2. Snapshots unchanged. | agent |
+| 2026-10-07 | #7 | New test in `tests/test_busy_database.py`; busy-database, snapshot and scale suites | 28 database writers mark the collection changed after they commit (`db._touches`); the bus listener ignores running-job progress events. Test: a progress event leaves `_gens` alone, a metadata write bumps it and the next Curate render shows the new suggestion, a finished job bumps it. 24 related tests and the snapshots pass. | agent |
+| 2026-10-07 | #8 | New `tests/test_progress_throttle.py` (interval shortened to 0.3 s) | `JobManager._publish_progress`: one write + event per job per 3 s, trailing publish with the last value; `phase`, `pid`, `ssm_command`, `external_ref` go out at once; a job's end cancels anything held back. Tests: 10 updates → 2 publishes, last = 10 and in the table; end announced at once, nothing after; phase change at once. Existing progress/poll tests pass. | agent |
+| 2026-10-07 | #9 | New test in `tests/test_scale.py`, also run without the guard; scratch timing test outside the repo, 100K curated rows | Curated upsert has `WHERE (…) IS DISTINCT FROM (…)`. Test: after a one-row edit and promote, only that row's `xmin` changes; without the guard every row changes and the test fails. Second promote after a one-row change at 100K: 1.72 → 1.33 s (laptop), and no 100K dead row versions. | agent |
+| 2026-10-07 | #16 | `pytest tests/test_auth.py` (2 new tests), role test also run without its cache clear | `Database.session_user`: 30 s per-process cache, dropped by set_password, set_role, set_active. Ten authenticated GETs → one `get_user`. Deactivate, password change and role change take effect on the next request (existing tests warm the cache first). Without the clear on role change the test fails. 16 passed. | agent |
+| 2026-10-07 | Tier 2 | `make lint`; `make test` | lint clean; 409 passed (400 + 9 new). | agent |

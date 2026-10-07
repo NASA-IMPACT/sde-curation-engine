@@ -10,6 +10,7 @@ import copy
 import functools
 import logging
 import sys
+import time
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Iterable
 from datetime import datetime
 from typing import Any, ClassVar, Literal
@@ -148,6 +149,27 @@ def _coalesced(fn):
     return wrapper
 
 
+def _touches(fn):
+    """A write that changes what a collection's pages show: once it has committed, mark the
+    collection changed (Database.touch), so coalesced page reads started before it are not shared
+    with anyone who asks afterwards. A running job's writes go through these methods too, so the
+    marking no longer depends on the job's progress events (which change nothing a page counts and
+    used to mark the collection changed every second). The collection is the first argument: its id,
+    an object with `collection_id`, or a list of such objects."""
+
+    @functools.wraps(fn)
+    async def wrapper(self: Database, first: Any, *args: Any, **kwargs: Any):
+        result = await fn(self, first, *args, **kwargs)
+        if isinstance(first, list):
+            first = first[0] if first else None
+        cid = first if isinstance(first, str) else getattr(first, "collection_id", None)
+        if isinstance(cid, str):
+            self.touch(cid)
+        return result
+
+    return wrapper
+
+
 async def _aiter[T](rows: Iterable[T] | AsyncIterable[T]) -> AsyncIterator[T]:
     if isinstance(rows, AsyncIterable):
         async for r in rows:
@@ -167,6 +189,33 @@ _BULK_ROWS = 5000
 async def _scalar(cur: psycopg.AsyncCursor) -> Any:
     row = await cur.fetchone()
     return None if row is None else next(iter(row.values()))
+
+
+# The engine is one asyncio process: anything done on the event loop without yielding freezes every
+# other request, SSE stream and health check for that long. Whole-collection reads and COPY writes
+# (a recompute on 100k URLs moves several hundred thousand rows each way) used to do all of their
+# per-row Python work in one go on the loop — about 0.4 s per edit on a laptop, measured by the
+# event-loop probe (looplag.py). Rows are now decoded and written in slices with a yield between
+# them, and objects are built from the rows in a worker thread (which the interpreter preempts
+# every few milliseconds, so the loop keeps running meanwhile).
+_SLICE_ROWS = 2000
+
+
+async def _fetch_all(cur: psycopg.AsyncCursor) -> list[Any]:
+    """cur.fetchall(), decoded `_SLICE_ROWS` rows at a time with a yield to the event loop between."""
+    out: list[Any] = []
+    while rows := await cur.fetchmany(_SLICE_ROWS):
+        out += rows
+        await asyncio.sleep(0)
+    return out
+
+
+async def _copy_rows(copy: Any, rows: Iterable[tuple]) -> None:
+    """Write prepared rows to a COPY, yielding to the event loop every `_SLICE_ROWS` rows."""
+    for i, row in enumerate(rows, 1):
+        await copy.write_row(row)
+        if i % _SLICE_ROWS == 0:
+            await asyncio.sleep(0)
 
 
 # Every curated column. The page text is not one of them: since V9 it lives once in `page_text`,
@@ -356,6 +405,7 @@ class Database:
         self._read_pool: AsyncConnectionPool | None = None
         self._flights = SingleFlight()
         self._gens: dict[str, int] = {}  # collection_id → bumped by touch() on every change
+        self._session_users: dict[int, tuple[float, User]] = {}  # user id → (expires, user): session_user
         # optional async hook(collection_id, old_status, new_status, note, actor) after every history row
         self.on_status_change = None
 
@@ -493,6 +543,7 @@ class Database:
             cur = await conn.execute("DELETE FROM collections WHERE collection_id=%s", (collection_id,))
             return cur.rowcount > 0
 
+    @_touches
     async def set_status(
         self, collection_id: str, new: Status, note: str | None = None, *, force: bool = False,
         actor: str | None = None,
@@ -556,6 +607,7 @@ class Database:
                 (at, capped, collection_id),
             )
 
+    @_touches
     async def set_index_key(self, collection_id: str, index_key: str, index_name: str | None) -> None:
         """The OpenSearch collection_key / collection_name this collection is indexed under."""
         async with self._conn() as conn:
@@ -582,6 +634,7 @@ class Database:
             row = await cur.fetchone()
             return bool(row["hit"] if isinstance(row, dict) else row[0])
 
+    @_touches
     async def set_division(self, collection_id: str, division: Division) -> None:
         """The curator's division for the whole collection (General = not assigned, so the AI is
         asked per page). The next recompute applies it to every URL no division rule decides."""
@@ -591,6 +644,7 @@ class Database:
                 (division.value, utcnow(), collection_id),
             )
 
+    @_touches
     async def set_flag(self, collection_id: str, needs_recuration: bool, reason: str | None = None) -> None:
         """Raise or clear the needs-re-curation flag; the reason is kept only while it is up."""
         async with self._conn() as conn:
@@ -599,6 +653,7 @@ class Database:
                 (needs_recuration, (reason or None) if needs_recuration else None, utcnow(), collection_id),
             )
 
+    @_touches
     async def set_review_round(self, collection_id: str, open_: bool) -> None:
         """Open or close a "Re-curate everything" round (Collection.review_round)."""
         async with self._conn() as conn:
@@ -644,6 +699,7 @@ class Database:
 
     # ── dump urls ──────────────────────────────────────────────────────
 
+    @_touches
     async def replace_dump(
         self, collection_id: str, rows: Iterable[DumpUrl] | AsyncIterable[DumpUrl],
         failures: list[DumpFailure] | None = None, *, dedupe_spellings: bool = False,
@@ -875,7 +931,8 @@ class Database:
                 "SELECT collection_id,url,scraped_title,content_type,depth,content_hash FROM dump_urls WHERE collection_id=%s",
                 (collection_id,),
             )
-            return [DumpUrl(**r) for r in await cur.fetchall()]
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: [DumpUrl(**r) for r in rows])
 
     async def dump_urls(self, collection_id: str) -> list[str]:
         async with self._conn() as conn:
@@ -907,7 +964,8 @@ class Database:
             cur = await conn.execute(
                 "SELECT url, reason FROM dump_failures WHERE collection_id=%s", (collection_id,)
             )
-            return {r["url"]: r["reason"] for r in await cur.fetchall()}
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: {r["url"]: r["reason"] for r in rows})
 
     async def list_dump_failures(self, collection_id: str) -> list[DumpFailure]:
         async with self._conn() as conn:
@@ -922,14 +980,16 @@ class Database:
             cur = await conn.execute(
                 "SELECT url, content_hash FROM dump_urls WHERE collection_id=%s", (collection_id,)
             )
-            return {r["url"]: r["content_hash"] for r in await cur.fetchall()}
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: {r["url"]: r["content_hash"] for r in rows})
 
     # ── deltas / curated ───────────────────────────────────────────────
 
     async def load_deltas(self, collection_id: str) -> list[DeltaUrl]:
         async with self._conn() as conn:
             cur = await conn.execute("SELECT * FROM delta_urls WHERE collection_id=%s", (collection_id,))
-            return [DeltaUrl(**r) for r in await cur.fetchall()]
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: [DeltaUrl(**r) for r in rows])
 
     async def get_delta(self, collection_id: str, url: str) -> DeltaUrl | None:
         async with self._conn() as conn:
@@ -1036,6 +1096,7 @@ class Database:
         "division_skipped",
     ))
 
+    @_touches
     async def replace_deltas(
         self, collection_id: str, deltas: list[DeltaUrl], effects: list[tuple[int, str, str]],
         *, keep_effects: bool = False, excluded_count: int | None = None,
@@ -1060,9 +1121,9 @@ class Database:
                 written += cur.rowcount
             else:
                 await cur.execute("CREATE TEMP TABLE delta_in (LIKE delta_urls INCLUDING DEFAULTS) ON COMMIT DROP")
+                delta_rows = await asyncio.to_thread(lambda: [tuple(getattr(d, c) for c in cols) for d in deltas])
                 async with cur.copy(f"COPY delta_in ({','.join(cols)}) FROM STDIN") as copy:
-                    for d in deltas:
-                        await copy.write_row(tuple(getattr(d, c) for c in cols))
+                    await _copy_rows(copy, delta_rows)
                 # indexed + analysed: the anti-join below must be a lookup per row whatever plan is
                 # chosen — without the index a generic (prepared) plan nested-looped 100k × 100k rows
                 await cur.execute("CREATE INDEX ON delta_in (url)")
@@ -1089,9 +1150,9 @@ class Database:
                     await cur.execute(
                         "CREATE TEMP TABLE effects_in (pattern_id bigint, url text, field text) ON COMMIT DROP"
                     )
+                    effect_rows = await asyncio.to_thread(lambda: list(set(effects)))
                     async with cur.copy("COPY effects_in (pattern_id,url,field) FROM STDIN") as copy:
-                        for row in set(effects):
-                            await copy.write_row(row)
+                        await _copy_rows(copy, effect_rows)
                     await cur.execute("CREATE INDEX ON effects_in (pattern_id, url, field)")
                     await cur.execute("ANALYZE effects_in")
                     await cur.execute(
@@ -1118,6 +1179,7 @@ class Database:
                      utcnow(), collection_id),
                 )
 
+    @_touches
     async def delete_deltas(self, collection_id: str, urls: list[str]) -> int:
         """Drop these rows from the review queue (a partial promote) and recount in SQL. The
         rule→URL effects stay: the rows became curated rows and the Curated table still explains
@@ -1135,6 +1197,7 @@ class Database:
             )
             return cur.rowcount
 
+    @_touches
     async def delete_effects(self, collection_id: str, urls: list[str]) -> None:
         """Forget the rule→URL effects of URLs that are in neither set any more (promoted tombstones)."""
         if not urls:
@@ -1144,6 +1207,7 @@ class Database:
                 "DELETE FROM pattern_effects WHERE collection_id=%s AND url = ANY(%s)", (collection_id, list(urls))
             )
 
+    @_touches
     async def set_delta_ai(self, collection_id: str, items: list[dict[str, Any]]) -> int:
         """Bulk-write AI suggestions for whole rows (never touches the effective fields). A
         re-classification replaces the previous answer, confidence included, and clears any
@@ -1164,6 +1228,7 @@ class Database:
             )
         return len(items)
 
+    @_touches
     async def set_delta_ai_errors(self, collection_id: str, items: list[tuple[str, str]]) -> int:
         """Record (url, error) for URLs whose Suggest metadata call failed. A previous answer stays:
         a failed re-classification does not throw away what the model said last time."""
@@ -1182,7 +1247,8 @@ class Database:
         cols = f"{_CURATED_COLS}, {_page_text('curated_urls')}" if with_text else _CURATED_COLS
         async with self._conn() as conn:
             cur = await conn.execute(f"SELECT {cols} FROM curated_urls WHERE collection_id=%s", (collection_id,))
-            return [CuratedUrl(**r) for r in await cur.fetchall()]
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: [CuratedUrl(**r) for r in rows])
 
     async def iter_curated_for_export(self, collection_id: str, chunk: int = 500) -> AsyncIterator[list[CuratedUrl]]:
         """The exportable curated rows (not excluded) with the text they were approved with, in URL
@@ -1205,6 +1271,7 @@ class Database:
                 rows = {r["url"]: r for r in await cur.fetchall()}
             yield [CuratedUrl(**rows[u]) for u in page if u in rows]
 
+    @_touches
     async def set_curated_edited_by(self, collection_id: str, items: list[tuple[str, str | None]]) -> None:
         """Re-attribute unchanged curated rows (no delta) after a recompute."""
         if not items:
@@ -1215,6 +1282,7 @@ class Database:
                 [(eb, collection_id, url) for url, eb in items],
             )
 
+    @_touches
     async def set_curated_excluded(self, collection_id: str, items: list[tuple[str, bool]]) -> None:
         """Flag curated rows an exclude rule now keeps out, in place: exclusions are decided by the
         rules, never queued as delta URLs (the next index run drops the rows). The row stays in the
@@ -1261,6 +1329,7 @@ class Database:
                 (collection_id,),
             ))
 
+    @_touches
     async def set_curated_crawl_failure(self, collection_id: str, items: list[tuple[str, str | None]]) -> None:
         """Flag (reason) or clear (None) curated rows after a recompute: the current dump lacks the
         URL but the crawl does not prove it gone, or the crawl fetched it again."""
@@ -1287,6 +1356,7 @@ class Database:
                 (collection_id,),
             ))
 
+    @_touches
     async def replace_curated(self, collection_id: str, rows: list[CuratedUrl], *, changed: bool = True) -> int:
         """Bulk-replace the curated set in one transaction; returns the included count (what
         `curated_count` holds — excluded rows are written but not counted). `changed` stamps
@@ -1306,16 +1376,16 @@ class Database:
                 "CREATE TEMP TABLE curated_in (LIKE curated_urls INCLUDING DEFAULTS) ON COMMIT DROP"
             )
             await conn.execute("ALTER TABLE curated_in ADD COLUMN full_text text")
+            copy_rows = await asyncio.to_thread(lambda: [(
+                r.collection_id, r.url, r.scraped_title, r.title, r.division, r.document_type,
+                r.excluded, r.content_hash or content_hash(r.full_text), r.edited_by,
+                r.crawl_failure, r.full_text,
+            ) for r in rows])
             async with conn.cursor() as cur, cur.copy(
                 "COPY curated_in (collection_id,url,scraped_title,title,division,document_type,excluded,"
                 "content_hash,edited_by,crawl_failure,full_text) FROM STDIN"
             ) as copy:
-                for r in rows:
-                    await copy.write_row((
-                        r.collection_id, r.url, r.scraped_title, r.title, r.division, r.document_type,
-                        r.excluded, r.content_hash or content_hash(r.full_text), r.edited_by,
-                        r.crawl_failure, r.full_text,
-                    ))
+                await _copy_rows(copy, copy_rows)
             # A row handed to us with its own text keeps it: file the blob under the hash that
             # fingerprints it, exactly as `replace_dump` does. A promote loads the curated set
             # without text and this does nothing — the row's hash already points at a blob the
@@ -1342,6 +1412,13 @@ class Database:
                 " title=EXCLUDED.title, division=EXCLUDED.division, document_type=EXCLUDED.document_type,"
                 " excluded=EXCLUDED.excluded, content_hash=EXCLUDED.content_hash, edited_by=EXCLUDED.edited_by,"
                 " crawl_failure=EXCLUDED.crawl_failure"
+                # only the rows that differ: a promote that changes 1,200 rows of 96,000 writes 1,200
+                # (every row was rewritten before — dead row versions and WAL for nothing)
+                " WHERE (curated_urls.scraped_title, curated_urls.title, curated_urls.division,"
+                " curated_urls.document_type, curated_urls.excluded, curated_urls.content_hash,"
+                " curated_urls.edited_by, curated_urls.crawl_failure) IS DISTINCT FROM (EXCLUDED.scraped_title,"
+                " EXCLUDED.title, EXCLUDED.division, EXCLUDED.document_type, EXCLUDED.excluded,"
+                " EXCLUDED.content_hash, EXCLUDED.edited_by, EXCLUDED.crawl_failure)"
             )
             if len(rows) >= _BULK_ROWS:
                 await conn.execute("ANALYZE curated_urls (collection_id, url, excluded)")
@@ -1350,6 +1427,7 @@ class Database:
 
     # ── index runs ─────────────────────────────────────────────────────
 
+    @_touches
     async def insert_index_run(self, r: IndexRun) -> IndexRun:
         async with self._conn() as conn:
             await conn.execute(
@@ -1366,6 +1444,7 @@ class Database:
             )
         return r
 
+    @_touches
     async def update_index_run(self, r: IndexRun) -> None:
         async with self._conn() as conn:
             await conn.execute(
@@ -1421,6 +1500,7 @@ class Database:
 
     # ── LLM suggestions ────────────────────────────────────────────────
 
+    @_touches
     async def clear_pending_pattern_suggestions(self, collection_id: str) -> None:
         async with self._conn() as conn:
             await conn.execute(
@@ -1442,6 +1522,7 @@ class Database:
             )
             return cur.rowcount
 
+    @_touches
     async def add_pattern_suggestions(self, collection_id: str, rows: list[dict[str, Any]]) -> int:
         """Insert pending suggestions; a (type, match) already present — pending from another
         batch, or accepted/rejected earlier — is skipped. Returns how many were new."""
@@ -1505,6 +1586,7 @@ class Database:
                 (state, actor, accepted_as, collection_id, sid),
             )
 
+    @_touches
     async def set_pattern_suggestions_state(
         self, collection_id: str, ids: list[int], state: str, *, actor: str | None = None
     ) -> int:
@@ -1603,7 +1685,8 @@ class Database:
             sql += f" AND NOT {self._HUMAN_RULE}"; args.append(field)
         async with self._conn() as conn:
             cur = await conn.execute(sql + " ORDER BY url", args)
-            return [(r["url"], r["v"]) for r in await cur.fetchall()]
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: [(r["url"], r["v"]) for r in rows])
 
     async def human_set_fields(self, collection_id: str, urls: list[str]) -> dict[str, set[str]]:
         """{url: {fields whose winning rule a person wrote}} — the rows the accept-all buttons pass
@@ -1744,6 +1827,7 @@ class Database:
                 "by_conf": {"high": r["hi"] or 0, "medium": r["med"] or 0, "low": r["lo"] or 0},
                 "failed": r["failed"] or 0, "retitled": r["retitled"] or 0}
 
+    @_touches
     async def clear_delta_ai_field(
         self, collection_id: str, field: str, url: str | None = None, conf: str | None = None,
         urls: list[str] | None = None,
@@ -1765,6 +1849,7 @@ class Database:
             cur = await conn.execute(sql, args)
             return cur.rowcount
 
+    @_touches
     async def clear_delta_ai(self, collection_id: str, url: str, field: str) -> None:
         assert field in ("title", "division", "document_type")
         async with self._conn() as conn:
@@ -1800,6 +1885,7 @@ class Database:
             r = await cur.fetchone()
         return {k: r[k] or 0 for k in ("urls", "title", "division", "general", "document_type", "duplicate")}
 
+    @_touches
     async def set_delta_ai_titles(self, collection_id: str, items: list[dict[str, Any]]) -> int:
         """Replace just the AI title suggestion (value, confidence, model) of these rows: the other
         fields' suggestions and any recorded failure stay as they are. `before`: the title the row
@@ -1909,6 +1995,7 @@ class Database:
 
     # ── patterns ───────────────────────────────────────────────────────
 
+    @_touches
     async def insert_pattern(self, p: Pattern) -> Pattern:
         """Raises ConflictError when the collection already has that (type, match) rule."""
         try:
@@ -1923,6 +2010,7 @@ class Database:
             raise ConflictError(f"{p.type} rule {p.match!r} already exists") from e
         return p
 
+    @_touches
     async def insert_patterns(self, rows: list[Pattern]) -> int:
         """Bulk insert; rows identical to an existing (type, match) are skipped. One transaction.
         COPY + one INSERT … SELECT: bulk-accepting AI metadata inserts three rules per URL."""
@@ -1933,11 +2021,13 @@ class Database:
                 "CREATE TEMP TABLE patterns_in (n bigint, collection_id text, type text, match text, value text,"
                 " created_at timestamptz, created_by text, source text) ON COMMIT DROP"
             )
+            copy_rows = await asyncio.to_thread(lambda: [
+                (n, p.collection_id, p.type, p.match, p.value, p.created_at, p.created_by, p.source)
+                for n, p in enumerate(rows)])
             async with cur.copy(
                 "COPY patterns_in (n,collection_id,type,match,value,created_at,created_by,source) FROM STDIN"
             ) as copy:
-                for n, p in enumerate(rows):
-                    await copy.write_row((n, p.collection_id, p.type, p.match, p.value, p.created_at, p.created_by, p.source))
+                await _copy_rows(copy, copy_rows)
             # ORDER BY n: ids are handed out in the order given, and the newest (highest id) rule wins
             await cur.execute(
                 "INSERT INTO patterns (collection_id,type,match,value,created_at,created_by,source)"
@@ -1949,6 +2039,7 @@ class Database:
                 await cur.execute("ANALYZE patterns (collection_id, type, match)")
             return inserted
 
+    @_touches
     async def delete_exact_patterns(self, collection_id: str, type_: str, matches: list[str]) -> int:
         if not matches:
             return 0
@@ -1965,16 +2056,18 @@ class Database:
         """Every rule, oldest first, as the slim engine view (models.Rule), read through a
         server-side cursor so the driver's row dicts never pile up next to the result."""
         types, sources = {t.value: t for t in PatternType}, {x.value: x for x in RuleSource}
-        out: list[Rule] = []
+        raw: list[tuple] = []
         async with self._conn() as conn, conn.cursor(name="rules", row_factory=tuple_row) as cur:
             await cur.execute(
                 "SELECT id, type, match, value, source FROM patterns WHERE collection_id=%s ORDER BY id",
                 (collection_id,),
             )
             while rows := await cur.fetchmany(10_000):
-                out += [Rule(i, types[t], m, sys.intern(v) if v is not None else None, sources[x])
-                        for i, t, m, v, x in rows]
-        return out
+                raw += rows
+        # built off the event loop (300k rules when every AI value has been accepted)
+        return await asyncio.to_thread(
+            lambda: [Rule(i, types[t], m, sys.intern(v) if v is not None else None, sources[x])
+                     for i, t, m, v, x in raw])
 
     async def iter_pattern_rows(self, collection_id: str, chunk: int = 5000) -> AsyncIterator[list[dict[str, Any]]]:
         """Every rule as a plain row, oldest first, `chunk` at a time (the patterns.yaml writer). Keyset pages, each
@@ -2031,6 +2124,7 @@ class Database:
             )
             return [(r["id"], r["type"], r["match"]) for r in await cur.fetchall()]
 
+    @_touches
     async def delete_patterns(self, collection_id: str, ids: list[int]) -> int:
         if not ids:
             return 0
@@ -2103,6 +2197,7 @@ class Database:
         return {"total": sum(r["n"] for r in rows), "exact": sum(r["exact"] for r in rows),
                 "by_source": {r["source"]: r["n"] for r in rows}}
 
+    @_touches
     async def delete_pattern(self, collection_id: str, pattern_id: int) -> bool:
         async with self._conn() as conn:
             cur = await conn.execute(
@@ -2237,6 +2332,28 @@ class Database:
             row = await cur.fetchone()
         return self._user(row) if row else None
 
+    # Every request with a session cookie, polls and SSE connects included, looked its user up in the
+    # database. The answer changes only when a password, role or active flag changes, and each of those
+    # writers drops its user from this cache. On another engine process the change takes effect when
+    # that process's entry expires.
+    SESSION_USER_TTL_S = 30.0
+
+    async def session_user(self, user_id: int) -> User | None:
+        """get_user for the login check, cached for SESSION_USER_TTL_S."""
+        now = time.monotonic()
+        hit = self._session_users.get(user_id)
+        if hit is not None and hit[0] > now:
+            return hit[1].model_copy()
+        user = await self.get_user(user_id)
+        if user is None:
+            self._session_users.pop(user_id, None)
+            return None
+        self._session_users[user_id] = (now + self.SESSION_USER_TTL_S, user)
+        return user.model_copy()
+
+    def _forget_session_user(self, user_id: int) -> None:
+        self._session_users.pop(user_id, None)
+
     async def get_user_by_username(self, username: str) -> User | None:
         async with self._conn() as conn:
             cur = await conn.execute("SELECT * FROM users WHERE lower(username)=lower(%s)", (username,))
@@ -2259,18 +2376,21 @@ class Database:
                 "UPDATE users SET password_hash=%s, session_version=session_version+1, updated_at=%s WHERE id=%s",
                 (password_hash, utcnow(), user_id),
             )
+        self._forget_session_user(user_id)
 
     async def set_role(self, user_id: int, role: Role) -> None:
         async with self._conn() as conn:
             await conn.execute(
                 "UPDATE users SET role=%s, updated_at=%s WHERE id=%s", (role, utcnow(), user_id)
             )
+        self._forget_session_user(user_id)
 
     async def set_active(self, user_id: int, active: bool) -> None:
         async with self._conn() as conn:
             await conn.execute(
                 "UPDATE users SET active=%s, updated_at=%s WHERE id=%s", (active, utcnow(), user_id)
             )
+        self._forget_session_user(user_id)
 
     # ── audit ledger ───────────────────────────────────────────────────
 

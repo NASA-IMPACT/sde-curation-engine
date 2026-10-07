@@ -65,6 +65,12 @@ from .models import (
 log = logging.getLogger(__name__)
 
 # Suggest metadata writes answers to the DB in small chunks (cancel keeps them, commits stay few).
+# A running job's progress is written to job_runs and announced to every open tab at most this often.
+# Each announcement used to be one UPDATE and one event per second per job (the LLM pool's pace); the
+# browser shows at most one refresh per 3 s per element anyway (base.html sseRefresh), so curators see
+# the same. Progress a restart depends on, and every change of phase or state, goes out at once.
+PROGRESS_EVERY_S = 3.0
+_URGENT_PROGRESS = frozenset({"phase", "pid", "ssm_command", "external_ref"})
 AI_FLUSH_ROWS = 25
 AI_FLUSH_SECONDS = 2.0
 # How often the crawl ingest reports the pages it has read. Each report is one job-row UPDATE and
@@ -105,6 +111,8 @@ class JobManager:
         self._starting: set[str] = set()  # collections with a job being created (TOCTOU guard)
         self._cancel_actor: dict[int, str] = {}  # job id → who asked for the cancel
         self._shutting_down = False  # set by shutdown(): a scrape then stays 'running' for the next start
+        self._last_progress: dict[int, float] = {}  # job id → when its progress was last published
+        self._trailing: dict[int, asyncio.Task] = {}  # job id → the pending publish of later progress
 
     # ── infrastructure ─────────────────────────────────────────────────
 
@@ -126,6 +134,8 @@ class JobManager:
         return None
 
     def _emit(self, c: Collection | str, job: JobRun | None = None) -> None:
+        if job is not None and job.state not in (JobState.QUEUED, JobState.RUNNING):
+            self._forget_progress(job.id)  # its final state is out: no progress after it
         cid = c if isinstance(c, str) else c.collection_id
         data: dict[str, Any] = {"collection_id": cid}
         if not isinstance(c, str):
@@ -133,6 +143,39 @@ class JobManager:
         if job:
             data["job"] = {"id": job.id, "kind": job.kind, "state": job.state, "progress": job.progress}
         self.bus.publish("collection", data)
+
+    async def _publish_progress(self, c: Collection, job: JobRun, *, urgent: bool = False) -> None:
+        """Persist and announce `job.progress` (already merged by the caller), at most once every
+        PROGRESS_EVERY_S. Progress that arrives sooner is published when the interval ends, so the
+        last value always goes out. `urgent`: now, whatever the interval."""
+        now = time.monotonic()
+        last = self._last_progress.get(job.id)
+        if urgent or last is None or now - last >= PROGRESS_EVERY_S:
+            pending = self._trailing.pop(job.id, None)
+            if pending is not None:
+                pending.cancel()
+            self._last_progress[job.id] = now
+            await self.db.update_job(job)
+            self._emit(c, job)
+        elif job.id not in self._trailing:
+            self._trailing[job.id] = asyncio.create_task(
+                self._publish_later(c, job, PROGRESS_EVERY_S - (now - last)), name=f"progress-{job.id}")
+
+    async def _publish_later(self, c: Collection, job: JobRun, delay: float) -> None:
+        await asyncio.sleep(delay)
+        if self._trailing.get(job.id) is not asyncio.current_task():
+            return
+        del self._trailing[job.id]
+        if job.state in (JobState.QUEUED, JobState.RUNNING):
+            self._last_progress[job.id] = time.monotonic()
+            await self.db.update_job(job)
+            self._emit(c, job)
+
+    def _forget_progress(self, job_id: int) -> None:
+        self._last_progress.pop(job_id, None)
+        pending = self._trailing.pop(job_id, None)
+        if pending is not None and pending is not asyncio.current_task():
+            pending.cancel()
 
     async def _spawn(self, job: JobRun, coro) -> JobRun:
         # the work scope: a job a page request started must not run on the read pool, under its
@@ -157,6 +200,8 @@ class JobManager:
 
     async def shutdown(self) -> None:
         self._shutting_down = True
+        for job_id in list(self._trailing):
+            self._forget_progress(job_id)
         for t in list(self._tasks.values()):
             t.cancel()
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
@@ -242,8 +287,7 @@ class JobManager:
                     job.progress = {**job.progress, **p}
                     if "pid" in p or "ssm_command" in p:
                         job.external_ref = str(p.get("pid") or p.get("ssm_command"))
-                    await self.db.update_job(job)
-                    self._emit(c, job)
+                    await self._publish_progress(c, job, urgent=not _URGENT_PROGRESS.isdisjoint(p))
 
                 if reuse:
                     result = await self.scraper.fetch_existing(c, on_progress)
@@ -366,8 +410,7 @@ class JobManager:
         """Merge a progress dict into the job, persist it and publish it over SSE."""
         async def on_progress(p: dict[str, Any]) -> None:
             job.progress = {**job.progress, **p}
-            await self.db.update_job(job)
-            self._emit(c, job)
+            await self._publish_progress(c, job, urgent=not _URGENT_PROGRESS.isdisjoint(p))
         return on_progress
 
     async def _guarded(self, c: Collection, job: JobRun, body) -> None:
@@ -744,8 +787,7 @@ class JobManager:
 
             async def progress(p: dict[str, Any]) -> None:
                 job.progress = {**job.progress, **p}
-                await self.db.update_job(job)
-                self._emit(c, job)
+                await self._publish_progress(c, job, urgent=not _URGENT_PROGRESS.isdisjoint(p))
 
             # 1. pin the OpenSearch collection this indexes as, then export: stream curated
             #    (non-excluded) rows — with the text they were approved with — to a temp jsonl,
@@ -846,8 +888,7 @@ class JobManager:
 
             async def progress(p: dict[str, Any]) -> None:
                 job.progress = {**job.progress, **p}
-                await self.db.update_job(job)
-                self._emit(c, job)
+                await self._publish_progress(c, job, urgent=not _URGENT_PROGRESS.isdisjoint(p))
 
             await progress({"source_test_run": source.run_id, "exported": source.exported})
             st = await publisher.run(c.collection_key, run.run_id, source.run_id, progress,
@@ -991,8 +1032,7 @@ class JobManager:
 
             async def progress(p: dict[str, Any]) -> None:
                 job.progress = {**job.progress, **p}
-                await self.db.update_job(job)
-                self._emit(c, job)
+                await self._publish_progress(c, job, urgent=not _URGENT_PROGRESS.isdisjoint(p))
 
             job.run_id = run.run_id
             await self.db.update_job(job)
