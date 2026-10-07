@@ -84,7 +84,7 @@ class CurationService:
             division=c.division if division_assigned(c.division) else None,
             review_all=review_all,
         )
-        await self.db.replace_deltas(c.collection_id, ds.deltas, ds.effects)
+        await self.db.replace_deltas(c.collection_id, ds.deltas, ds.effects, excluded_count=ds.excluded)
         if ds.curated_edited_by:
             await self.db.set_curated_edited_by(c.collection_id, ds.curated_edited_by)
         if ds.curated_crawl_failure:

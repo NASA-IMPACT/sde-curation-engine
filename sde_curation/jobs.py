@@ -19,7 +19,7 @@ from .backends.s3 import S3
 from .backends.scrape import DocumentSource, ProgressCb, ScrapeBackend, ScrapeError, iter_documents
 from .backends.validate import NoIndexAccess, validate_direct
 from .config import Settings
-from .db import Database
+from .db import Database, work_context
 from .engine.export import (
     build_manifest,
     export_lines,
@@ -135,7 +135,9 @@ class JobManager:
         self.bus.publish("collection", data)
 
     async def _spawn(self, job: JobRun, coro) -> JobRun:
-        task = asyncio.create_task(coro, name=f"job-{job.id}")
+        # the work scope: a job a page request started must not run on the read pool, under its
+        # statement timeout (a recompute on 100k URLs is minutes of legitimate work)
+        task = asyncio.create_task(coro, name=f"job-{job.id}", context=work_context())
         task.job = job  # type: ignore[attr-defined]
         self._tasks[job.id] = task
         task.add_done_callback(lambda t: self._tasks.pop(job.id, None))

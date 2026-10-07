@@ -22,7 +22,7 @@ rq={{ (f.rq or '')|urlencode }}&rtype={{ f.rtype or '' }}&rsource={{ f.rsource o
 {% set filtered = f.rq or f.rtype or f.rsource or f.rscope %}
 {% if rules_total %}
 <p class="muted small">Rules belong to this collection only. {% for src, n in source_counts.items() %}<a class="edited e-src-{{ src }}" href="{{ base }}&rsource={{ src }}" title="show only these rules">{{ source_label.get(src, src) }} {{ n }}</a> {% endfor %}</p>
-<form method="get" action="/collections/{{ cid }}" class="tbl-toolbar" hx-boost="true" hx-target="#tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-push-url="true">
+<form method="get" action="/collections/{{ cid }}" class="tbl-toolbar" hx-boost="true" hx-target="#tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace" hx-push-url="true">
   <input type="hidden" name="tab" value="rules">{% if f.rsort %}<input type="hidden" name="rsort" value="{{ f.rsort }}"><input type="hidden" name="rdir" value="{{ f.rdir }}">{% endif %}
   <input type="search" name="rq" value="{{ f.rq or '' }}" placeholder="search match / value" size="26" aria-label="search rules">
   <select name="rtype" aria-label="rule type"><option value="">any type</option>{% for t in pattern_types %}<option {% if f.rtype == t %}selected{% endif %}>{{ t }}</option>{% endfor %}</select>

@@ -93,6 +93,36 @@ async def test_health_and_raw_helpers(db):
     assert await db.fetchval("SELECT 1 WHERE false") is None
 
 
+def test_v12_forgets_counts_stored_while_older_code_ran(pg_url):
+    """Dev, 2026-10-06: V11 applied (counts stored), then code from before V11 ran recomputes that never
+    updated them. V12 makes every stored count unknown again; the engine recounts each one when first
+    wanted, and a second migrate leaves later counts alone."""
+    import psycopg
+
+    from sde_curation.schema import MIGRATIONS, migrate_sync
+
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS mig12 CASCADE; CREATE SCHEMA mig12; SET search_path TO mig12")
+        conn.execute("CREATE TABLE schema_version (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())")
+        for version, sql in MIGRATIONS:
+            if version <= 11:
+                conn.execute(sql)
+                conn.execute("INSERT INTO schema_version (version) VALUES (%s)", (version,))
+        conn.execute("INSERT INTO collections (collection_id,name,seed_url,division,connector,max_pages,status,"
+                     "created_at,updated_at,excluded_count) VALUES"
+                     " ('a','A','https://a','General','crawler',10,'curating',now(),now(),97111),"
+                     " ('b','B','https://b','General','crawler',10,'curating',now(),now(),NULL)")
+        try:
+            assert migrate_sync(conn) == 12
+            assert conn.execute("SELECT collection_id, excluded_count FROM collections ORDER BY 1").fetchall() == [
+                ("a", None), ("b", None)]
+            conn.execute("UPDATE collections SET excluded_count=3 WHERE collection_id='a'")  # recounted since
+            assert migrate_sync(conn) == 12  # applied once: a later count stays
+            assert conn.execute("SELECT excluded_count FROM collections WHERE collection_id='a'").fetchone() == (3,)
+        finally:
+            conn.execute("DROP SCHEMA mig12 CASCADE")
+
+
 def test_v2_backfills_curated_text_from_the_dump(pg_url):
     """Upgrading a v1 database: curated rows take the dump text (what the export shipped for them),
     a curated URL the dump no longer has stays NULL, and re-running migrations is a no-op."""
@@ -116,7 +146,7 @@ def test_v2_backfills_curated_text_from_the_dump(pg_url):
         conn.execute("INSERT INTO curated_urls (collection_id,url,excluded) VALUES"
                      " ('c','https://c/a',false), ('c','https://c/gone',false), ('c','https://c/out',true)")
         try:
-            assert migrate_sync(conn) == 10
+            assert migrate_sync(conn) == 12
             # V2 put the dump text on the curated row; V9 moved both onto one blob keyed by the
             # content hash it gives a row that predates hashing, so the text survives shared
             rows = dict(conn.execute(
@@ -138,6 +168,8 @@ def test_v2_backfills_curated_text_from_the_dump(pg_url):
             # a collection nobody has curated stays NULL
             assert dict(conn.execute("SELECT collection_id, curated_by FROM collections").fetchall()) == {
                 "c": "carol", "g": None}
-            assert migrate_sync(conn) == 10  # idempotent: nothing left to apply
+            # V11: the excluded count is not backfilled — unknown until it is first wanted
+            assert conn.execute("SELECT COUNT(*) FROM collections WHERE excluded_count IS NULL").fetchone() == (2,)
+            assert migrate_sync(conn) == 12  # idempotent: nothing left to apply
         finally:
             conn.execute("DROP SCHEMA mig CASCADE")

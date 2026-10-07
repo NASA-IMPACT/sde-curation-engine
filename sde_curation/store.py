@@ -14,6 +14,7 @@ from pathlib import Path
 
 import yaml
 
+from .db import work_context
 from .models import Collection, Pattern, StatusHistory
 
 log = logging.getLogger(__name__)
@@ -140,7 +141,8 @@ class PatternsFile:
             return
         self._dirty[collection_id] = time.monotonic()
         if collection_id not in self._tasks:
-            self._tasks[collection_id] = asyncio.create_task(self._drain(collection_id), name=f"patterns-yaml-{collection_id}")
+            self._tasks[collection_id] = asyncio.create_task(self._drain(collection_id), name=f"patterns-yaml-{collection_id}",
+                                                              context=work_context())
 
     async def flush(self, collection_id: str | None = None) -> None:
         tasks = [(cid, t) for cid, t in list(self._tasks.items()) if collection_id in (None, cid)]

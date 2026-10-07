@@ -420,8 +420,13 @@ current after a promote and at shutdown). A Suggest-metadata job interrupted by 
 `LLM_RESUME_AFTER_RESTART` (3) times; a job a curator cancelled stays cancelled.
 
 **Data layer**
-- PostgreSQL through a small connection pool (`DB_POOL_SIZE`, default 16); every `Database`
-  method is one transaction, and status transitions lock the collection row. The job registry
+- PostgreSQL through two connection pools: the work pool (`DB_POOL_SIZE`, default 16) for jobs
+  and curator actions, with no time limit, and the read pool (`DB_READ_POOL_SIZE`, default 12) for
+  page requests (GET), whose statements stop after `DB_READ_STATEMENT_TIMEOUT_S`. A page that
+  slow, or one that waits `DB_READ_WAIT_S` for a free connection, answers 503 + `Retry-After`
+  instead of piling up behind itself; jobs and pages never starve each other. Identical page
+  reads of one collection's counts run once at a time and are shared (a refresh after a change
+  always counts afresh). Every `Database` method is one transaction, and status transitions lock the collection row. The job registry
   and per-collection locks still live in memory, so the ECS service is pinned to one task —
   **do not run two replicas** until those move into the database.
 - Curation edits have no stale-edit check. Two curators editing the same row on the same
@@ -450,7 +455,11 @@ current after a promote and at shutdown). A Suggest-metadata job interrupted by 
 | Key | Purpose |
 |---|---|
 | `DATABASE_URL` or `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_SSLMODE` | PostgreSQL. One URL locally (`make db-up` → `postgresql://engine:engine@localhost:5432/engine`); the ECS task gets the parts, with user/password from the RDS secret |
-| `DB_POOL_SIZE` (16) | connections per engine process |
+| `DB_POOL_SIZE` (16) | work-pool connections per engine process (jobs, curator actions; no statement limit) |
+| `DB_READ_POOL_SIZE` (12) | read-pool connections per engine process (page requests) |
+| `DB_READ_STATEMENT_TIMEOUT_S` (30) | a page request's statement is cancelled after this long → 503 |
+| `DB_READ_WAIT_S` (10) | how long a page request waits for a free read connection → 503 |
+| `HEALTH_DB_TIMEOUT_S` (3) | `/health/db` answers 503 when no read connection answers within this long |
 | `BULK_JOB_MIN_URLS` (20000) | dump URLs from which recompute / accept-all run as background jobs (0 = always) |
 | `DATA_DIR` | `collections/<id>/{collection,patterns}.yaml`, index logs, scrape jobs |
 | `CRAWLER_ROOT`, `CRAWLER_PYTHON` | crawl4ai repo and its interpreter |
@@ -501,7 +510,8 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `GET …/suggestions?state=`, `POST …/suggestions/{sid}/accept\|reject` | pattern suggestions |
 | `POST …/ai/accept\|reject` `{url, field}` | per-URL metadata suggestion |
 | `POST …/ai/bulk` `{decision, field?, url?, conf?}` | decide many at once; an accept without `url` passes over the fields your own rules decide |
-| `GET /health` | `{ok, db, sse_clients}` |
+| `GET /health` | liveness for the ALB: `{ok, sse_clients}`; never touches the database, so a busy database does not get the engine replaced |
+| `GET /health/db` | `{ok, db, pools}` — a read-pool ping within `HEALTH_DB_TIMEOUT_S`, plus both pools' counters; 503 when it does not answer |
 
 ## Testing the workflow by hand
 1. Dashboard → add `https://aurorasaurus.org` (max pages 15) → **Scrape**; watch the spinner, then

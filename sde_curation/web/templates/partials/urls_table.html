@@ -24,7 +24,7 @@ q={{ (q or '')|urlencode }}&kind={{ kind or '' }}&excluded={{ '' if excluded is 
 
 {# hx-boost on this form also boosts the links inside it (filters, paging): fine for pages, but the
    CSV link opts out — boosted, htmx fetches the CSV and swaps "#tab-body" out of it, blanking the tab #}
-<form method="get" action="/collections/{{ cid }}" class="tbl-toolbar" hx-boost="true" hx-target="#tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-push-url="true">
+<form method="get" action="/collections/{{ cid }}" class="tbl-toolbar" hx-boost="true" hx-target="#tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace" hx-push-url="true">
   <input type="hidden" name="tab" value="{{ set }}">{% if selected %}<input type="hidden" name="step" value="{{ selected }}">{% endif %}{% if sort %}<input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}">{% endif %}{% if match %}<input type="hidden" name="match" value="{{ match }}">{% endif %}
   {% if match %}<span class="kind k-modified nowrap" title="only the URLs this rule matches (from the Rules table)">rule <code>{{ match }}</code></span>{% endif %}
   <input type="search" name="q" value="{{ q or '' }}" placeholder="search url / title" size="28" aria-label="search">

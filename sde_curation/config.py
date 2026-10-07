@@ -33,6 +33,19 @@ class Settings(BaseSettings):
     # connections per engine process. Every recompute, job and poll takes one for each transaction;
     # four curators on big collections kept 8 busy and requests queued for seconds behind them.
     db_pool_size: int = Field(default=16, ge=1, le=64)
+    # Page requests (GET/HEAD: pages, tabs, the fragments every open tab re-fetches on job events)
+    # take their own pool, so a burst of them never starves a job or a curator's action, and the
+    # reverse. Their statements are cut off after db_read_statement_timeout_s: a page that slow
+    # answers 503 instead of holding a connection while more copies of it queue up behind it.
+    # Actions and jobs (the work pool) have no limit — a promote on 100k URLs must not stop half-way.
+    db_read_pool_size: int = Field(default=12, ge=1, le=64)
+    db_read_statement_timeout_s: float = Field(default=30.0, gt=0)
+    # how long a page request waits for a free read connection before answering 503 (the wait plus
+    # the query must stay under CloudFront's 60 s, or the curator gets a 504 page instead)
+    db_read_wait_s: float = Field(default=10.0, gt=0)
+    # /health is liveness only (the ALB replaces the task when it fails). /health/db answers 503 when
+    # no database connection is free within this long.
+    health_db_timeout_s: float = Field(default=3.0, gt=0)
     # Bulk curation changes (Start curating / recompute, accept-all) on a collection with at least this
     # many dump URLs run as a background job: a request has 60 s before CloudFront gives up on it, and
     # an error page for work that is still going on makes the curator click again. 0 = always a job.

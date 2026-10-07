@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 
@@ -12,8 +12,13 @@ class EventBus:
     def __init__(self, maxsize: int = 256):
         self._subs: set[asyncio.Queue[dict[str, Any]]] = set()
         self._maxsize = maxsize
+        # called with (event, data) before the subscribers hear of it: the web layer marks the
+        # collection changed for the Database's coalesced reads (Database.touch)
+        self.listeners: list[Callable[[str, dict[str, Any]], None]] = []
 
     def publish(self, event: str, data: dict[str, Any]) -> None:
+        for listen in self.listeners:
+            listen(event, data)
         msg = {"event": event, "data": data}
         for q in list(self._subs):
             try:

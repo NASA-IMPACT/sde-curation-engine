@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import hashlib
 import logging
@@ -15,11 +16,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import psycopg
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sse_starlette.sse import EventSourceResponse
 
@@ -36,6 +39,7 @@ from ..db import (
     SOURCE_LABEL,
     ConflictError,
     Database,
+    db_scope,
 )
 from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
@@ -392,12 +396,65 @@ def htmx_done(request: Request, payload, *, then: str | None = None):
     return JSONResponse(jsonable_encoder(payload), headers=headers)
 
 
+_COLLECTION_PATH = re.compile(r"^/(?:api/)?collections/([^/?#]+)")
+_BUSY = (psycopg.errors.QueryCanceled, PoolTimeout)
+
+
+def database_busy(method: str, path: str, exc: Exception) -> JSONResponse:
+    """A request whose query outran the read pool's statement timeout, or found no free connection
+    in time: 503 + Retry-After, not a stack trace. An htmx fragment keeps what it showed (htmx does
+    not swap error responses) and the next refresh tries again."""
+    what = "took too long" if isinstance(exc, psycopg.errors.QueryCanceled) else "found no free database connection"
+    log.warning("503 %s %s: %s", method, path, what)
+    return JSONResponse({"detail": f"The server is busy (this request {what}). Try again in a few seconds."},
+                        status_code=503, headers={"Retry-After": "5"})
+
+
+class DbScope:
+    """ASGI middleware, outermost: which database pool a request uses (see db.db_scope). A browser
+    fetching something (GET/HEAD) reads on the read pool, under its statement timeout; anything that
+    changes something works on the work pool. When a change to a collection is over, its coalesced
+    reads are marked stale (Database.touch), so the refresh that follows counts afresh."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        reading = scope["method"] in ("GET", "HEAD")
+        token = db_scope.set("read" if reading else "work")
+        started = False
+
+        async def send_started(message):
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_started)
+        except _BUSY as e:  # raised outside the routes (auth's session lookup): same 503 as theirs
+            if started:
+                raise
+            await database_busy(scope["method"], scope["path"], e)(scope, receive, send)
+        finally:
+            db_scope.reset(token)
+            if not reading and (m := _COLLECTION_PATH.match(scope["path"])):
+                database = getattr(scope["app"].state, "db", None)
+                if database is not None:
+                    database.touch(m.group(1))
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        db = await Database(settings.resolved_database_url, pool_size=settings.db_pool_size).connect()
+        db = await Database(
+            settings.resolved_database_url, pool_size=settings.db_pool_size,
+            read_pool_size=settings.db_read_pool_size, read_statement_timeout_s=settings.db_read_statement_timeout_s,
+            read_wait_s=settings.db_read_wait_s,
+        ).connect()
         app.state.settings = settings
         app.state.db = db
         app.state.notifier = Notifier(settings.notify_webhook_url, base_url=settings.public_base_url)
@@ -416,6 +473,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # first start with login enabled: APP_PASSWORD seeds the bootstrap admin account
             await db.create_user("admin", auth.hash_password(settings.app_password), Role.ADMIN)
         app.state.bus = EventBus()
+        # a job's progress, a finished job, a curator's change: whatever is announced about a
+        # collection makes its coalesced reads stale for whoever asks next
+        def touch_collection(_event: str, data: dict) -> None:
+            if isinstance(cid := data.get("collection_id"), str):
+                db.touch(cid)
+
+        app.state.bus.listeners.append(touch_collection)
         jobs = JobManager(
             settings, db, app.state.bus, scraper=make_scrape_backend(settings),
             llm=lambda: make_llm(settings),  # lazy: a missing API key only fails the LLM job
@@ -565,15 +629,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health(request: Request) -> dict:
+        """Liveness, for the ALB: the process answers. No database: when the database is busy the
+        engine is still alive, and replacing it only drops every curator's page and running job (a
+        restart does nothing for the database — test, 2026-10-06). /health/db says how it is."""
+        return {"ok": True, "sse_clients": bus(request).subscriber_count}
+
+    @app.get("/health/db")
+    async def health_db(request: Request) -> JSONResponse:
+        """Readiness of the database, for monitoring and load tests: a page-request (read pool)
+        connection answers within health_db_timeout_s. 503 when it does not."""
+        stats: dict = {}
         try:
-            ok = await db(request).ping()
+            stats = db(request).pool_stats()
+            ok = await asyncio.wait_for(db(request).ping(), timeout=settings.health_db_timeout_s)
         except Exception as e:  # noqa: BLE001 - surfaced to the caller, not hidden
-            return {"ok": False, "db": f"error: {e}"}
-        return {
-            "ok": ok,
-            "db": "ok" if ok else "error",
-            "sse_clients": bus(request).subscriber_count,
-        }
+            reason = "timed out" if isinstance(e, TimeoutError) else f"{type(e).__name__}: {e}"
+            return JSONResponse({"ok": False, "db": f"error: {reason}", "pools": stats}, status_code=503)
+        return JSONResponse({"ok": ok, "db": "ok" if ok else "error", "pools": stats}, status_code=200 if ok else 503)
 
     # ── pages ──────────────────────────────────────────────────────────
 
@@ -1110,7 +1182,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         jobs = await d.list_jobs(c.collection_id, limit=20)
         counts = await d.count_deltas_by_kind(c.collection_id)
         del counts["total"]
-        counts["excluded"] = await d.count_excluded_by_rules(c.collection_id)  # rules, not deltas
+        # rules, not deltas; stored by the recompute — counting it is a multi-second join on 100k URLs
+        counts["excluded"] = c.excluded_count if c.excluded_count is not None else await d.excluded_count(c.collection_id)
         counts["kept"] = await d.count_curated_unreachable(c.collection_id) if c.curated_rows else 0
         runs = await d.list_index_runs(c.collection_id, limit=5)
         failed = jobs[0] if jobs and jobs[0].state == "failed" else None
@@ -2070,6 +2143,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if me and me.id == u.id:  # our own session_version just changed: keep this session alive
                 set_session_cookie(resp, await db(request).get_user(u.id))
             return resp
+
+    # ── a busy database ────────────────────────────────────────────────
+
+    async def busy_handler(request: Request, exc: Exception) -> Response:
+        return database_busy(request.method, request.url.path, exc)
+
+    for exc_type in _BUSY:
+        app.add_exception_handler(exc_type, busy_handler)
+
+    # outermost (added last): auth's session lookups run in the request's scope too
+    app.add_middleware(DbScope)
 
     # ── SSE ────────────────────────────────────────────────────────────
 

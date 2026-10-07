@@ -1,9 +1,20 @@
 {# The stepper. A step is a link to ?step=…: the body below it (step panel, or the tab row under
-   Curating / Curated) is swapped in place and the URL updated, so the selection survives reloads. #}
+   Curating / Curated) is swapped in place and the URL updated, so the selection survives reloads.
+   hx-sync on the link itself: without it the link inherited the wrapper's `this:replace`, so the
+   stepper's own refresh (every SSE burst and every 5 s while a job runs) aborted the click whenever
+   the step's page took longer than that — a step that would not open while a job ran (test,
+   2026-10-06). The click queues on #tab-body instead, where it replaces a #job-watch poll in
+   flight and makes the next ones wait (collection.html).
+   `global #tab-body`: htmx looks the target up from the link, and a stepper refresh that lands while
+   the click loads replaces the link — a detached link finds no #tab-body and the answer was dropped
+   unswapped. `global` searches the whole document, so the click lands whatever the stepper did.
+   `hx-push-url="true"`: htmx clears a replaced element's internal data, the "boosted" flag with it,
+   and a boosted link only pushes its URL while that flag is set; without the push, the next
+   #job-watch poll re-fetched the old address and put the previous step back. #}
 <ol class="pipeline">
   {% for s in pipeline_steps(c) %}
   <li class="{{ s.state }} {% if s.status == (selected or c.status) %}selected{% endif %}" title="{{ s.hint }}">
-    <a href="/collections/{{ c.collection_id }}?step={{ s.status }}" hx-boost="true" hx-target="#tab-body" hx-select="#tab-body" hx-swap="outerHTML"
+    <a href="/collections/{{ c.collection_id }}?step={{ s.status }}" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
        hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
       <span class="n">{{ loop.index }}</span> {{ s.label }}{% if s.status == 'curating' and c.status == 'curating' and c.curation_stage %} <small class="stage">· {{ c.curation_stage }}</small>{% endif %}</a></li>
   {% endfor %}

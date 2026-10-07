@@ -302,6 +302,9 @@ class Collection(BaseModel):
     # not counted (an exclude rule takes effect at once, so this drops as soon as one is added).
     curated_count: int = 0
     curated_rows: int = 0  # the whole curated set, included + excluded ("has anything been promoted")
+    # dump URLs the rules keep out (no delta row); stored by every recompute. None = not known yet:
+    # read it through Database.excluded_count, which counts and stores it then.
+    excluded_count: int | None = None
     # when the curated set last changed (a promote, or an exclude rule applied in place): an index
     # run older than this is behind the curated set
     curated_changed_at: datetime | None = None

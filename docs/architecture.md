@@ -424,7 +424,9 @@ the service run more than one task, make deploys non-destructive, and let a job 
 | LLM calls within a job | `LLM_WORKERS` = 16 | `llm/pool.py` |
 | LLM calls across jobs | **unbounded** — the first rate-limit risk | see `README.md` guidance |
 | Index runs | unlimited; each dispatches its own ECS task | `backends/index.py` |
-| DB connections | `DB_POOL_SIZE` = 16 per process (`config.py:35`; `Database`'s own default of 8 applies only when it is built without settings); replaced wholesale after each crawl ingest (`recycle_connections`) | `config.py:35`, `db.py:248` |
+| DB connections | work pool `DB_POOL_SIZE` = 16 (jobs, actions; no statement limit) + read pool `DB_READ_POOL_SIZE` = 12 (page requests; `DB_READ_STATEMENT_TIMEOUT_S` = 30 s per statement, `DB_READ_WAIT_S` = 10 s for a connection, else 503) per process, chosen by `db.db_scope`; `Database`'s own default (8, one pool) applies only when it is built without settings; replaced wholesale after each crawl ingest (`recycle_connections`) | `config.py`, `db.py` (`Database`, `db_scope`) |
+| Same page read, many browsers | one run at a time per collection + arguments, shared (`db.SingleFlight`); a change (`Database.touch`, from any non-GET request or bus event) makes the next ask count afresh | `db.py` `_coalesced` |
+| Excluded-by-rules count | stored on the collection by every recompute (`collections.excluded_count`, V11); NULL = counted once when first wanted, then stored | `db.py` `excluded_count` |
 | AOSS bulk request | 100 docs / 8 MB (AOSS caps at 10 MiB) | `config.py:82-83` |
 | Curation edits | **no stale-edit check** — two curators on one collection, last save wins silently | `README.md` |
 

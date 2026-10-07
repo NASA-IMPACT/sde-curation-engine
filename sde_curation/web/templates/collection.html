@@ -9,8 +9,12 @@
    `sseReopen` re-fetches once after the stream reconnects. The request path is taken from the
    address bar at fire time (not baked in at render) because the URLs-tab filter form only swaps
    #tab-body via hx-boost, so the page URL moves on while this element stays. Quotes inside the
-   trigger filter must be &quot; — HTML has no backslash escaping, a literal " would end the attribute. #}
-<div id="job-watch" hx-get="{{ request.url.path }}?{{ request.url.query }}" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="this:replace"
+   trigger filter must be &quot; — HTML has no backslash escaping, a literal " would end the attribute.
+   hx-sync="#tab-body:drop": the poll shares #tab-body's queue with the curator's own swaps of it
+   (stepper clicks, the filter forms — all `#tab-body:replace`), and gives way to them: a poll is
+   skipped while one of them loads, and a click replaces a poll in flight. Otherwise a poll for the
+   old address could land after the click and put the previous step back. #}
+<div id="job-watch" hx-get="{{ request.url.path }}?{{ request.url.query }}" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:drop"
      hx-on::config-request="event.detail.path = location.pathname + location.search"
      hx-trigger="sse:collection[detail.data.includes('&quot;{{ c.collection_id }}&quot;') && sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded&quot;') || detail.data.includes('&quot;state&quot;: &quot;failed&quot;'))], every 2s [jobPollDue(this, 10000, 4000)], sseReopen from:body"></div>
 

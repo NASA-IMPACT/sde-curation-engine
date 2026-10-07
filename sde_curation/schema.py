@@ -328,8 +328,23 @@ UPDATE collections c SET curated_by = a.actor FROM (
 ) a WHERE a.collection_id = c.collection_id;
 """
 
+# How many dump URLs the rules keep out, stored by every recompute (it was counted on every page
+# view: a 7 s join on a 100k collection after an exclude accept, which the stepper and the tabs
+# re-ran on every job event until the pool ran dry — test, 2026-10-06). NULL = not known yet: the
+# engine counts it the first time it is wanted and stores it, so this migration does no backfill.
+V11 = """
+ALTER TABLE collections ADD COLUMN excluded_count integer;
+"""
+
+# Forget every stored excluded count once. Dev ran V11 (the 2026-10-06 stress deploy) and then went
+# back to code that does not keep the column up to date, so its counts may be stale; an environment
+# that gets V11 and V12 together has nothing to forget. The engine recounts each one when first wanted.
+V12 = """
+UPDATE collections SET excluded_count = NULL;
+"""
+
 MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8),
-                                     (9, V9), (10, V10)]
+                                     (9, V9), (10, V10), (11, V11), (12, V12)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).

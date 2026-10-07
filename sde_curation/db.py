@@ -5,11 +5,14 @@ The schema lives in `schema.py` as numbered migrations applied at connect()."""
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import copy
+import functools
 import logging
 import sys
-from collections.abc import AsyncIterable, AsyncIterator, Iterable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Iterable
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import psycopg
 from psycopg import AsyncConnection
@@ -52,6 +55,97 @@ log = logging.getLogger(__name__)
 
 class ConflictError(Exception):
     """A unique constraint refused the write (e.g. the username is taken)."""
+
+
+# Which pool a transaction takes. "read": a page or fragment a browser fetches (GET/HEAD) — the
+# read pool, whose statements are cut off after `read_statement_timeout_s`. "work": everything that
+# changes something — a curator's action, a background job, startup — on the work pool, without a
+# limit (a recompute or promote on 100k URLs may take minutes, and must not be cut off half-way).
+# Set per request by the web layer (web.app.DbScope); a job resets it to "work" when it starts.
+DbScope = Literal["read", "work"]
+db_scope: contextvars.ContextVar[DbScope] = contextvars.ContextVar("db_scope", default="work")
+
+
+def work_context() -> contextvars.Context:
+    """A copy of the current context with the work scope: run a background task in it, so a job a
+    page request started does not inherit the request's read pool and statement timeout."""
+    ctx = contextvars.copy_context()
+    ctx.run(db_scope.set, "work")
+    return ctx
+
+
+def _freeze(v: Any) -> Any:
+    """Arguments as a hashable key (lists → tuples, dicts → sorted tuples)."""
+    if isinstance(v, (list, tuple, set, frozenset)):
+        items = sorted(v, key=repr) if isinstance(v, (set, frozenset)) else v
+        return tuple(_freeze(x) for x in items)
+    if isinstance(v, dict):
+        return tuple(sorted((k, _freeze(x)) for k, x in v.items()))
+    hash(v)  # TypeError for anything else unhashable: the caller then runs uncoalesced
+    return v
+
+
+class SingleFlight:
+    """At most one run of the same read at a time; whoever asks while it runs shares its result.
+
+    Many browsers refresh the same per-collection counts on every job event: run one query each
+    and a slow count piles up until every pooled connection waits on a copy of it — what took the
+    test engine down on 2026-10-06 (16 copies of one 7 s count, /health starved, ALB restart). A
+    caller waiting here holds no connection.
+
+    A result is only shared with callers that asked while nothing had changed since the run began
+    (`gen`, see Database.touch): a caller that arrives after a write waits for the run in progress to
+    finish and then starts — or joins — a fresh one, so nobody is handed numbers from before their
+    own edit. The run is shielded: a browser that gives up does not cancel it for the others."""
+
+    def __init__(self) -> None:
+        self._runs: dict[Any, tuple[int, asyncio.Task]] = {}
+
+    async def run[R](self, key: Any, gen: Callable[[], int], factory: Callable[[], Awaitable[R]]) -> R:
+        while True:
+            now = gen()
+            cur = self._runs.get(key)
+            if cur is None:
+                task = asyncio.ensure_future(factory())
+                self._runs[key] = (now, task)
+                task.add_done_callback(functools.partial(self._done, key))
+                return await asyncio.shield(task)
+            started, task = cur
+            if started == now:
+                return await asyncio.shield(task)
+            await asyncio.wait({task})  # stale: let it finish, then go round for a fresh one
+
+    def _done(self, key: Any, task: asyncio.Task) -> None:
+        if self._runs.get(key, (None, None))[1] is task:
+            del self._runs[key]
+        if not task.cancelled():
+            task.exception()  # retrieved: every caller may have gone, and the error is theirs anyway
+
+    @property
+    def in_flight(self) -> int:
+        return len(self._runs)
+
+
+def _coalesced(fn):
+    """Database read keyed by (collection_id, arguments) through the instance's SingleFlight, for
+    page views only (the read scope): a job or a curator's action reads straight from the tables,
+    since it may have written a moment ago without anything having called touch() yet. Each caller
+    gets its own copy of a dict/list result (callers adjust what they are handed)."""
+
+    @functools.wraps(fn)
+    async def wrapper(self: Database, collection_id: str, *args: Any, **kwargs: Any):
+        if db_scope.get() != "read":
+            return await fn(self, collection_id, *args, **kwargs)
+        try:
+            key = (fn.__name__, collection_id, _freeze(args), _freeze(kwargs))
+        except TypeError:
+            return await fn(self, collection_id, *args, **kwargs)
+        result = await self._flights.run(
+            key, lambda: self._gens.get(collection_id, 0), lambda: fn(self, collection_id, *args, **kwargs)
+        )
+        return copy.copy(result) if isinstance(result, (dict, list)) else result
+
+    return wrapper
 
 
 async def _aiter[T](rows: Iterable[T] | AsyncIterable[T]) -> AsyncIterator[T]:
@@ -245,44 +339,80 @@ def match_clause(match: str, col: str) -> tuple[str, list[Any]]:
 
 
 class Database:
-    def __init__(self, dsn: str, *, pool_size: int = 8, connect_timeout_s: float = 30.0):
+    def __init__(self, dsn: str, *, pool_size: int = 8, connect_timeout_s: float = 30.0,
+                 read_pool_size: int = 0, read_statement_timeout_s: float | None = None,
+                 read_wait_s: float = 30.0):
+        """`pool_size`: the work pool (jobs, curator actions). `read_pool_size` > 0 adds the read
+        pool for page requests (see `db_scope`), with `read_statement_timeout_s` on every statement
+        and at most `read_wait_s` to wait for a free connection; 0 = one pool for everything (tests,
+        scripts)."""
         self.dsn = dsn
         self.pool_size = pool_size
+        self.read_pool_size = read_pool_size
+        self.read_statement_timeout_s = read_statement_timeout_s
+        self.read_wait_s = read_wait_s
         self.connect_timeout_s = connect_timeout_s
         self._pool: AsyncConnectionPool | None = None
+        self._read_pool: AsyncConnectionPool | None = None
+        self._flights = SingleFlight()
+        self._gens: dict[str, int] = {}  # collection_id → bumped by touch() on every change
         # optional async hook(collection_id, old_status, new_status, note, actor) after every history row
         self.on_status_change = None
 
     @property
     def pool(self) -> AsyncConnectionPool:
+        """The work pool."""
         if self._pool is None:
             raise RuntimeError("database not connected")
         return self._pool
 
+    @property
+    def read_pool(self) -> AsyncConnectionPool | None:
+        return self._read_pool
+
     def _conn(self):
         """One pooled connection = one transaction (commit on exit, rollback on exception)."""
+        if self._read_pool is not None and db_scope.get() == "read":
+            return self._read_pool.connection()
         return self.pool.connection()
 
+    def touch(self, collection_id: str) -> None:
+        """Something about this collection changed: coalesced reads started before now are not
+        handed to anyone who asks from now on (SingleFlight)."""
+        self._gens[collection_id] = self._gens.get(collection_id, 0) + 1
+
     async def connect(self) -> Database:
+        base = {"row_factory": dict_row}
         self._pool = AsyncConnectionPool(
             self.dsn, min_size=1, max_size=max(1, self.pool_size), open=False, name="engine",
-            kwargs={"row_factory": dict_row, "options": "-c timezone=UTC"},
+            kwargs={**base, "options": "-c timezone=UTC"},
         )
-        await self._pool.open()
+        if self.read_pool_size > 0:
+            opts = "-c timezone=UTC"
+            if self.read_statement_timeout_s:
+                opts += f" -c statement_timeout={int(self.read_statement_timeout_s * 1000)}"
+            self._read_pool = AsyncConnectionPool(
+                self.dsn, min_size=1, max_size=self.read_pool_size, open=False, name="engine-read",
+                kwargs={**base, "options": opts}, timeout=self.read_wait_s,
+            )
         try:
+            await self._pool.open()
             await self._pool.wait(timeout=self.connect_timeout_s)  # fail fast when unreachable
-            async with self._conn() as conn:
+            async with self.pool.connection() as conn:
                 await migrate_async(conn)
+            if self._read_pool is not None:
+                await self._read_pool.open()
+                await self._read_pool.wait(timeout=self.connect_timeout_s)
         except BaseException:
-            await self._pool.close()
-            self._pool = None
+            await self.close()
             raise
         return self
 
     async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
+        for p in (self._read_pool, self._pool):
+            if p is not None:
+                await p.close()
+        self._pool = self._read_pool = None
 
     async def recycle_connections(self) -> None:
         """Replace every pooled connection with a fresh one. A connection that carried a crawl's
@@ -292,6 +422,16 @@ class Database:
         after its own transaction, so nothing in flight is cut off. Nothing is bound to a
         connection between transactions (temp tables are ON COMMIT DROP, locks are xact-scoped)."""
         await self.pool.drain()
+        if self._read_pool is not None:
+            await self._read_pool.drain()
+
+    def pool_stats(self) -> dict[str, dict[str, int]]:
+        """psycopg_pool counters per pool (size, available, waiting requests …) for /health/db."""
+        keep = ("pool_size", "pool_available", "requests_waiting", "requests_errors", "connections_errors")
+        out = {"work": self.pool.get_stats()}
+        if self._read_pool is not None:
+            out["read"] = self._read_pool.get_stats()
+        return {name: {k: s[k] for k in keep if k in s} for name, s in out.items()}
 
     async def ping(self) -> bool:
         async with self._conn() as conn:
@@ -592,8 +732,9 @@ class Database:
                 await conn.execute("ANALYZE dump_urls (collection_id, url, content_hash)")
             # the crawl this replaced may have been the only holder of some pages' text
             await self._gc_page_text(conn, collection_id)
+            # the excluded count is over the dump: unknown until the next recompute (or first view)
             await conn.execute(
-                "UPDATE collections SET dump_count=%s, updated_at=%s WHERE collection_id=%s",
+                "UPDATE collections SET dump_count=%s, excluded_count=NULL, updated_at=%s WHERE collection_id=%s",
                 (n, utcnow(), collection_id),
             )
             return n
@@ -854,6 +995,7 @@ class Database:
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
+    @_coalesced
     async def count_deltas_by_kind(self, collection_id: str) -> dict[str, int]:
         """{total, new, modified, deleted, content_changed, renamed} in one pass over the collection's
         delta rows — the same numbers as list_deltas' totals for those filters, without its sort (it
@@ -881,13 +1023,16 @@ class Database:
 
     async def replace_deltas(
         self, collection_id: str, deltas: list[DeltaUrl], effects: list[tuple[int, str, str]],
-        *, keep_effects: bool = False,
+        *, keep_effects: bool = False, excluded_count: int | None = None,
     ) -> None:
         """Make the delta URLs (and, unless `keep_effects`, the rule→URL effects) equal to the given
         state. Promote keeps the effects: the rules did not change, and the Curated table still
         explains its values. The recompute always hands over the complete new state; only the rows
         that differ from the table are written (an inline edit changes one row of 100k, and
-        rewriting them all was most of what the edit cost)."""
+        rewriting them all was most of what the edit cost).
+        `excluded_count`: the dump URLs the rules keep out under these effects (DeltaSet.excluded),
+        stored on the collection with them. New effects without it leave the count unknown (NULL),
+        and `excluded_count()` recounts it the first time it is wanted."""
         cols = self._DELTA_COLS
         data = [c for c in cols if c not in ("collection_id", "url")]
         async with self._conn() as conn, conn.cursor() as cur:
@@ -943,10 +1088,17 @@ class Database:
                     )
                     if changed + cur.rowcount >= _BULK_ROWS:
                         await cur.execute("ANALYZE pattern_effects (pattern_id, collection_id, url)")
-            await cur.execute(
-                "UPDATE collections SET delta_count=%s, updated_at=%s WHERE collection_id=%s",
-                (len(deltas), utcnow(), collection_id),
-            )
+            if keep_effects:
+                await cur.execute(
+                    "UPDATE collections SET delta_count=%s, updated_at=%s WHERE collection_id=%s",
+                    (len(deltas), utcnow(), collection_id),
+                )
+            else:
+                await cur.execute(
+                    "UPDATE collections SET delta_count=%s, excluded_count=%s, updated_at=%s WHERE collection_id=%s",
+                    (len(deltas), excluded_count if excluded_count is not None else (None if effects else 0),
+                     utcnow(), collection_id),
+                )
 
     async def delete_deltas(self, collection_id: str, urls: list[str]) -> int:
         """Drop these rows from the review queue (a partial promote) and recount in SQL. The
@@ -1060,8 +1212,29 @@ class Database:
                 )
             await self._recount_curated(conn, collection_id, changed=True)
 
+    @_coalesced
+    async def excluded_count(self, collection_id: str) -> int:
+        """Dump URLs an exclude rule keeps out, as stored on the collection (set by every recompute).
+        Unknown (NULL: after a migration, a new dump or a rule deleted outside a recompute) → counted
+        once here and stored; that count is a multi-second join on a 100k collection, so it is never
+        run per page view."""
+        async with self._conn() as conn:
+            stored = await _scalar(await conn.execute(
+                "SELECT excluded_count FROM collections WHERE collection_id=%s", (collection_id,)
+            ))
+        if stored is not None:
+            return stored
+        n = await self.count_excluded_by_rules(collection_id)
+        async with self._conn() as conn:  # a recompute that finished meanwhile stored the newer value
+            await conn.execute(
+                "UPDATE collections SET excluded_count=%s WHERE collection_id=%s AND excluded_count IS NULL",
+                (n, collection_id),
+            )
+        return n
+
     async def count_excluded_by_rules(self, collection_id: str) -> int:
-        """Dump URLs an exclude rule keeps out (no include overrides it) — they have no delta row."""
+        """Dump URLs an exclude rule keeps out (no include overrides it) — they have no delta row.
+        The definition of `excluded_count`, counted from the tables (slow on big collections)."""
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
                 "SELECT COUNT(DISTINCT e.url) FROM pattern_effects e JOIN patterns p ON p.id=e.pattern_id"
@@ -1081,12 +1254,14 @@ class Database:
                 [(reason, collection_id, url) for url, reason in items],
             )
 
+    @_coalesced
     async def count_curated_excluded(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
                 "SELECT COUNT(*) FROM curated_urls WHERE collection_id=%s AND excluded", (collection_id,)
             ))
 
+    @_coalesced
     async def count_curated_unreachable(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
@@ -1219,6 +1394,7 @@ class Database:
             )
             return {r["collection_id"]: self._index_run(r) for r in await cur.fetchall()}
 
+    @_coalesced
     async def curated_export_count(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
@@ -1349,6 +1525,7 @@ class Database:
             )
             return [(r["url"], r["scraped_title"]) for r in await cur.fetchall()]
 
+    @_coalesced
     async def count_deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> int:
         q = (f"SELECT COUNT(*) FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id"
              f" AND u.url=d.url WHERE {self._LLM_WHERE}") + (self._LLM_MISSING if only_missing else "")
@@ -1509,6 +1686,7 @@ class Database:
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
+    @_coalesced
     async def count_ai_suggestions(self, collection_id: str, *, field: str | None = None,
                                    conf: str | None = None, skip_human: bool = False) -> int:
         """Pending field-level AI suggestions for `field` (every field when None) of confidence `conf`
@@ -1578,6 +1756,7 @@ class Database:
                 (collection_id, url),
             )
 
+    @_coalesced
     async def incomplete_counts(self, collection_id: str, urls: list[str] | None = None) -> dict[str, int]:
         """Delta URLs promote would refuse (see _UNPROMOTABLE): how many, and why.
         `title` counts only the rows with no title at all: a row with no title rule is indexed under
@@ -1657,6 +1836,7 @@ class Database:
             )
             return list(await cur.fetchall())
 
+    @_coalesced
     async def duplicate_title_counts(self, collection_id: str) -> dict[str, int]:
         """URLs whose title and document type another page of the collection will also have (see
         _PROJECTED_TITLES), how many distinct title + type combinations they share (`titles`), and
@@ -1759,6 +1939,8 @@ class Database:
                 "DELETE FROM patterns WHERE collection_id=%s AND type=%s AND match = ANY(%s)",
                 (collection_id, type_, list(matches)),
             )
+            if cur.rowcount:
+                await self._forget_excluded_count(conn, collection_id, [type_])
             return cur.rowcount
 
     async def load_rules(self, collection_id: str) -> list[Rule]:
@@ -1793,6 +1975,7 @@ class Database:
             last = rows[-1]["id"]
             yield rows
 
+    @_coalesced
     async def count_patterns(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
@@ -1835,8 +2018,9 @@ class Database:
             return 0
         async with self._conn() as conn:
             cur = await conn.execute(
-                "DELETE FROM patterns WHERE collection_id=%s AND id = ANY(%s)", (collection_id, list(ids))
+                "DELETE FROM patterns WHERE collection_id=%s AND id = ANY(%s) RETURNING type", (collection_id, list(ids))
             )
+            await self._forget_excluded_count(conn, collection_id, [r["type"] for r in await cur.fetchall()])
             return cur.rowcount
 
     async def list_patterns(self, collection_id: str, *, types: list[str] | None = None,
@@ -1904,9 +2088,17 @@ class Database:
     async def delete_pattern(self, collection_id: str, pattern_id: int) -> bool:
         async with self._conn() as conn:
             cur = await conn.execute(
-                "DELETE FROM patterns WHERE id=%s AND collection_id=%s", (pattern_id, collection_id)
+                "DELETE FROM patterns WHERE id=%s AND collection_id=%s RETURNING type", (pattern_id, collection_id)
             )
+            await self._forget_excluded_count(conn, collection_id, [r["type"] for r in await cur.fetchall()])
             return cur.rowcount > 0
+
+    @staticmethod
+    async def _forget_excluded_count(conn, collection_id: str, deleted_types: list[str]) -> None:
+        """An exclude/include rule went (its effects with it, ON DELETE CASCADE): the stored excluded
+        count is unknown until the recompute that follows stores the new one."""
+        if {"exclude", "include"} & set(deleted_types):
+            await conn.execute("UPDATE collections SET excluded_count=NULL WHERE collection_id=%s", (collection_id,))
 
     # ── jobs ───────────────────────────────────────────────────────────
 
