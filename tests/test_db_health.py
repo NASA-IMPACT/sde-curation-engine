@@ -52,3 +52,26 @@ async def test_health(tmp_path):
         rdb = await c.get("/health/db")
     assert r.status_code == 200 and r.json() == {"ok": True, "sse_clients": 0}
     assert rdb.status_code == 200 and rdb.json()["db"] == "ok" and set(rdb.json()["pools"]) == {"work", "read"}
+
+
+async def test_health_db_reports_how_long_the_event_loop_was_blocked(tmp_path):
+    """A freeze of the event loop (work done on it without yielding) shows up in /health/db as the
+    worst lag since the previous call, and reading it starts the count again."""
+    import asyncio
+    import time
+
+    app = create_app(Settings(data_dir=tmp_path))
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+    ):
+        await asyncio.sleep(0.25)  # the probe has run a few times
+        quiet = (await c.get("/health/db")).json()["loop_lag_ms"]
+        time.sleep(0.4)  # noqa: ASYNC251 - the point: block the loop the way a heavy step would
+        await asyncio.sleep(0.25)
+        blocked = (await c.get("/health/db")).json()["loop_lag_ms"]
+        after = (await c.get("/health/db")).json()["loop_lag_ms"]
+        assert (await c.get("/health")).json() == {"ok": True, "sse_clients": 0}
+    assert quiet["max"] < 250
+    assert blocked["max"] >= 300
+    assert after["max"] < 300  # read() reset the worst value

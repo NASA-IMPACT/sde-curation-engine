@@ -21,6 +21,12 @@ from aws_cdk import (
     aws_cloudfront_origins as origins,
 )
 from aws_cdk import (
+    aws_cloudwatch as cloudwatch,
+)
+from aws_cdk import (
+    aws_cloudwatch_actions as cw_actions,
+)
+from aws_cdk import (
     aws_ec2 as ec2,
 )
 from aws_cdk import (
@@ -49,6 +55,9 @@ from aws_cdk import (
 )
 from aws_cdk import (
     aws_secretsmanager as sm,
+)
+from aws_cdk import (
+    aws_sns as sns,
 )
 from aws_cdk import (
     aws_ssm as ssm,
@@ -109,9 +118,23 @@ class CurationEngineStack(Stack):
         # than the task's AZs) so RDS has more places to find capacity. Credentials are a generated
         # Secrets Manager secret (username/password JSON) the task reads by field.
         db_subnets = ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC, availability_zones=list(cfg.db_azs))
+        pg_engine = rds.DatabaseInstanceEngine.postgres(version=rds.PostgresEngineVersion.VER_17)
+        # Query statistics (pg_stat_statements; the extension itself is created by schema V13) and a
+        # log line for every statement over 2 s, so database load can be traced to the statement that
+        # caused it. shared_preload_libraries is a static parameter: attaching this group to an
+        # existing instance leaves it "pending-reboot" until the instance is rebooted (about a
+        # minute of downtime), which is done by hand at a quiet moment.
+        db_params = rds.ParameterGroup(
+            self, "DbParams", engine=pg_engine, description=f"{cfg.name} database parameters",
+            parameters={
+                "shared_preload_libraries": "pg_stat_statements",
+                "pg_stat_statements.track": "top",
+                "log_min_duration_statement": "2000",
+            },
+        )
         db = rds.DatabaseInstance(
             self, "Db",
-            engine=rds.DatabaseInstanceEngine.postgres(version=rds.PostgresEngineVersion.VER_17),
+            engine=pg_engine, parameter_group=db_params,
             instance_type=ec2.InstanceType(cfg.db_instance_class),
             vpc=vpc, vpc_subnets=db_subnets, publicly_accessible=False, security_groups=[db_sg],
             credentials=rds.Credentials.from_generated_secret("engine", secret_name=cfg.secret_name("db")),
@@ -241,7 +264,7 @@ class CurationEngineStack(Stack):
             load_balancer_name=cfg.name, idle_timeout=Duration.seconds(3600),  # SSE streams
         )
         listener = alb.add_listener("Http", port=80, open=False)
-        listener.add_targets(
+        target_group = listener.add_targets(
             "Engine", port=CONTAINER_PORT, protocol=elbv2.ApplicationProtocol.HTTP, targets=[service],
             deregistration_delay=Duration.seconds(30),
             health_check=elbv2.HealthCheck(path="/health", healthy_http_codes="200", interval=Duration.seconds(30)),
@@ -286,6 +309,8 @@ class CurationEngineStack(Stack):
             "PUBLIC_BASE_URL", cfg.public_base_url or f"https://{distribution.distribution_domain_name}"
         )
 
+        self._alarms(db, alb, target_group)
+
         # ── outputs ────────────────────────────────────────────────────
         cdk.CfnOutput(self, "CloudFrontUrl", value=f"https://{distribution.distribution_domain_name}")
         cdk.CfnOutput(self, "AlbDnsName", value=alb.load_balancer_dns_name)
@@ -300,6 +325,35 @@ class CurationEngineStack(Stack):
             cdk.CfnOutput(self, f"Secret{key.title().replace('_', '')}", value=secret.secret_name)
 
     # ── pieces ─────────────────────────────────────────────────────────
+
+    def _alarms(self, db: rds.DatabaseInstance, alb: elbv2.ApplicationLoadBalancer,
+                target_group: elbv2.ApplicationTargetGroup) -> sns.Topic:
+        """The signals that would have shown the 2026-10-06 incident as it started instead of after
+        the fact: database CPU, 5xx answers, slow answers and an unhealthy engine. They notify an SNS
+        topic that has no subscription here; subscribe an email or chat endpoint to it by hand."""
+        topic = sns.Topic(self, "Alarms", topic_name=f"{self.cfg.name}-alarms")
+        minute, five = Duration.minutes(1), Duration.minutes(5)
+        above = cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD
+        specs = [
+            ("DbCpu", "database CPU above 70 % for 5 minutes",
+             db.metric_cpu_utilization(period=minute, statistic="Average"), 70, 5, above),
+            ("Alb5xx", "more than 10 engine 5xx answers in 5 minutes",
+             alb.metrics.http_code_target(elbv2.HttpCodeTarget.TARGET_5XX_COUNT, period=five, statistic="Sum"),
+             10, 1, above),
+            ("SlowAnswers", "p95 engine answer time above 5 s for 5 minutes",
+             target_group.metrics.target_response_time(period=minute, statistic="p95"), 5, 5, above),
+            ("UnhealthyEngine", "the engine failed its health check for 2 minutes",
+             target_group.metrics.unhealthy_host_count(period=minute, statistic="Maximum"), 1, 2,
+             cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD),
+        ]
+        for name, what, metric, threshold, periods, op in specs:
+            alarm = cloudwatch.Alarm(
+                self, f"Alarm{name}", alarm_name=f"{self.cfg.name}-{name}", alarm_description=what,
+                metric=metric, threshold=threshold, evaluation_periods=periods, comparison_operator=op,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            )
+            alarm.add_alarm_action(cw_actions.SnsAction(topic))
+        return topic
 
     def _vpc(self) -> ec2.IVpc:
         if self.cfg.vpc_id:

@@ -1,0 +1,30 @@
+
+<tr id="row-ex_org"
+    hx-get="/collections/ex.org/row"
+    hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseRefresh(this)], sseRefresh"
+    hx-sync="this:replace" hx-swap="outerHTML">
+
+  <td class="sn"></td>
+  <td class="name"><a href="/collections/ex.org">ex.org</a><br>
+      <a class="seed" href="https://ex.org" target="_blank" rel="noopener" title="open the seed URL">https://ex.org</a></td>
+  <td class="status-cell"><span class="status s-curating">✎ Curating</span>
+      <span class="chip stage" title="curation stage">② Metadata</span>
+
+
+      </td>
+  <td title="dump URLs"><a href="/collections/ex.org?tab=dump">8</a></td>
+  <td title="delta URLs"><a href="/collections/ex.org?tab=delta">4</a></td>
+
+  <td title="curated URLs that reach the index"><a href="/collections/ex.org?tab=curated">2</a></td>
+  <td class="lastjob"><span class="job j-succeeded" title="">llm_metadata · succeeded</span>
+      <small class="muted"> 7 classified · 13,160 tokens in / 224 out (56 reasoning)</small></td>
+  <td><time datetime="<TS>"><TS></time></td>
+  <td class="actions">
+
+
+
+
+
+  <a class="button primary" href="/collections/ex.org?tab=curate" title="Settle the exclusions, set metadata, then promote">Open curation</a>
+</td>
+</tr>

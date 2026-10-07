@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ex.org · SDE Curation Engine</title>
+  <link rel="stylesheet" href="/static/app.css?v=<V>">
+  <script src="/static/htmx.min.js?v=<V>"></script>
+  <script src="/static/sse.js?v=<V>"></script>
+  <script src="/static/json-enc.js?v=<V>"></script>
+</head>
+<body hx-ext="sse" sse-connect="/events">
+  <header>
+    <a href="/" class="brand">SDE Curation Engine</a>
+    <span id="conn" class="dot" title="SSE connection"></span>
+
+
+    <details class="menu" id="menu">
+      <summary aria-label="Menu" title="Menu">
+
+        <span class="burger" aria-hidden="true"><i></i><i></i><i></i></span>
+      </summary>
+      <div class="menu-panel" role="menu">
+
+        <a role="menuitem" href="/">Collections</a>
+        <a role="menuitem" href="/jobs">Jobs</a>
+        <a role="menuitem" href="/history">History</a>
+        <a role="menuitem" href="/manual">User manual</a>
+
+
+
+      </div>
+    </details>
+
+  </header>
+  <main>
+
+<div id="job-watch" hx-get="/collections/ex.org?tab=delta" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:drop"
+     hx-on::config-request="event.detail.path = location.pathname + location.search"
+     hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded&quot;') || detail.data.includes('&quot;state&quot;: &quot;failed&quot;'))], every 2s [jobPollDue(this, 10000, 4000)], sseReopen from:body"></div>
+
+<div id="wb-header" hx-get="/collections/ex.org/header"
+     hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseRefresh(this)], sseRefresh, every 10s [jobLive() && sseQuiet(this, 10000)], sseReopen from:body" hx-sync="this:replace" hx-swap="innerHTML">
+
+
+
+
+
+<div class="wb-head">
+  <div class="wb-ident">
+    <a class="crumb" href="/">← Collections</a>
+    <h1 class="wb-name">ex.org
+      <a class="wb-id" href="https://ex.org" target="_blank" rel="noopener" title="open the seed URL">https://ex.org ↗</a>
+    </h1>
+    <div class="badges">
+
+<span class="status s-curating" title="workflow status">✎ Curating</span> <span class="chip stage" title="curation stage: setting titles, divisions and document types">② Metadata</span>
+
+    </div>
+  </div>
+  <div class="wb-next">
+    <span class="muted small">Next:</span>
+
+
+
+
+
+  <a class="button primary" href="/collections/ex.org?tab=curate" title="Settle the exclusions, set metadata, then promote">Open curation</a>
+
+
+
+  </div>
+</div>
+</div>
+
+
+
+<div id="pipeline-ex_org" class="pipeline-wrap"
+     hx-get="/collections/ex.org/pipeline"
+     hx-on::config-request="if (event.detail.elt === this) event.detail.parameters.step = new URLSearchParams(location.search).get('step') || ''"
+     hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseRefresh(this)], sseRefresh, every 5s [jobLive() && sseQuiet(this, 5000)], sseReopen from:body"
+     hx-sync="this:replace" hx-swap="innerHTML">
+
+<ol class="pipeline">
+
+  <li class="done " title="Registered">
+    <a href="/collections/ex.org?step=backlog" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">1</span> Backlog</a></li>
+
+  <li class="done " title="Crawl ingested">
+    <a href="/collections/ex.org?step=scraped" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">2</span> Scraped</a></li>
+
+  <li class="current selected" title="Settle the exclusions, set metadata, then promote.">
+    <a href="/collections/ex.org?step=curating" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">3</span> Curating <small class="stage">· metadata</small></a></li>
+
+  <li class="todo " title="Index the curated set to the test index.">
+    <a href="/collections/ex.org?step=curated" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">4</span> Curated</a></li>
+
+  <li class="todo " title="Check the validation result, then index to production.">
+    <a href="/collections/ex.org?step=config_generated" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">5</span> Test index</a></li>
+
+  <li class="todo " title="Live. Re-scrape to start a new cycle.">
+    <a href="/collections/ex.org?step=live" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">6</span> Live</a></li>
+
+
+
+
+</ol>
+</div>
+
+<div id="tab-body" data-tab="delta" data-step="curating">
+
+
+<nav class="tabs" role="tablist" aria-label="collection sections">
+
+  <a role="tab" aria-selected="false" class="tab " title="This step: what it did, its actions, details and last job"
+     href="/collections/ex.org?step=curating&tab=overview">Overview</a>
+
+  <a role="tab" aria-selected="false" class="tab " title="Every URL the last crawl found (raw)"
+     href="/collections/ex.org?step=curating&tab=dump">Dump URLs <span class="count  ">8</span></a>
+
+  <a role="tab" aria-selected="false" class="tab " title="Exclusions, metadata, promote"
+     href="/collections/ex.org?step=curating&tab=curate">Curate</a>
+
+  <a role="tab" aria-selected="false" class="tab " title="Every rule in force for this collection"
+     href="/collections/ex.org?step=curating&tab=rules">Rules <span class="count  ">23</span></a>
+
+  <a role="tab" aria-selected="true" class="tab active" title="What will change in the curated URLs when you promote"
+     href="/collections/ex.org?step=curating&tab=delta">Delta URLs <span class="count warn ">4</span></a>
+
+  <a role="tab" aria-selected="false" class="tab " title="The approved set. The count is the rows that reach the index; excluded rows stay in the list but are not counted"
+     href="/collections/ex.org?step=curating&tab=curated">Curated URLs <span class="count ok ">2</span></a>
+
+  <a role="tab" aria-selected="false" class="tab " title="Jobs, status history and audit trail"
+     href="/collections/ex.org?step=curating&tab=activity">Activity</a>
+
+</nav>
+
+
+<p class="subtab-hint muted">
+  What will change when you promote. ✗ exclude takes a URL out of this list for good (its rule is under Rules — delete it to bring the URL back); ✓ include, click a title, pick division/type; ✎ on an AI badge edits the suggestion before accepting it. Each edit becomes an exact-URL rule.
+
+</p>
+<div id="urls-table">
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<form method="get" action="/collections/ex.org" class="tbl-toolbar" hx-boost="true" hx-target="#tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace" hx-push-url="true">
+  <input type="hidden" name="tab" value="delta"><input type="hidden" name="step" value="curating">
+
+  <input type="search" name="q" value="" placeholder="search url / title" size="28" aria-label="search">
+
+  <select name="kind" aria-label="kind"><option value="">any kind</option><option value="new" >new</option><option value="modified" >modified</option><option value="deleted" >removed</option></select>
+
+  <select name="excluded" aria-label="exclusion"><option value="">included + excluded</option><option value="false" >included only</option><option value="true" >excluded only</option></select>
+
+  <select name="edited" aria-label="edited by"><option value="">edited by anyone</option><option value="ai" >edited by AI</option><option value="sme" >edited by SME</option><option value="mixed" >AI + SME</option></select>
+
+
+  <select name="division" aria-label="division"><option value="">any division</option><option >Astrophysics</option><option >Biological and Physical Sciences</option><option >Earth Science</option><option >Heliophysics</option><option >Planetary Science</option><option >General</option></select>
+  <select name="document_type" aria-label="document type"><option value="">any type</option><option >Images</option><option >Data</option><option >Documentation</option><option >Software and Tools</option><option >Missions and Instruments</option></select>
+  <select name="ai" aria-label="AI suggestions"><option value="">with or without AI suggestions</option><option value="pending" >has AI suggestions</option><option value="high" >AI · high confidence</option><option value="medium" >AI · medium confidence</option><option value="low" >AI · low confidence</option><option value="title" >AI title pending</option><option value="division" >AI division pending</option><option value="document_type" >AI doc type pending</option></select>
+  <select name="missing" aria-label="metadata"><option value="">any metadata</option><option value="true" >cannot be promoted yet</option></select>
+  <select name="changed" aria-label="page text"><option value="">any page text</option><option value="true" >text changed since promotion</option></select>
+  <select name="renamed" aria-label="URL spelling"><option value="">any URL</option><option value="true" >URL spelling changed (renamed)</option></select>
+
+
+  <select name="dup" aria-label="duplicate titles"><option value="">any title</option><option value="title" >title + doc type shared with another page</option><option value="retitled" >AI title regenerated from a duplicate</option></select>
+
+
+  <select name="per" aria-label="rows per page"><option >25</option><option selected>50</option><option >100</option><option >250</option></select>
+  <button class="secondary">Filter</button>
+
+  <span class="grow"></span>
+  <span class="muted small nowrap">1–4 of 4</span>
+  <a class="page off" href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=&dir=asc&per=50&amp;page=1" aria-label="first page" title="first page">«</a>
+  <a class="page off" href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=&dir=asc&per=50&amp;page=0" aria-label="previous page">‹</a>
+  <span class="small nowrap">page <input class="page-jump" type="number" min="1" max="1" value="1" aria-label="page number (type one and press Enter)" title="type a page number and press Enter" data-href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=&dir=asc&per=50&amp;page=__PAGE__" data-page="1" onkeydown="if (event.key === 'Enter') { event.preventDefault(); jumpPage(this); }" onchange="jumpPage(this)"> / 1</span>
+  <a class="page off" href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=&dir=asc&per=50&amp;page=2" aria-label="next page">›</a>
+  <a class="page off" href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=&dir=asc&per=50&amp;page=1" aria-label="last page" title="last page">»</a>
+  <a class="muted small nowrap" hx-boost="false" download href="/collections/ex.org/urls/delta?format=csv&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=&dir=asc" title="download the filtered rows as CSV, in this order">⇩ CSV</a>
+</form>
+
+
+
+
+
+
+<div class="inline bulk-bar promote-bar" id="promote-bar">
+  <b><span id="pick-n">0</span> selected on this page</b>
+
+  <span class="muted small" id="pick-warn"></span>
+  <span class="grow"></span>
+  <button class="primary mini" disabled
+          hx-post="/api/collections/ex.org/promote/urls?then=/collections/ex.org%3Ftab%3Ddelta%26q%3D%26kind%3D%26excluded%3D%26division%3D%26document_type%3D%26ai%3D%26changed%3D%26edited%3D%26renamed%3D%26unreachable%3D%26match%3D%26dup%3D%26missing%3D%26sort%3D%26dir%3Dasc%26per%3D50%26page%3D1" hx-ext="json-enc"
+          hx-include="table.urls.delta input.pick:checked" hx-swap="none">Promote selected → curated</button>
+  <button class="secondary mini"  hx-post="/api/collections/ex.org/promote" hx-swap="none"
+          hx-confirm="Promote all 4 delta URLs to the curated URLs? Any AI suggestion still undecided is discarded." title="promote the whole queue, every page">or promote all 4</button>
+</div>
+
+
+<div class="tbl-wrap">
+<table class="urls delta">
+  <thead>
+
+    <tr><th class="pick"><input type="checkbox" onclick="pickAll(this)"  aria-label="select every row on this page" title="select every row on this page"></th><th class="num">#</th>
+<th  title="new: not in the curated URLs · modified: differs from the curated URLs (renamed: same page, new URL spelling) · removed: the crawl found it gone (promote drops it from the curated URLs; the next index run deletes it)"><a class="sort" href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=kind&dir=asc&per=50&page=1" title="sort by change, ascending">Change<span class="arrow">⇅</span></a></th>
+<th ><a class="sort" href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=url&dir=asc&per=50&page=1" title="sort by url, ascending">URL<span class="arrow">⇅</span></a></th>
+<th  title="included rows are exported to the index; excluded rows are kept out"><a class="sort" href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=excluded&dir=asc&per=50&page=1" title="sort by in index, ascending">In index<span class="arrow">⇅</span></a></th>
+<th ><a class="sort" href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=title&dir=asc&per=50&page=1" title="sort by title scraped → effective, ascending">Title <small class="muted">scraped → effective</small><span class="arrow">⇅</span></a></th>
+<th ><a class="sort" href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=division&dir=asc&per=50&page=1" title="sort by division, ascending">Division<span class="arrow">⇅</span></a></th>
+<th ><a class="sort" href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=document_type&dir=asc&per=50&page=1" title="sort by doc type, ascending">Doc type<span class="arrow">⇅</span></a></th>
+<th  title="who set the effective values: AI (accepted suggestions), SME (typed or toggled by a curator), or both"><a class="sort" href="/collections/ex.org?tab=delta&q=&kind=&excluded=&division=&document_type=&ai=&changed=&edited=&renamed=&unreachable=&match=&dup=&missing=&sort=edited_by&dir=asc&per=50&page=1" title="sort by edited by, ascending">Edited by<span class="arrow">⇅</span></a></th></tr>
+
+  </thead>
+  <tbody>
+
+
+
+
+
+    <tr class=" row-new">
+      <td class="pick"><input class="pick" type="checkbox" name="urls" value="https://ex.org/p4" onchange="pickCount()"
+          data-ai="0" data-del="0" aria-label="select this URL"></td>
+      <td class="num muted">1</td>
+      <td class="nowrap"><span class="kind k-new" title="not in the curated URLs yet">new</span></td>
+      <td class="url"><a href="https://ex.org/p4" target="_blank" rel="noopener">https://ex.org/p4</a></td>
+      <td class="nowrap"><span class="kind k-included" title="included: no exclude rule matches">included</span>
+  <button class="mini "  hx-post="/api/collections/ex.org/urls" hx-ext="json-enc"
+          hx-vals='{"type": "exclude", "url": "https://ex.org/p4"}' hx-swap="none"
+          aria-label="exclude" title="included — click to exclude (exact-URL exclude rule: takes effect at once, never waits under Delta URLs)">✗ exclude</button></td>
+      <td>
+
+
+  <small class="muted">Page 4</small><br>
+  <button type="button" class="linkish"
+          title="title https://ex.org/p4 → Edited by hand (by anonymous)"
+          onclick='editTitle("ex.org", "https://ex.org/p4", "Edited by hand", false)'>Edited by hand</button>
+
+
+
+
+  </td>
+      <td>
+
+
+
+  <select class="cell "  title="division https://ex.org/p4 → Astrophysics (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p4", "division", this.value, false)'>
+    <option value="">—</option><option selected>Astrophysics</option><option >Biological and Physical Sciences</option><option >Earth Science</option><option >Heliophysics</option><option >Planetary Science</option></select>
+  </td>
+      <td>
+
+
+
+  <select class="cell "  title="document_type https://ex.org/p4 → Documentation (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p4", "document_type", this.value, false)'>
+    <option value="">—</option><option >Images</option><option >Data</option><option selected>Documentation</option><option >Software and Tools</option><option >Missions and Instruments</option></select>
+  </td>
+      <td class="nowrap"><span class="edited e-mixed" title="division: division https://ex.org/p4 → Astrophysics (by anonymous) · AI&#10;document_type: document_type https://ex.org/p4 → Documentation (by anonymous) · AI&#10;title: title https://ex.org/p4 → Edited by hand (by anonymous)&#10;">AI + SME</span></td>
+    </tr>
+
+
+
+
+
+
+    <tr class=" row-new">
+      <td class="pick"><input class="pick" type="checkbox" name="urls" value="https://ex.org/p6" onchange="pickCount()"
+          data-ai="0" data-del="0" aria-label="select this URL"></td>
+      <td class="num muted">2</td>
+      <td class="nowrap"><span class="kind k-new" title="not in the curated URLs yet">new</span></td>
+      <td class="url"><a href="https://ex.org/p6" target="_blank" rel="noopener">https://ex.org/p6</a></td>
+      <td class="nowrap"><span class="kind k-included" title="included: no exclude rule matches">included</span>
+  <button class="mini "  hx-post="/api/collections/ex.org/urls" hx-ext="json-enc"
+          hx-vals='{"type": "exclude", "url": "https://ex.org/p6"}' hx-swap="none"
+          aria-label="exclude" title="included — click to exclude (exact-URL exclude rule: takes effect at once, never waits under Delta URLs)">✗ exclude</button></td>
+      <td>
+
+
+  <small class="muted">Page 6</small><br>
+  <button type="button" class="linkish"
+          title="title https://ex.org/p6 → Page 6 (by anonymous) · AI"
+          onclick='editTitle("ex.org", "https://ex.org/p6", "Page 6", false)'>Page 6</button>
+
+
+
+
+  </td>
+      <td>
+
+
+
+  <select class="cell "  title="division https://ex.org/p6 → Astrophysics (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p6", "division", this.value, false)'>
+    <option value="">—</option><option selected>Astrophysics</option><option >Biological and Physical Sciences</option><option >Earth Science</option><option >Heliophysics</option><option >Planetary Science</option></select>
+  </td>
+      <td>
+
+
+
+  <select class="cell "  title="document_type https://ex.org/p6 → Documentation (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p6", "document_type", this.value, false)'>
+    <option value="">—</option><option >Images</option><option >Data</option><option selected>Documentation</option><option >Software and Tools</option><option >Missions and Instruments</option></select>
+  </td>
+      <td class="nowrap"><span class="edited e-ai" title="division: division https://ex.org/p6 → Astrophysics (by anonymous) · AI&#10;document_type: document_type https://ex.org/p6 → Documentation (by anonymous) · AI&#10;title: title https://ex.org/p6 → Page 6 (by anonymous) · AI&#10;">AI</span></td>
+    </tr>
+
+
+
+
+
+
+    <tr class=" row-new">
+      <td class="pick"><input class="pick" type="checkbox" name="urls" value="https://ex.org/p7" onchange="pickCount()"
+          data-ai="0" data-del="0" aria-label="select this URL"></td>
+      <td class="num muted">3</td>
+      <td class="nowrap"><span class="kind k-new" title="not in the curated URLs yet">new</span></td>
+      <td class="url"><a href="https://ex.org/p7" target="_blank" rel="noopener">https://ex.org/p7</a></td>
+      <td class="nowrap"><span class="kind k-included" title="included: no exclude rule matches">included</span>
+  <button class="mini "  hx-post="/api/collections/ex.org/urls" hx-ext="json-enc"
+          hx-vals='{"type": "exclude", "url": "https://ex.org/p7"}' hx-swap="none"
+          aria-label="exclude" title="included — click to exclude (exact-URL exclude rule: takes effect at once, never waits under Delta URLs)">✗ exclude</button></td>
+      <td>
+
+
+  <small class="muted">Page 7</small><br>
+  <button type="button" class="linkish"
+          title="title https://ex.org/p7 → Page 7 (by anonymous) · AI"
+          onclick='editTitle("ex.org", "https://ex.org/p7", "Page 7", false)'>Page 7</button>
+
+
+
+
+  </td>
+      <td>
+
+
+
+  <select class="cell "  title="division https://ex.org/p7 → Astrophysics (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p7", "division", this.value, false)'>
+    <option value="">—</option><option selected>Astrophysics</option><option >Biological and Physical Sciences</option><option >Earth Science</option><option >Heliophysics</option><option >Planetary Science</option></select>
+  </td>
+      <td>
+
+
+
+  <select class="cell "  title="document_type https://ex.org/p7 → Documentation (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p7", "document_type", this.value, false)'>
+    <option value="">—</option><option >Images</option><option >Data</option><option selected>Documentation</option><option >Software and Tools</option><option >Missions and Instruments</option></select>
+  </td>
+      <td class="nowrap"><span class="edited e-ai" title="division: division https://ex.org/p7 → Astrophysics (by anonymous) · AI&#10;document_type: document_type https://ex.org/p7 → Documentation (by anonymous) · AI&#10;title: title https://ex.org/p7 → Page 7 (by anonymous) · AI&#10;">AI</span></td>
+    </tr>
+
+
+
+
+
+
+    <tr class=" row-new">
+      <td class="pick"><input class="pick" type="checkbox" name="urls" value="https://ex.org/p8" onchange="pickCount()"
+          data-ai="0" data-del="0" aria-label="select this URL"></td>
+      <td class="num muted">4</td>
+      <td class="nowrap"><span class="kind k-new" title="not in the curated URLs yet">new</span></td>
+      <td class="url"><a href="https://ex.org/p8" target="_blank" rel="noopener">https://ex.org/p8</a></td>
+      <td class="nowrap"><span class="kind k-included" title="included: no exclude rule matches">included</span>
+  <button class="mini "  hx-post="/api/collections/ex.org/urls" hx-ext="json-enc"
+          hx-vals='{"type": "exclude", "url": "https://ex.org/p8"}' hx-swap="none"
+          aria-label="exclude" title="included — click to exclude (exact-URL exclude rule: takes effect at once, never waits under Delta URLs)">✗ exclude</button></td>
+      <td>
+
+
+  <small class="muted">Page 8</small><br>
+  <button type="button" class="linkish"
+          title="title https://ex.org/p8 → Page 8 (by anonymous) · AI"
+          onclick='editTitle("ex.org", "https://ex.org/p8", "Page 8", false)'>Page 8</button>
+
+
+
+
+  </td>
+      <td>
+
+
+
+  <select class="cell "  title="division https://ex.org/p8 → Astrophysics (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p8", "division", this.value, false)'>
+    <option value="">—</option><option selected>Astrophysics</option><option >Biological and Physical Sciences</option><option >Earth Science</option><option >Heliophysics</option><option >Planetary Science</option></select>
+  </td>
+      <td>
+
+
+
+  <select class="cell "  title="document_type https://ex.org/p8 → Documentation (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p8", "document_type", this.value, false)'>
+    <option value="">—</option><option >Images</option><option >Data</option><option selected>Documentation</option><option >Software and Tools</option><option >Missions and Instruments</option></select>
+  </td>
+      <td class="nowrap"><span class="edited e-ai" title="division: division https://ex.org/p8 → Astrophysics (by anonymous) · AI&#10;document_type: document_type https://ex.org/p8 → Documentation (by anonymous) · AI&#10;title: title https://ex.org/p8 → Page 8 (by anonymous) · AI&#10;">AI</span></td>
+    </tr>
+
+
+  </tbody>
+</table>
+</div></div>
+</div>
+</main>
+  <script>
+    // Per-URL edits = exact-URL rules (Dump / Delta / Curated URL tables). When the field still has an
+    // AI suggestion (`ai` = true) the edit goes through /ai/accept so the suggestion is resolved too:
+    // same value → accepted as AI, a different value → "AI, edited".
+    // A refusal's message: the JSON `detail` when the app sent one. A proxy error page (HTML from the
+    // ALB/CloudFront, e.g. 502 Bad Gateway) never reaches the user as raw markup.
+    function errorText(status, statusText, body) {
+      let m = body || statusText;
+      try { m = JSON.parse(m).detail || m; } catch (_) {}
+      if (typeof m !== 'string') return JSON.stringify(m);
+      if (/^\s*</.test(m) || [502, 503, 504].includes(status))
+        return `The server is temporarily unavailable (HTTP ${status}). Please try again in a moment.`;
+      return m;
+    }
+    // The pagers' page box (partials/pager.html): jump to the typed page, clamped to 1..pages. It
+    // clicks a new link placed beside the box, so the jump is boosted exactly when the pager's own
+    // links are (a boosted link's URL is read when htmx processes it: re-pointing › does nothing).
+    function jumpPage(input) {
+      const max = +input.max || 1;
+      const n = Math.min(max, Math.max(1, Math.round(+input.value) || 1));
+      input.value = n;
+      if (String(n) === input.dataset.page) return;
+      input.dataset.page = String(n);  // the blur after an Enter must not jump a second time
+      const link = document.createElement('a');
+      link.href = input.dataset.href.replace('__PAGE__', n);
+      link.hidden = true;
+      input.after(link);
+      htmx.process(link);
+      link.click();
+    }
+    async function postJson(path, body) {
+      const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      if (!r.ok) { alert(errorText(r.status, r.statusText, await r.text())); return false; }
+      return true;
+    }
+    async function editField(cid, url, type, value, ai) {
+      const base = `/api/collections/${encodeURIComponent(cid)}`;
+      const ok = (ai && value)
+        ? await postJson(`${base}/ai/accept`, {url, field: type, value})
+        : await postJson(`${base}/urls`, value ? {url, type, value} : {url, type, value: null});
+      if (ok) location.reload();
+    }
+    function editTitle(cid, url, current, ai) {
+      const v = prompt("Title for\n" + url + "\n\nTip: {title} = scraped title, {collection} = collection name", current);
+      if (v === null) return;
+      if (!v.trim()) { alert("Title cannot be empty. To fall back to the pattern/curated value, delete the exact-URL title rule on the Rules tab."); return; }
+      editField(cid, url, "title", v, !!ai);
+    }
+    // ✎ on an AI division / doc-type badge: preselect the suggested value and hand over to the select.
+    function pickAi(btn, value) {
+      const sel = btn.closest("td").querySelector("select");
+      if (!sel) return;
+      sel.value = value; sel.focus();
+      try { sel.showPicker(); } catch (_) {}
+    }
+    // Delta URLs → promote a selection. Ticks are per page (a promote reloads it). The confirm
+    // text is written onto the button: htmx reads hx-confirm at request time.
+    function pickCount() {
+      const on = [...document.querySelectorAll('input.pick:checked')];
+      const btn = document.querySelector('#promote-bar button'); if (!btn) return;
+      const ai = on.filter(b => b.dataset.ai === '1').length, del = on.filter(b => b.dataset.del === '1').length;
+      document.getElementById('pick-n').textContent = on.length;
+      document.getElementById('pick-warn').textContent =
+        (del ? `${del} removal${del > 1 ? 's' : ''}` : '') + (del && ai ? ' · ' : '') + (ai ? `${ai} with an undecided AI suggestion` : '');
+      btn.disabled = on.length === 0;
+      btn.setAttribute('hx-confirm', `Promote ${on.length} delta URL${on.length > 1 ? 's' : ''} to the curated URLs?`
+        + (del ? `\n${del} of them are removals: their curated rows are dropped and the next index run deletes them.` : '')
+        + (ai ? `\n${ai} still carry an undecided AI suggestion — promoting discards it.` : ''));
+    }
+    function pickAll(box) { document.querySelectorAll('input.pick:not(:disabled)').forEach(b => { b.checked = box.checked; }); pickCount(); }
+    // Edit a pattern suggestion's glob in place, then accept it with the edited match.
+    function editSuggestion(btn, cid, sid, match) {
+      const cell = btn.closest("tr").querySelector("td.match");
+      if (!cell || cell.querySelector("input")) return;
+      cell.dataset.orig = cell.innerHTML;
+      cell.innerHTML = `<span class="inline nowrap"><input size="42" aria-label="edited glob"> <button class="primary mini" type="button">Save &amp; accept</button> <button class="secondary mini" type="button">Cancel</button></span>`;
+      const input = cell.querySelector("input"); input.value = match; input.focus(); input.select();
+      const [save, cancel] = cell.querySelectorAll("button");
+      const restore = () => { cell.innerHTML = cell.dataset.orig; };
+      cancel.onclick = restore;
+      input.onkeydown = (e) => { if (e.key === "Escape") restore(); if (e.key === "Enter") save.click(); };
+      save.onclick = async () => {
+        const v = input.value.trim();
+        if (!v) { alert("The match cannot be empty."); return; }
+        if (await postJson(`/api/collections/${encodeURIComponent(cid)}/suggestions/${sid}/accept`, {match: v})) location.reload();
+      };
+    }
+    // Hamburger menu: close on outside click or Escape.
+    document.addEventListener('click', (e) => { const m = document.getElementById('menu'); if (m && m.open && !m.contains(e.target)) m.open = false; });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { const m = document.getElementById('menu'); if (m) m.open = false; } });
+    // Connection indicator: green when the SSE stream is open.
+    // Polling is the safety net for a live job only: `every Ns [jobLive()]` on the pollers. The header
+    // and the jobs strip carry data-job-live while something is queued or running.
+    function jobLive(scope) { return !!document.querySelector((scope ? scope + ' ' : '') + '[data-job-live]'); }
+    // A running job sends a progress event every second to every open tab, and each one re-fetched
+    // the header and the stepper. `sse:collection[… && sseRefresh(this)], sseRefresh` refreshes at
+    // most once per SSE_REFRESH_MS per element: the first event of a burst at once, the rest folded
+    // into one trailing refresh, so the last event (the job's end) is never dropped — htmx's own
+    // `throttle:` drops it. `every Ns [… && sseQuiet(this, N000)]` keeps the poll for when SSE is silent.
+    // Kept per element id, not on the element: a dashboard row swaps itself out (outerHTML), and the
+    // trailing refresh must reach the row now on the page.
+    const SSE_REFRESH_MS = 3000;
+    const sseState = new Map();  // element id → {last, timer}
+    function sseRefresh(elt) {
+      const s = sseState.get(elt.id) || {last: 0, timer: null};
+      sseState.set(elt.id, s);
+      if (s.timer) return false;  // a trailing refresh is already queued
+      const wait = s.last + SSE_REFRESH_MS - Date.now();
+      if (wait <= 0) { s.last = Date.now(); return true; }
+      s.timer = setTimeout(() => {
+        s.timer = null; s.last = Date.now();
+        const now = document.getElementById(elt.id);
+        if (now) htmx.trigger(now, 'sseRefresh');
+      }, wait);
+      return false;
+    }
+    function sseQuiet(elt, ms) { return Date.now() - ((sseState.get(elt.id) || {}).last || 0) >= ms; }
+    // A job poll that slows down while SSE is live: `sse:collection[… && sseSeen(this) && …], every 2s
+    // [jobPollDue(this, 10000, 4000)]` fetches once per 10 s while the element's SSE events keep
+    // arriving, and once per 4 s after they have been silent for 10 s (a dead stream). The tick is
+    // short so both intervals land on it; 500 ms of slack absorbs timer jitter. With a dead stream,
+    // the header's own poll can clear data-job-live before this poll sees the job's end, so the first
+    // tick after the job stops being live fetches once more; with a live stream the end event did.
+    const pollState = new Map();  // element id → {seen, polled, live}
+    function pollEntry(elt) { const s = pollState.get(elt.id) || {seen: 0, polled: 0, live: false}; pollState.set(elt.id, s); return s; }
+    function sseSeen(elt) { pollEntry(elt).seen = Date.now(); return true; }
+    function jobPollDue(elt, liveMs, deadMs) {
+      const s = pollEntry(elt), now = Date.now(), sseLive = now - s.seen < liveMs, wasLive = s.live;
+      s.live = jobLive();
+      if (!s.live) {
+        if (!wasLive || sseLive) return false;
+        s.polled = now;
+        return true;
+      }
+      if (now - s.polled < (sseLive ? liveMs : deadMs) - 500) return false;
+      s.polled = now;
+      return true;
+    }
+    // A reconnect after a drop fires `sseReopen`: events sent meanwhile are gone, so lists that rely
+    // on them (the dashboard table) re-fetch once instead of polling all the time.
+    let sseDropped = false;
+    document.body.addEventListener('htmx:sseOpen', () => {
+      document.getElementById('conn').classList.add('on');
+      if (sseDropped) { sseDropped = false; htmx.trigger(document.body, 'sseReopen'); }
+    });
+    document.body.addEventListener('htmx:sseError', () => { sseDropped = true; document.getElementById('conn').classList.remove('on'); });
+    // One place for server-side refusals (4xx/5xx). Aborted/replaced requests never alert, and neither
+    // do background refreshes (an `every Ns` poll fires with no triggering event, an SSE refresh with
+    // an sse:* one): the old content stays and the next refresh recovers, while an alert would freeze
+    // the page — and every timer on it — until OK is clicked.
+    document.body.addEventListener('htmx:responseError', (e) => {
+      const ev = e.detail.requestConfig && e.detail.requestConfig.triggeringEvent;
+      const xhr = e.detail.xhr;
+      if (!ev || ev.type.startsWith('sse:')) { console.warn('background refresh failed', xhr.status, e.detail.pathInfo); return; }
+      alert(errorText(xhr.status, xhr.statusText, xhr.responseText));
+    });
+
+  </script>
+</body>
+</html>

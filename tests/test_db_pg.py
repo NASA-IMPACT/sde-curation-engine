@@ -113,11 +113,11 @@ def test_v12_forgets_counts_stored_while_older_code_ran(pg_url):
                      " ('a','A','https://a','General','crawler',10,'curating',now(),now(),97111),"
                      " ('b','B','https://b','General','crawler',10,'curating',now(),now(),NULL)")
         try:
-            assert migrate_sync(conn) == 12
+            assert migrate_sync(conn) == MIGRATIONS[-1][0]
             assert conn.execute("SELECT collection_id, excluded_count FROM collections ORDER BY 1").fetchall() == [
                 ("a", None), ("b", None)]
             conn.execute("UPDATE collections SET excluded_count=3 WHERE collection_id='a'")  # recounted since
-            assert migrate_sync(conn) == 12  # applied once: a later count stays
+            assert migrate_sync(conn) == MIGRATIONS[-1][0]  # applied once: a later count stays
             assert conn.execute("SELECT excluded_count FROM collections WHERE collection_id='a'").fetchone() == (3,)
         finally:
             conn.execute("DROP SCHEMA mig12 CASCADE")
@@ -146,7 +146,7 @@ def test_v2_backfills_curated_text_from_the_dump(pg_url):
         conn.execute("INSERT INTO curated_urls (collection_id,url,excluded) VALUES"
                      " ('c','https://c/a',false), ('c','https://c/gone',false), ('c','https://c/out',true)")
         try:
-            assert migrate_sync(conn) == 12
+            assert migrate_sync(conn) == MIGRATIONS[-1][0]
             # V2 put the dump text on the curated row; V9 moved both onto one blob keyed by the
             # content hash it gives a row that predates hashing, so the text survives shared
             rows = dict(conn.execute(
@@ -170,6 +170,35 @@ def test_v2_backfills_curated_text_from_the_dump(pg_url):
                 "c": "carol", "g": None}
             # V11: the excluded count is not backfilled — unknown until it is first wanted
             assert conn.execute("SELECT COUNT(*) FROM collections WHERE excluded_count IS NULL").fetchone() == (2,)
-            assert migrate_sync(conn) == 12  # idempotent: nothing left to apply
+            assert migrate_sync(conn) == MIGRATIONS[-1][0]  # idempotent: nothing left to apply
         finally:
             conn.execute("DROP SCHEMA mig CASCADE")
+
+
+def test_hot_tables_are_vacuumed_and_analysed_at_two_percent(pg_url):
+    """V14: the tables every recompute rewrites get autovacuum and autoanalyze at 2 % of their rows,
+    not the 20 % default that let delta_urls grow to nine times its live size (2026-09-18 audit)."""
+    import psycopg
+
+    with psycopg.connect(pg_url) as conn:
+        rows = dict(conn.execute(
+            "SELECT relname, reloptions FROM pg_class"
+            " WHERE relname IN ('delta_urls', 'pattern_effects', 'patterns') AND relkind = 'r'"
+        ).fetchall())
+    assert set(rows) == {"delta_urls", "pattern_effects", "patterns"}
+    for name, opts in rows.items():
+        assert "autovacuum_vacuum_scale_factor=0.02" in opts, name
+        assert "autovacuum_analyze_scale_factor=0.02" in opts, name
+
+
+def test_query_statistics_extension_is_created_where_postgres_has_it(pg_url):
+    """V13 creates pg_stat_statements when the server ships it, and never fails a database that does
+    not (the migration then only logs a notice)."""
+    import psycopg
+
+    with psycopg.connect(pg_url) as conn:
+        available = conn.execute(
+            "SELECT 1 FROM pg_available_extensions WHERE name = 'pg_stat_statements'").fetchone()
+        installed = conn.execute(
+            "SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'").fetchone()
+    assert bool(installed) == bool(available)

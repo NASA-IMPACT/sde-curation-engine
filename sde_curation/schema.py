@@ -343,8 +343,32 @@ V12 = """
 UPDATE collections SET excluded_count = NULL;
 """
 
+# Query statistics for diagnosing database load (which statements, how often, how long). Before
+# this, every incident had to be reconstructed from Performance Insights after the fact. Collecting
+# needs `shared_preload_libraries = pg_stat_statements` on the server (the RDS parameter group in
+# infra/stacks/engine_stack.py); the extension itself is created here. Where the extension is not
+# installed or the role may not create it, the migration does nothing instead of failing.
+V13 = """
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+EXCEPTION WHEN undefined_file OR insufficient_privilege OR feature_not_supported THEN
+  RAISE NOTICE 'pg_stat_statements not available: %', SQLERRM;
+END
+$$;
+"""
+
+# Autovacuum on the tables every recompute rewrites. With the default scale factor (20 % of the
+# table) delta_urls reached nine times its live size in the 2026-09-18 audit before autovacuum came
+# round; 2 % keeps dead row versions and stale planner statistics small on 100k-row collections.
+V14 = """
+ALTER TABLE delta_urls SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.02);
+ALTER TABLE pattern_effects SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.02);
+ALTER TABLE patterns SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.02);
+"""
+
 MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8),
-                                     (9, V9), (10, V10), (11, V11), (12, V12)]
+                                     (9, V9), (10, V10), (11, V11), (12, V12), (13, V13), (14, V14)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).

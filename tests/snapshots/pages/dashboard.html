@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SDE Curation Engine</title>
+  <link rel="stylesheet" href="/static/app.css?v=<V>">
+  <script src="/static/htmx.min.js?v=<V>"></script>
+  <script src="/static/sse.js?v=<V>"></script>
+  <script src="/static/json-enc.js?v=<V>"></script>
+</head>
+<body hx-ext="sse" sse-connect="/events">
+  <header>
+    <a href="/" class="brand">SDE Curation Engine</a>
+    <span id="conn" class="dot" title="SSE connection"></span>
+
+
+    <details class="menu" id="menu">
+      <summary aria-label="Menu" title="Menu">
+
+        <span class="burger" aria-hidden="true"><i></i><i></i><i></i></span>
+      </summary>
+      <div class="menu-panel" role="menu">
+
+        <a role="menuitem" href="/">Collections</a>
+        <a role="menuitem" href="/jobs">Jobs</a>
+        <a role="menuitem" href="/history">History</a>
+        <a role="menuitem" href="/manual">User manual</a>
+
+
+
+      </div>
+    </details>
+
+  </header>
+  <main>
+<div class="dash">
+  <aside class="filters">
+<form id="filters" hx-get="/rows" hx-target="#collections" hx-swap="outerHTML" hx-sync="this:replace"
+      hx-trigger="input changed delay:250ms, resort" onsubmit="return false">
+  <input type="hidden" name="sort" value=""><input type="hidden" name="dir" value="">
+  <div class="f-head">
+    <span class="f-title">Filters</span>
+    <span class="muted small"><span id="f-shown">2</span></span>
+    <a href="/" class="f-clear" title="Clear all filters">Clear</a>
+    <button type="button" class="f-toggle mini" aria-expanded="false" aria-label="Show or hide the filters"
+            onclick="this.setAttribute('aria-expanded', this.form.classList.toggle('open'))"></button>
+  </div>
+  <fieldset>
+    <legend>Workflow status</legend>
+
+    <label class="f-opt"><input type="checkbox" name="status" value="backlog" >
+      <span class="status s-backlog">○ Backlog</span><span id="f-status-backlog" class="cnt">0</span></label>
+
+
+    <label class="f-opt"><input type="checkbox" name="status" value="scraped" >
+      <span class="status s-scraped">⬇ Scraped</span><span id="f-status-scraped" class="cnt">0</span></label>
+
+
+    <label class="f-opt"><input type="checkbox" name="status" value="curating" >
+      <span class="status s-curating">✎ Curating</span><span id="f-status-curating" class="cnt">2</span></label>
+
+    <label class="f-opt sub" title="curating collections in the exclusions stage"><input type="checkbox" name="stage" value="exclusions" >
+      <span class="f-lbl">① Exclusions</span><span id="f-stage-exclusions" class="cnt">1</span></label>
+
+    <label class="f-opt sub" title="curating collections in the metadata stage"><input type="checkbox" name="stage" value="metadata" >
+      <span class="f-lbl">② Metadata</span><span id="f-stage-metadata" class="cnt">1</span></label>
+
+
+    <label class="f-opt"><input type="checkbox" name="status" value="curated" >
+      <span class="status s-curated">✓ Curated</span><span id="f-status-curated" class="cnt">0</span></label>
+
+
+    <label class="f-opt"><input type="checkbox" name="status" value="config_generated" >
+      <span class="status s-config_generated">⚙ Test index</span><span id="f-status-config_generated" class="cnt">0</span></label>
+
+
+    <label class="f-opt"><input type="checkbox" name="status" value="live" >
+      <span class="status s-live">● Live</span><span id="f-status-live" class="cnt">0</span></label>
+
+
+  </fieldset>
+  <fieldset>
+    <legend>Flags</legend>
+    <label class="f-opt" title="Something promoted is stale: a re-crawl happened after a promote — review the delta URLs and promote again"><input type="checkbox" name="flag" value="needs_recuration" >
+      <span class="f-lbl">⚠ needs re-curation</span><span id="f-flag-needs_recuration" class="cnt">0</span></label>
+    <label class="f-opt" title="The latest test index run failed or did not pass validation"><input type="checkbox" name="flag" value="needs_reindexing" >
+      <span class="f-lbl">⚠ needs re-indexing</span><span id="f-flag-needs_reindexing" class="cnt">0</span></label>
+    <label class="f-opt" title="The latest prod publish failed its validation or was never checked"><input type="checkbox" name="flag" value="prod_not_validated" >
+      <span class="f-lbl">⚠ prod not validated</span><span id="f-flag-prod_not_validated" class="cnt">0</span></label>
+  </fieldset>
+  <fieldset>
+    <legend>Division</legend>
+
+    <label class="f-opt"><input type="checkbox" name="division" value="Astrophysics" >
+      <span class="f-lbl" title="Astrophysics">Astrophysics</span><span id="f-division-Astrophysics" class="cnt">0</span></label>
+
+    <label class="f-opt"><input type="checkbox" name="division" value="Biological and Physical Sciences" >
+      <span class="f-lbl" title="Biological and Physical Sciences">Biological and Physical Sciences</span><span id="f-division-Biological_and_Physical_Sciences" class="cnt">0</span></label>
+
+    <label class="f-opt"><input type="checkbox" name="division" value="Earth Science" >
+      <span class="f-lbl" title="Earth Science">Earth Science</span><span id="f-division-Earth_Science" class="cnt">0</span></label>
+
+    <label class="f-opt"><input type="checkbox" name="division" value="Heliophysics" >
+      <span class="f-lbl" title="Heliophysics">Heliophysics</span><span id="f-division-Heliophysics" class="cnt">0</span></label>
+
+    <label class="f-opt"><input type="checkbox" name="division" value="Planetary Science" >
+      <span class="f-lbl" title="Planetary Science">Planetary Science</span><span id="f-division-Planetary_Science" class="cnt">0</span></label>
+
+    <label class="f-opt"><input type="checkbox" name="division" value="General" >
+      <span class="f-lbl" title="General">General</span><span id="f-division-General" class="cnt">2</span></label>
+
+  </fieldset>
+  <fieldset>
+    <legend>Curator</legend>
+
+    <label class="f-opt"><input type="checkbox" name="curator" value="anonymous" >
+      <span class="f-lbl ">anonymous</span><span id="f-curator-anonymous" class="cnt">2</span></label>
+
+
+  </fieldset>
+</form></aside>
+  <div class="dash-main">
+    <div class="searchbar">
+      <span class="search-icon" aria-hidden="true">&#x1F50D;&#xFE0E;</span>
+      <input id="f-q" type="search" name="q" form="filters" placeholder="Search collections by name, id or URL…  ( / )"
+             value="" autocomplete="off" aria-label="Search collections"
+             hx-get="/rows" hx-include="#filters" hx-target="#collections" hx-swap="outerHTML"
+             hx-trigger="input changed delay:250ms" hx-sync="#filters:replace">
+    </div>
+    <section class="toolbar">
+
+      <form method="post" action="/collections" class="inline">
+        <input name="seed_url" placeholder="https://science.nasa.gov/" required size="34" value="">
+        <input name="name" placeholder="Display name" required size="22" value="">
+
+        <select name="division" title="one division for the whole collection, or leave it on General to have the AI suggest one per page">
+
+          <option value="Astrophysics" >Astrophysics</option><option value="Biological and Physical Sciences" >Biological and Physical Sciences</option><option value="Earth Science" >Earth Science</option><option value="Heliophysics" >Heliophysics</option><option value="Planetary Science" >Planetary Science</option><option value="General" selected>General — not assigned</option>
+        </select>
+        <input name="max_pages" type="number" value="100000" min="1" max="100000" size="7" title="max pages">
+        <button>Add collection</button>
+      </form>
+    </section>
+    <section class="card jobs-card" id="jobs-panel" hx-get="/jobs/panel" hx-trigger="sse:collection[sseRefresh(this)], sseRefresh, every 10s [jobLive('#jobs-panel') && sseQuiet(this, 10000)], sseReopen from:body" hx-sync="this:replace" hx-swap="innerHTML">
+
+
+<div class="jobs-strip" data-job-live>
+
+  <ul class="jobs-list">
+
+    <li>
+      <span class="spinner"></span>
+      <span class="job j-running">llm_metadata</span>
+      <a href="/collections/run.org">run.org</a>
+      <span class="muted small">LLM calls in progress · 3/8 URLs · started &lt;SINCE&gt; ago</span>
+      <button class="mini" title="Cancel this job" hx-post="/api/collections/run.org/jobs/cancel" hx-swap="none" hx-confirm="Cancel the llm_metadata job on run.org?">✕</button>
+    </li>
+
+  </ul>
+
+  <a class="small" href="/jobs">All jobs →</a>
+</div>
+    </section>
+    <div class="tbl-wrap">
+
+
+<table id="collections" hx-get="/rows" hx-include="#filters"
+       hx-trigger="sse:collection_deleted, sse:collection_created, sseReopen from:body" hx-swap="outerHTML" hx-sync="this:replace">
+  <thead>
+    <tr><th class="sn" title="place in the current view">#</th>
+
+<th ><a class="sort" href="/?sort=name&dir=asc" onclick="return dashSort('name', 'asc')" title="sort by collection, ascending">Collection<span class="arrow">⇅</span></a></th>
+
+
+<th  title="sorts in pipeline order"><a class="sort" href="/?sort=status&dir=asc" onclick="return dashSort('status', 'asc')" title="sort by status, ascending">Status<span class="arrow">⇅</span></a></th>
+
+
+<th  title="every URL the last crawl found"><a class="sort" href="/?sort=dump&dir=asc" onclick="return dashSort('dump', 'asc')" title="sort by dump urls, ascending">Dump URLs<span class="arrow">⇅</span></a></th>
+
+
+<th  title="what will change in the curated URLs when you promote"><a class="sort" href="/?sort=delta&dir=asc" onclick="return dashSort('delta', 'asc')" title="sort by delta urls, ascending">Delta URLs<span class="arrow">⇅</span></a></th>
+
+
+<th  title="the approved set; included rows are exported to the index"><a class="sort" href="/?sort=curated&dir=asc" onclick="return dashSort('curated', 'asc')" title="sort by curated urls, ascending">Curated URLs<span class="arrow">⇅</span></a></th>
+
+
+<th ><a class="sort" href="/?sort=job&dir=asc" onclick="return dashSort('job', 'asc')" title="sort by last job, ascending">Last job<span class="arrow">⇅</span></a></th>
+
+
+<th ><a class="sort" href="/?sort=updated&dir=asc" onclick="return dashSort('updated', 'asc')" title="sort by updated, ascending">Updated<span class="arrow">⇅</span></a></th>
+<th></th></tr>
+  </thead>
+  <tbody id="rows">
+
+<tr id="row-run_org"
+    hx-get="/collections/run.org/row"
+    hx-trigger="sse:collection[detail.data.includes('&quot;run.org&quot;') && sseRefresh(this)], sseRefresh, every 10s [sseQuiet(this, 10000)]"
+    hx-sync="this:replace" hx-swap="outerHTML">
+
+  <td class="sn"></td>
+  <td class="name"><a href="/collections/run.org">run.org</a><br>
+      <a class="seed" href="https://run.org" target="_blank" rel="noopener" title="open the seed URL">https://run.org</a></td>
+  <td class="status-cell"><span class="status s-curating">✎ Curating</span>
+      <span class="chip stage" title="curation stage">① Exclusions</span>
+
+
+      </td>
+  <td title="dump URLs"><a href="/collections/run.org?tab=dump">8</a></td>
+  <td title="delta URLs"><a href="/collections/run.org?tab=delta">8</a></td>
+
+  <td title="curated URLs that reach the index"><a href="/collections/run.org?tab=curated">0</a></td>
+  <td class="lastjob"><span class="job j-running" title="">llm_metadata · running</span>
+      <small class="muted"> LLM calls in progress · 3/8 URLs</small></td>
+  <td><time datetime="<TS>"><TS></time></td>
+  <td class="actions">
+
+
+
+
+
+  <span class="spinner"></span> <small class="muted">llm_metadata running…</small>
+  <button class="mini" title="Cancel the running job" hx-post="/api/collections/run.org/jobs/cancel" hx-confirm="Cancel the running job?" hx-target="closest tr" hx-swap="outerHTML">✕</button>
+</td>
+</tr>
+<tr id="row-ex_org"
+    hx-get="/collections/ex.org/row"
+    hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseRefresh(this)], sseRefresh"
+    hx-sync="this:replace" hx-swap="outerHTML">
+
+  <td class="sn"></td>
+  <td class="name"><a href="/collections/ex.org">ex.org</a><br>
+      <a class="seed" href="https://ex.org" target="_blank" rel="noopener" title="open the seed URL">https://ex.org</a></td>
+  <td class="status-cell"><span class="status s-curating">✎ Curating</span>
+      <span class="chip stage" title="curation stage">② Metadata</span>
+
+
+      </td>
+  <td title="dump URLs"><a href="/collections/ex.org?tab=dump">8</a></td>
+  <td title="delta URLs"><a href="/collections/ex.org?tab=delta">4</a></td>
+
+  <td title="curated URLs that reach the index"><a href="/collections/ex.org?tab=curated">2</a></td>
+  <td class="lastjob"><span class="job j-succeeded" title="">llm_metadata · succeeded</span>
+      <small class="muted"> 7 classified · 13,160 tokens in / 224 out (56 reasoning)</small></td>
+  <td><time datetime="<TS>"><TS></time></td>
+  <td class="actions">
+
+
+
+
+
+  <a class="button primary" href="/collections/ex.org?tab=curate" title="Settle the exclusions, set metadata, then promote">Open curation</a>
+</td>
+</tr>
+
+  </tbody>
+</table>
+</div>
+  </div>
+</div>
+<script>
+  // Keep the address bar in sync with the filter pane so a filtered view can be reloaded or shared.
+  document.body.addEventListener('htmx:afterRequest', (e) => {
+    if (!['filters', 'f-q'].includes(e.detail.elt.id) || !e.detail.successful) return;
+    const qs = new URLSearchParams(new FormData(document.getElementById('filters')));
+    for (const k of [...qs.keys()]) if (!qs.get(k)) qs.delete(k);
+    history.replaceState(null, '', qs.toString() ? '/?' + qs : '/');
+  });
+  // A column header click: the sort lives in the filter form, which re-fetches the table with it.
+  function dashSort(key, dir) {
+    const f = document.getElementById('filters');
+    f.elements.sort.value = key; f.elements.dir.value = dir;
+    htmx.trigger(f, 'resort');
+    return false;
+  }
+  // "/" jumps to the search bar (unless already typing somewhere).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) return;
+    e.preventDefault(); const q = document.getElementById('f-q'); q.focus(); q.select();
+  });
+</script>
+</main>
+  <script>
+    // Per-URL edits = exact-URL rules (Dump / Delta / Curated URL tables). When the field still has an
+    // AI suggestion (`ai` = true) the edit goes through /ai/accept so the suggestion is resolved too:
+    // same value → accepted as AI, a different value → "AI, edited".
+    // A refusal's message: the JSON `detail` when the app sent one. A proxy error page (HTML from the
+    // ALB/CloudFront, e.g. 502 Bad Gateway) never reaches the user as raw markup.
+    function errorText(status, statusText, body) {
+      let m = body || statusText;
+      try { m = JSON.parse(m).detail || m; } catch (_) {}
+      if (typeof m !== 'string') return JSON.stringify(m);
+      if (/^\s*</.test(m) || [502, 503, 504].includes(status))
+        return `The server is temporarily unavailable (HTTP ${status}). Please try again in a moment.`;
+      return m;
+    }
+    // The pagers' page box (partials/pager.html): jump to the typed page, clamped to 1..pages. It
+    // clicks a new link placed beside the box, so the jump is boosted exactly when the pager's own
+    // links are (a boosted link's URL is read when htmx processes it: re-pointing › does nothing).
+    function jumpPage(input) {
+      const max = +input.max || 1;
+      const n = Math.min(max, Math.max(1, Math.round(+input.value) || 1));
+      input.value = n;
+      if (String(n) === input.dataset.page) return;
+      input.dataset.page = String(n);  // the blur after an Enter must not jump a second time
+      const link = document.createElement('a');
+      link.href = input.dataset.href.replace('__PAGE__', n);
+      link.hidden = true;
+      input.after(link);
+      htmx.process(link);
+      link.click();
+    }
+    async function postJson(path, body) {
+      const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      if (!r.ok) { alert(errorText(r.status, r.statusText, await r.text())); return false; }
+      return true;
+    }
+    async function editField(cid, url, type, value, ai) {
+      const base = `/api/collections/${encodeURIComponent(cid)}`;
+      const ok = (ai && value)
+        ? await postJson(`${base}/ai/accept`, {url, field: type, value})
+        : await postJson(`${base}/urls`, value ? {url, type, value} : {url, type, value: null});
+      if (ok) location.reload();
+    }
+    function editTitle(cid, url, current, ai) {
+      const v = prompt("Title for\n" + url + "\n\nTip: {title} = scraped title, {collection} = collection name", current);
+      if (v === null) return;
+      if (!v.trim()) { alert("Title cannot be empty. To fall back to the pattern/curated value, delete the exact-URL title rule on the Rules tab."); return; }
+      editField(cid, url, "title", v, !!ai);
+    }
+    // ✎ on an AI division / doc-type badge: preselect the suggested value and hand over to the select.
+    function pickAi(btn, value) {
+      const sel = btn.closest("td").querySelector("select");
+      if (!sel) return;
+      sel.value = value; sel.focus();
+      try { sel.showPicker(); } catch (_) {}
+    }
+    // Delta URLs → promote a selection. Ticks are per page (a promote reloads it). The confirm
+    // text is written onto the button: htmx reads hx-confirm at request time.
+    function pickCount() {
+      const on = [...document.querySelectorAll('input.pick:checked')];
+      const btn = document.querySelector('#promote-bar button'); if (!btn) return;
+      const ai = on.filter(b => b.dataset.ai === '1').length, del = on.filter(b => b.dataset.del === '1').length;
+      document.getElementById('pick-n').textContent = on.length;
+      document.getElementById('pick-warn').textContent =
+        (del ? `${del} removal${del > 1 ? 's' : ''}` : '') + (del && ai ? ' · ' : '') + (ai ? `${ai} with an undecided AI suggestion` : '');
+      btn.disabled = on.length === 0;
+      btn.setAttribute('hx-confirm', `Promote ${on.length} delta URL${on.length > 1 ? 's' : ''} to the curated URLs?`
+        + (del ? `\n${del} of them are removals: their curated rows are dropped and the next index run deletes them.` : '')
+        + (ai ? `\n${ai} still carry an undecided AI suggestion — promoting discards it.` : ''));
+    }
+    function pickAll(box) { document.querySelectorAll('input.pick:not(:disabled)').forEach(b => { b.checked = box.checked; }); pickCount(); }
+    // Edit a pattern suggestion's glob in place, then accept it with the edited match.
+    function editSuggestion(btn, cid, sid, match) {
+      const cell = btn.closest("tr").querySelector("td.match");
+      if (!cell || cell.querySelector("input")) return;
+      cell.dataset.orig = cell.innerHTML;
+      cell.innerHTML = `<span class="inline nowrap"><input size="42" aria-label="edited glob"> <button class="primary mini" type="button">Save &amp; accept</button> <button class="secondary mini" type="button">Cancel</button></span>`;
+      const input = cell.querySelector("input"); input.value = match; input.focus(); input.select();
+      const [save, cancel] = cell.querySelectorAll("button");
+      const restore = () => { cell.innerHTML = cell.dataset.orig; };
+      cancel.onclick = restore;
+      input.onkeydown = (e) => { if (e.key === "Escape") restore(); if (e.key === "Enter") save.click(); };
+      save.onclick = async () => {
+        const v = input.value.trim();
+        if (!v) { alert("The match cannot be empty."); return; }
+        if (await postJson(`/api/collections/${encodeURIComponent(cid)}/suggestions/${sid}/accept`, {match: v})) location.reload();
+      };
+    }
+    // Hamburger menu: close on outside click or Escape.
+    document.addEventListener('click', (e) => { const m = document.getElementById('menu'); if (m && m.open && !m.contains(e.target)) m.open = false; });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { const m = document.getElementById('menu'); if (m) m.open = false; } });
+    // Connection indicator: green when the SSE stream is open.
+    // Polling is the safety net for a live job only: `every Ns [jobLive()]` on the pollers. The header
+    // and the jobs strip carry data-job-live while something is queued or running.
+    function jobLive(scope) { return !!document.querySelector((scope ? scope + ' ' : '') + '[data-job-live]'); }
+    // A running job sends a progress event every second to every open tab, and each one re-fetched
+    // the header and the stepper. `sse:collection[… && sseRefresh(this)], sseRefresh` refreshes at
+    // most once per SSE_REFRESH_MS per element: the first event of a burst at once, the rest folded
+    // into one trailing refresh, so the last event (the job's end) is never dropped — htmx's own
+    // `throttle:` drops it. `every Ns [… && sseQuiet(this, N000)]` keeps the poll for when SSE is silent.
+    // Kept per element id, not on the element: a dashboard row swaps itself out (outerHTML), and the
+    // trailing refresh must reach the row now on the page.
+    const SSE_REFRESH_MS = 3000;
+    const sseState = new Map();  // element id → {last, timer}
+    function sseRefresh(elt) {
+      const s = sseState.get(elt.id) || {last: 0, timer: null};
+      sseState.set(elt.id, s);
+      if (s.timer) return false;  // a trailing refresh is already queued
+      const wait = s.last + SSE_REFRESH_MS - Date.now();
+      if (wait <= 0) { s.last = Date.now(); return true; }
+      s.timer = setTimeout(() => {
+        s.timer = null; s.last = Date.now();
+        const now = document.getElementById(elt.id);
+        if (now) htmx.trigger(now, 'sseRefresh');
+      }, wait);
+      return false;
+    }
+    function sseQuiet(elt, ms) { return Date.now() - ((sseState.get(elt.id) || {}).last || 0) >= ms; }
+    // A job poll that slows down while SSE is live: `sse:collection[… && sseSeen(this) && …], every 2s
+    // [jobPollDue(this, 10000, 4000)]` fetches once per 10 s while the element's SSE events keep
+    // arriving, and once per 4 s after they have been silent for 10 s (a dead stream). The tick is
+    // short so both intervals land on it; 500 ms of slack absorbs timer jitter. With a dead stream,
+    // the header's own poll can clear data-job-live before this poll sees the job's end, so the first
+    // tick after the job stops being live fetches once more; with a live stream the end event did.
+    const pollState = new Map();  // element id → {seen, polled, live}
+    function pollEntry(elt) { const s = pollState.get(elt.id) || {seen: 0, polled: 0, live: false}; pollState.set(elt.id, s); return s; }
+    function sseSeen(elt) { pollEntry(elt).seen = Date.now(); return true; }
+    function jobPollDue(elt, liveMs, deadMs) {
+      const s = pollEntry(elt), now = Date.now(), sseLive = now - s.seen < liveMs, wasLive = s.live;
+      s.live = jobLive();
+      if (!s.live) {
+        if (!wasLive || sseLive) return false;
+        s.polled = now;
+        return true;
+      }
+      if (now - s.polled < (sseLive ? liveMs : deadMs) - 500) return false;
+      s.polled = now;
+      return true;
+    }
+    // A reconnect after a drop fires `sseReopen`: events sent meanwhile are gone, so lists that rely
+    // on them (the dashboard table) re-fetch once instead of polling all the time.
+    let sseDropped = false;
+    document.body.addEventListener('htmx:sseOpen', () => {
+      document.getElementById('conn').classList.add('on');
+      if (sseDropped) { sseDropped = false; htmx.trigger(document.body, 'sseReopen'); }
+    });
+    document.body.addEventListener('htmx:sseError', () => { sseDropped = true; document.getElementById('conn').classList.remove('on'); });
+    // One place for server-side refusals (4xx/5xx). Aborted/replaced requests never alert, and neither
+    // do background refreshes (an `every Ns` poll fires with no triggering event, an SSE refresh with
+    // an sse:* one): the old content stays and the next refresh recovers, while an alert would freeze
+    // the page — and every timer on it — until OK is clicked.
+    document.body.addEventListener('htmx:responseError', (e) => {
+      const ev = e.detail.requestConfig && e.detail.requestConfig.triggeringEvent;
+      const xhr = e.detail.xhr;
+      if (!ev || ev.type.startsWith('sse:')) { console.warn('background refresh failed', xhr.status, e.detail.pathInfo); return; }
+      alert(errorText(xhr.status, xhr.statusText, xhr.responseText));
+    });
+
+  </script>
+</body>
+</html>

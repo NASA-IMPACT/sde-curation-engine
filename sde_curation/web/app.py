@@ -46,6 +46,7 @@ from ..jobs import JobConflict, JobManager
 from ..llm.base import LLMError, make_llm
 from ..llm.global_excludes import load_global_excludes
 from ..llm.tasks import PATTERN_SYSTEM, TITLE_SIBLINGS, TITLES_SYSTEM, metadata_system
+from ..looplag import LoopLagProbe
 from ..models import (
     ANONYMOUS_ACTOR,
     CURATION_DIVISIONS,
@@ -445,8 +446,26 @@ class DbScope:
                     database.touch(m.group(1))
 
 
+# Libraries that log every HTTP call at INFO: one line per LLM call, per S3 or AOSS request.
+_CHATTY_LOGGERS = ("httpx", "httpcore", "openai", "botocore", "boto3", "urllib3", "s3transfer", "opensearch")
+
+
+def configure_logging() -> None:
+    """The engine's own INFO lines (job starts, resumes, index keys) reach the container log. Nothing
+    configured logging before, so only WARNING and above came out, through Python's last-resort
+    handler. Leaves an existing configuration alone (pytest's, or a deployment's --log-config), and
+    uvicorn keeps its own loggers, which do not propagate to the root."""
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for name in _CHATTY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    configure_logging()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -491,9 +510,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.curation = CurationService(db, lock_for=jobs.lock)
         app.state.patterns_file = PatternsFile(db, settings.collections_dir)
         await jobs.recover()
+        app.state.loop_lag = LoopLagProbe()
+        app.state.loop_lag.start()
         try:
             yield
         finally:
+            await app.state.loop_lag.stop()
             await jobs.shutdown()
             await app.state.patterns_file.flush()
             await db.close()
@@ -637,15 +659,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health/db")
     async def health_db(request: Request) -> JSONResponse:
         """Readiness of the database, for monitoring and load tests: a page-request (read pool)
-        connection answers within health_db_timeout_s. 503 when it does not."""
+        connection answers within health_db_timeout_s. 503 when it does not. `loop_lag_ms`: the
+        event loop's latest lag and its worst since the previous call (sde_curation.looplag)."""
         stats: dict = {}
+        lag = request.app.state.loop_lag.read()
         try:
             stats = db(request).pool_stats()
             ok = await asyncio.wait_for(db(request).ping(), timeout=settings.health_db_timeout_s)
         except Exception as e:  # noqa: BLE001 - surfaced to the caller, not hidden
             reason = "timed out" if isinstance(e, TimeoutError) else f"{type(e).__name__}: {e}"
-            return JSONResponse({"ok": False, "db": f"error: {reason}", "pools": stats}, status_code=503)
-        return JSONResponse({"ok": ok, "db": "ok" if ok else "error", "pools": stats}, status_code=200 if ok else 503)
+            return JSONResponse({"ok": False, "db": f"error: {reason}", "pools": stats, "loop_lag_ms": lag},
+                                status_code=503)
+        return JSONResponse({"ok": ok, "db": "ok" if ok else "error", "pools": stats, "loop_lag_ms": lag},
+                            status_code=200 if ok else 503)
 
     # ── pages ──────────────────────────────────────────────────────────
 

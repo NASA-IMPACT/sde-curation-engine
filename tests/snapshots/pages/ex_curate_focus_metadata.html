@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ex.org · SDE Curation Engine</title>
+  <link rel="stylesheet" href="/static/app.css?v=<V>">
+  <script src="/static/htmx.min.js?v=<V>"></script>
+  <script src="/static/sse.js?v=<V>"></script>
+  <script src="/static/json-enc.js?v=<V>"></script>
+</head>
+<body hx-ext="sse" sse-connect="/events">
+  <header>
+    <a href="/" class="brand">SDE Curation Engine</a>
+    <span id="conn" class="dot" title="SSE connection"></span>
+
+
+    <details class="menu" id="menu">
+      <summary aria-label="Menu" title="Menu">
+
+        <span class="burger" aria-hidden="true"><i></i><i></i><i></i></span>
+      </summary>
+      <div class="menu-panel" role="menu">
+
+        <a role="menuitem" href="/">Collections</a>
+        <a role="menuitem" href="/jobs">Jobs</a>
+        <a role="menuitem" href="/history">History</a>
+        <a role="menuitem" href="/manual">User manual</a>
+
+
+
+      </div>
+    </details>
+
+  </header>
+  <main>
+
+<div id="job-watch" hx-get="/collections/ex.org?tab=curate&amp;focus=metadata" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:drop"
+     hx-on::config-request="event.detail.path = location.pathname + location.search"
+     hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded&quot;') || detail.data.includes('&quot;state&quot;: &quot;failed&quot;'))], every 2s [jobPollDue(this, 10000, 4000)], sseReopen from:body"></div>
+
+<div id="wb-header" hx-get="/collections/ex.org/header"
+     hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseRefresh(this)], sseRefresh, every 10s [jobLive() && sseQuiet(this, 10000)], sseReopen from:body" hx-sync="this:replace" hx-swap="innerHTML">
+
+
+
+
+
+<div class="wb-head">
+  <div class="wb-ident">
+    <a class="crumb" href="/">← Collections</a>
+    <h1 class="wb-name">ex.org
+      <a class="wb-id" href="https://ex.org" target="_blank" rel="noopener" title="open the seed URL">https://ex.org ↗</a>
+    </h1>
+    <div class="badges">
+
+<span class="status s-curating" title="workflow status">✎ Curating</span> <span class="chip stage" title="curation stage: setting titles, divisions and document types">② Metadata</span>
+
+    </div>
+  </div>
+  <div class="wb-next">
+    <span class="muted small">Next:</span>
+
+
+
+
+
+  <a class="button primary" href="/collections/ex.org?tab=curate" title="Settle the exclusions, set metadata, then promote">Open curation</a>
+
+
+
+  </div>
+</div>
+</div>
+
+
+
+<div id="pipeline-ex_org" class="pipeline-wrap"
+     hx-get="/collections/ex.org/pipeline"
+     hx-on::config-request="if (event.detail.elt === this) event.detail.parameters.step = new URLSearchParams(location.search).get('step') || ''"
+     hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseRefresh(this)], sseRefresh, every 5s [jobLive() && sseQuiet(this, 5000)], sseReopen from:body"
+     hx-sync="this:replace" hx-swap="innerHTML">
+
+<ol class="pipeline">
+
+  <li class="done " title="Registered">
+    <a href="/collections/ex.org?step=backlog" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">1</span> Backlog</a></li>
+
+  <li class="done " title="Crawl ingested">
+    <a href="/collections/ex.org?step=scraped" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">2</span> Scraped</a></li>
+
+  <li class="current selected" title="Settle the exclusions, set metadata, then promote.">
+    <a href="/collections/ex.org?step=curating" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">3</span> Curating <small class="stage">· metadata</small></a></li>
+
+  <li class="todo " title="Index the curated set to the test index.">
+    <a href="/collections/ex.org?step=curated" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">4</span> Curated</a></li>
+
+  <li class="todo " title="Check the validation result, then index to production.">
+    <a href="/collections/ex.org?step=config_generated" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">5</span> Test index</a></li>
+
+  <li class="todo " title="Live. Re-scrape to start a new cycle.">
+    <a href="/collections/ex.org?step=live" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">6</span> Live</a></li>
+
+
+
+
+</ol>
+</div>
+
+<div id="tab-body" data-tab="curate" data-step="curating">
+
+
+<nav class="tabs" role="tablist" aria-label="collection sections">
+
+  <a role="tab" aria-selected="false" class="tab " title="This step: what it did, its actions, details and last job"
+     href="/collections/ex.org?step=curating&tab=overview">Overview</a>
+
+  <a role="tab" aria-selected="false" class="tab " title="Every URL the last crawl found (raw)"
+     href="/collections/ex.org?step=curating&tab=dump">Dump URLs <span class="count  ">8</span></a>
+
+  <a role="tab" aria-selected="true" class="tab active" title="Exclusions, metadata, promote"
+     href="/collections/ex.org?step=curating&tab=curate">Curate</a>
+
+  <a role="tab" aria-selected="false" class="tab " title="Every rule in force for this collection"
+     href="/collections/ex.org?step=curating&tab=rules">Rules <span class="count  ">23</span></a>
+
+  <a role="tab" aria-selected="false" class="tab " title="What will change in the curated URLs when you promote"
+     href="/collections/ex.org?step=curating&tab=delta">Delta URLs <span class="count warn ">4</span></a>
+
+  <a role="tab" aria-selected="false" class="tab " title="The approved set. The count is the rows that reach the index; excluded rows stay in the list but are not counted"
+     href="/collections/ex.org?step=curating&tab=curated">Curated URLs <span class="count ok ">2</span></a>
+
+  <a role="tab" aria-selected="false" class="tab " title="Jobs, status history and audit trail"
+     href="/collections/ex.org?step=curating&tab=activity">Activity</a>
+
+</nav>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<ol class="pipeline stepper" aria-label="curation steps">
+
+  <li class="done"><a href="/collections/ex.org?tab=curate#exclusions"><span class="n">1</span> Exclusions</a></li>
+  <li class="done"><a href="/collections/ex.org?tab=curate#metadata"><span class="n">2</span> Metadata</a></li>
+  <li class="current"><a href="/collections/ex.org?tab=curate#promote"><span class="n">3</span> Promote</a></li>
+
+</ol>
+
+
+
+
+
+
+
+<section class="card stage-card done" id="metadata">
+  <h2><span class="n">2</span> Metadata <small class="muted">titles, divisions and document types</small> <span class="state-tag done">done</span>
+  <span class="grow"></span><a class="button secondary small" href="/collections/ex.org?tab=curate#metadata" title="back to the whole Curate page">⤡ Collapse</a></h2>
+
+  <div class="next"><div class="next-inner">
+    <div>
+
+      <b>✨ Suggest metadata</b> — asks fake for a title, division and document type
+      for each of the <b>4</b> included delta URLs not yet classified (or whose text changed since):
+      one call per URL with the <b>full page text</b> (cut from the end only when a page is too long for the model), 16 in parallel. Each answer carries a confidence per field. Nothing is applied until you accept.
+
+      <details class="prompt"><summary class="muted small">Show the prompt</summary><pre class="prompt">You classify one crawled web page at a time for NASA&#39;s Science Discovery Engine (SDE), a
+search engine over NASA science content. You receive the collection (the website the page was
+crawled from), the page URL, its scraped title and its full text (possibly long). The scraped
+title is often the same site-wide string on every page, and the text usually starts with the
+site&#39;s navigation menu, alerts and login links: skip that chrome and read the page&#39;s own content.
+A page too long to send whole is cut from the end: `text_cut` is then true and `text_chars` is the
+length of the whole page, so judge it from the part you have (a huge page is usually a listing).
+
+Every page of a collection is classified in a separate call, and the answers must agree with
+each other: apply the rules below the same way every time.
+
+title — a free-form title for this page as it should read in a search result, judged by someone
+who has not seen the site.
+- Descriptive and self-contained, typically 4–12 words: the page&#39;s real subject (&#34;Information for
+  Data Proposers&#34;, &#34;Real-Time Geomagnetic Storm Tracker&#34;).
+- Do not add the collection or site name to the title, as a prefix or a suffix (&#34;PDS: …&#34;,
+  &#34;… | Aurorasaurus&#34;). A mission, instrument, project or dataset name belongs in the title only
+  when the page is about it (&#34;Cassini ISS Calibrated Images&#34;); keep such names and acronyms as the
+  page writes them.
+- Do not copy the site-wide scraped title; no slogans, &#34;Welcome to&#34; or &#34;Home Page&#34;.
+- Never empty: a page with little content of its own still gets the best title its URL, scraped
+  title and text support, with low confidence.
+
+division — the NASA Science Mission Directorate division, one of:
+- Astrophysics: the universe beyond the solar system — stars, galaxies, exoplanets, black holes,
+  cosmology, dark matter and dark energy (e.g. Hubble, Webb, Chandra, TESS).
+- Biological and Physical Sciences: life and physical science research in the space environment —
+  space biology, microgravity fluids, combustion and materials, fundamental physics, ISS research
+  (e.g. GeneLab, the Open Science Data Repository).
+- Earth Science: Earth as a system — atmosphere, oceans, land, ice, biosphere, climate, weather
+  and natural hazards (e.g. Terra, Aqua, Landsat, Earthdata and the DAACs).
+- Heliophysics: the Sun and its influence through the solar system — solar activity, solar wind,
+  space weather, magnetospheres, the ionosphere and aurora (e.g. SDO, Parker Solar Probe).
+- Planetary Science: planets, moons, asteroids, comets and meteorites of the solar system,
+  planetary defense and astrobiology (e.g. Mars rovers, Cassini, the Planetary Data System).
+There is no &#34;general&#34;, &#34;other&#34; or &#34;unclear&#34; division: every page belongs to one of the five. A page
+that spans several — agency-wide science policy, cross-division education — takes the division it
+serves most, and a page whose division you cannot tell takes the most likely one with low
+confidence, which a reviewer checks.
+Judge from the page&#39;s subject read in the context of the whole collection: the pages of one site
+nearly always share a division, so a help page, data-format guide or proposer page on a planetary
+data archive is Planetary Science like the rest of the archive.
+
+document_type — exactly one of the five SDE document types, for every page; never null, because
+the SDE cannot index a page without one:
+- Data: resources that describe, provide access to, or support the use of scientific datasets
+  produced from observations, experiments, models, or missions — raw, processed or derived data
+  such as measurements, imagery and spectra. In the SDE, Data is represented through metadata
+  and links to dataset landing pages or other access points; the data files themselves are not
+  indexed.
+- Software and Tools: webpages and metadata describing or providing access to software,
+  applications, tools, algorithms and code developed to analyze, process, visualize, model,
+  calculate or otherwise manipulate scientific data or support scientific research — command-line
+  tools, GUI applications, numerical and computational models, model code and model interfaces.
+  Includes project webpages, software and code repositories, and metadata about software.
+- Documentation: written materials that provide information about scientific concepts, data
+  products, software and tools, scientific methodologies or other scientific resources — manuals,
+  guides, specifications, reports and technical documentation giving instructions, technical
+  details, background or methodological context. Examples: Algorithm Theoretical Basis Documents
+  (ATBDs), user guides, technical reports, data product documentation.
+- Missions and Instruments: information about specific scientific missions, spacecraft, aircraft,
+  instruments and payloads of NASA&#39;s Science Mission Directorate (SMD) — mission objectives,
+  scientific goals, timelines, spacecraft and instrument capabilities, and related activities.
+- Images: webpages and resources that contain, describe or provide access to scientific or
+  educational visual content — photographs, videos, maps, diagrams, charts, illustrations and
+  other graphics, depicting celestial objects, planetary surfaces including Earth, astronomical or
+  atmospheric phenomena, spacecraft, instruments, laboratories, astronauts or scientists.
+Classify by the page&#39;s primary purpose — what a searcher would come to it for — not by incidental
+elements: a page with a photo is not Images, a page with a download link is not Data. Between
+close types:
+- Gives access to a dataset or data holdings (dataset landing page, archive volume, data search
+  or browse interface) → Data.
+- A program, model, library or web application that analyzes, processes, visualizes or models
+  data, or the page describing or distributing it → Software and Tools.
+- Explains, specifies or instructs about data, software, missions or methods (user guides, ATBDs,
+  help and FAQ pages, format standards, submission or proposal guidelines) → Documentation, even
+  when it links to what it describes.
+- An overview of a mission, spacecraft, aircraft, instrument or payload → Missions and
+  Instruments, even when it shows pictures.
+- A gallery, or an image, video or map page whose purpose is the visual itself → Images.
+- A page that fits none of these well (news, feature articles, events, people, about or
+  organization pages) → the type of what it is mainly about: a mission news story → Missions and
+  Instruments, a feature on a dataset → Data, a tool announcement → Software and Tools; when it is
+  about none of those → `collection_document_type` when given, otherwise Documentation. Its
+  confidence is low.
+When `collection_document_type` is given, an expert set it as the collection&#39;s usual type: use it
+when the page fits it, but a page that clearly fits another type gets that type.
+
+Confidence, one per field you answer:
+- high: stated in the page text or title, or follows directly from the rules above (a dataset
+  landing page is Data; a user guide is Documentation).
+- medium: a reasonable inference where another answer is also defensible.
+- low: a guess. No field is ever null or empty: when unsure, give the most likely value with low
+  confidence — a reviewer checks every low-confidence answer.
+Never invent facts that are not in the input.
+
+— user message —
+Document:
+{&#34;collection&#34;: name, &#34;collection_seed&#34;: …, &#34;collection_division&#34;: only when the curator set one (then no division is asked for), &#34;collection_document_type&#34;: only when set, &#34;url&#34;: …, &#34;scraped_title&#34;: …, &#34;text_chars&#34;: N, &#34;text_cut&#34;: true only when cut}
+
+Text:
+&lt;the FULL page text; cut from the end only when the call would pass 270,000 tokens; every page goes to gpt-6-luna&gt;</pre></details>
+
+      <br><small class="muted">Last run <TS> · <span class="job j-succeeded">succeeded</span> · 7 classified · 13,160 tokens in / 224 out (56 reasoning)</small>
+
+      <br><small class="muted">Pages it gives the same title and document type as another page are flagged with the title as generated: edit them yourself, or send them back with <b>✨ Regenerate duplicate titles</b>.</small>
+
+    </div>
+    <button class="secondary"
+
+            title="classify 4 URLs"
+            hx-post="/api/collections/ex.org/suggest/metadata" hx-swap="none">✨ Suggest metadata <small>(4 URLs)</small></button>
+  </div></div>
+
+
+
+
+
+
+
+  <div class="suggestions">
+
+
+
+    <form method="get" action="/collections/ex.org" class="inline ai-filter" id="ai-filter">
+      <input type="hidden" name="tab" value="curate"><input type="hidden" name="focus" value="metadata">
+
+
+
+
+      <a class="conf decided-toggle " href="/collections/ex.org?tab=curate&amp;focus=metadata&amp;decided=hide#metadata"
+         title="list only the rows still to decide — the decided ones keep their place until you come back to this view">Hide decided 4</a>
+
+
+    </form>
+
+    <div class="inline pager">
+    <span class="muted small nowrap">1–4 of 4</span>
+  <a class="page off" href="/collections/ex.org?tab=curate&focus=metadata&per=50&page=1" aria-label="first page" title="first page">«</a>
+  <a class="page off" href="/collections/ex.org?tab=curate&focus=metadata&per=50&page=0" aria-label="previous page">‹</a>
+  <span class="small nowrap">page <input class="page-jump" type="number" min="1" max="1" value="1" aria-label="page number (type one and press Enter)" title="type a page number and press Enter" data-href="/collections/ex.org?tab=curate&focus=metadata&per=50&page=__PAGE__" data-page="1" onkeydown="if (event.key === 'Enter') { event.preventDefault(); jumpPage(this); }" onchange="jumpPage(this)"> / 1</span>
+  <a class="page off" href="/collections/ex.org?tab=curate&focus=metadata&per=50&page=2" aria-label="next page">›</a>
+  <a class="page off" href="/collections/ex.org?tab=curate&focus=metadata&per=50&page=1" aria-label="last page" title="last page">»</a>
+    <form method="get" action="/collections/ex.org" class="inline"><input type="hidden" name="tab" value="curate"><input type="hidden" name="focus" value="metadata">
+      <select name="per" aria-label="rows per page" onchange="this.form.submit()"><option >25</option><option selected>50</option><option >100</option><option >250</option></select></form>
+  </div>
+    <div class="sugg-page">
+    <table class="urls ai-review">
+      <thead><tr><th class="num">#</th><th>URL</th><th>Title <small class="muted">scraped → effective</small></th><th>Division</th><th>Doc type</th><th title="accept or dismiss every suggestion on this row">Row</th></tr></thead>
+      <tbody>
+
+
+
+        <tr class=" decided row-new">
+          <td class="num muted">1</td>
+          <td class="url"><a href="https://ex.org/p4" target="_blank" rel="noopener">https://ex.org/p4</a></td>
+          <td>
+
+
+  <small class="muted">Page 4</small><br>
+  <button type="button" class="linkish"
+          title="title https://ex.org/p4 → Edited by hand (by anonymous)"
+          onclick='editTitle("ex.org", "https://ex.org/p4", "Edited by hand", false)'>Edited by hand</button>
+
+
+
+
+  </td>
+          <td>
+
+
+
+  <select class="cell "  title="division https://ex.org/p4 → Astrophysics (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p4", "division", this.value, false)'>
+    <option value="">—</option><option selected>Astrophysics</option><option >Biological and Physical Sciences</option><option >Earth Science</option><option >Heliophysics</option><option >Planetary Science</option></select>
+  </td>
+          <td>
+
+
+
+  <select class="cell "  title="document_type https://ex.org/p4 → Documentation (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p4", "document_type", this.value, false)'>
+    <option value="">—</option><option >Images</option><option >Data</option><option selected>Documentation</option><option >Software and Tools</option><option >Missions and Instruments</option></select>
+  </td>
+          <td class="inline nowrap actions">
+            <span class="kind k-ok" title="every suggestion on this row is decided — the values shown are what promote writes. The row keeps its place here so the list does not renumber while you work; its cells stay editable.">✓ decided</span>
+          </td></tr>
+
+
+
+
+        <tr class=" decided row-new">
+          <td class="num muted">2</td>
+          <td class="url"><a href="https://ex.org/p6" target="_blank" rel="noopener">https://ex.org/p6</a></td>
+          <td>
+
+
+  <small class="muted">Page 6</small><br>
+  <button type="button" class="linkish"
+          title="title https://ex.org/p6 → Page 6 (by anonymous) · AI"
+          onclick='editTitle("ex.org", "https://ex.org/p6", "Page 6", false)'>Page 6</button>
+
+
+
+
+  </td>
+          <td>
+
+
+
+  <select class="cell "  title="division https://ex.org/p6 → Astrophysics (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p6", "division", this.value, false)'>
+    <option value="">—</option><option selected>Astrophysics</option><option >Biological and Physical Sciences</option><option >Earth Science</option><option >Heliophysics</option><option >Planetary Science</option></select>
+  </td>
+          <td>
+
+
+
+  <select class="cell "  title="document_type https://ex.org/p6 → Documentation (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p6", "document_type", this.value, false)'>
+    <option value="">—</option><option >Images</option><option >Data</option><option selected>Documentation</option><option >Software and Tools</option><option >Missions and Instruments</option></select>
+  </td>
+          <td class="inline nowrap actions">
+            <span class="kind k-ok" title="every suggestion on this row is decided — the values shown are what promote writes. The row keeps its place here so the list does not renumber while you work; its cells stay editable.">✓ decided</span>
+          </td></tr>
+
+
+
+
+        <tr class=" decided row-new">
+          <td class="num muted">3</td>
+          <td class="url"><a href="https://ex.org/p7" target="_blank" rel="noopener">https://ex.org/p7</a></td>
+          <td>
+
+
+  <small class="muted">Page 7</small><br>
+  <button type="button" class="linkish"
+          title="title https://ex.org/p7 → Page 7 (by anonymous) · AI"
+          onclick='editTitle("ex.org", "https://ex.org/p7", "Page 7", false)'>Page 7</button>
+
+
+
+
+  </td>
+          <td>
+
+
+
+  <select class="cell "  title="division https://ex.org/p7 → Astrophysics (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p7", "division", this.value, false)'>
+    <option value="">—</option><option selected>Astrophysics</option><option >Biological and Physical Sciences</option><option >Earth Science</option><option >Heliophysics</option><option >Planetary Science</option></select>
+  </td>
+          <td>
+
+
+
+  <select class="cell "  title="document_type https://ex.org/p7 → Documentation (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p7", "document_type", this.value, false)'>
+    <option value="">—</option><option >Images</option><option >Data</option><option selected>Documentation</option><option >Software and Tools</option><option >Missions and Instruments</option></select>
+  </td>
+          <td class="inline nowrap actions">
+            <span class="kind k-ok" title="every suggestion on this row is decided — the values shown are what promote writes. The row keeps its place here so the list does not renumber while you work; its cells stay editable.">✓ decided</span>
+          </td></tr>
+
+
+
+
+        <tr class=" decided row-new">
+          <td class="num muted">4</td>
+          <td class="url"><a href="https://ex.org/p8" target="_blank" rel="noopener">https://ex.org/p8</a></td>
+          <td>
+
+
+  <small class="muted">Page 8</small><br>
+  <button type="button" class="linkish"
+          title="title https://ex.org/p8 → Page 8 (by anonymous) · AI"
+          onclick='editTitle("ex.org", "https://ex.org/p8", "Page 8", false)'>Page 8</button>
+
+
+
+
+  </td>
+          <td>
+
+
+
+  <select class="cell "  title="division https://ex.org/p8 → Astrophysics (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p8", "division", this.value, false)'>
+    <option value="">—</option><option selected>Astrophysics</option><option >Biological and Physical Sciences</option><option >Earth Science</option><option >Heliophysics</option><option >Planetary Science</option></select>
+  </td>
+          <td>
+
+
+
+  <select class="cell "  title="document_type https://ex.org/p8 → Documentation (by anonymous) · AI"
+          onchange='editField("ex.org", "https://ex.org/p8", "document_type", this.value, false)'>
+    <option value="">—</option><option >Images</option><option >Data</option><option selected>Documentation</option><option >Software and Tools</option><option >Missions and Instruments</option></select>
+  </td>
+          <td class="inline nowrap actions">
+            <span class="kind k-ok" title="every suggestion on this row is decided — the values shown are what promote writes. The row keeps its place here so the list does not renumber while you work; its cells stay editable.">✓ decided</span>
+          </td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="inline pager">
+    <span class="muted small nowrap">1–4 of 4</span>
+  <a class="page off" href="/collections/ex.org?tab=curate&focus=metadata&per=50&page=1" aria-label="first page" title="first page">«</a>
+  <a class="page off" href="/collections/ex.org?tab=curate&focus=metadata&per=50&page=0" aria-label="previous page">‹</a>
+  <span class="small nowrap">page <input class="page-jump" type="number" min="1" max="1" value="1" aria-label="page number (type one and press Enter)" title="type a page number and press Enter" data-href="/collections/ex.org?tab=curate&focus=metadata&per=50&page=__PAGE__" data-page="1" onkeydown="if (event.key === 'Enter') { event.preventDefault(); jumpPage(this); }" onchange="jumpPage(this)"> / 1</span>
+  <a class="page off" href="/collections/ex.org?tab=curate&focus=metadata&per=50&page=2" aria-label="next page">›</a>
+  <a class="page off" href="/collections/ex.org?tab=curate&focus=metadata&per=50&page=1" aria-label="last page" title="last page">»</a>
+    <form method="get" action="/collections/ex.org" class="inline"><input type="hidden" name="tab" value="curate"><input type="hidden" name="focus" value="metadata">
+      <select name="per" aria-label="rows per page" onchange="this.form.submit()"><option >25</option><option selected>50</option><option >100</option><option >250</option></select></form>
+  </div>
+
+  </div>
+
+
+  <details class="add-rule">
+    <summary>Add a metadata rule by hand</summary>
+    <form hx-post="/api/collections/ex.org/patterns" hx-ext="json-enc" hx-swap="none" class="inline"
+          hx-vals='js:{type: document.getElementById("pt2").value, match: document.getElementById("pm2").value, value: document.getElementById("pv2").value || null}'>
+      <select id="pt2" aria-label="rule type"><option>title</option><option>division</option><option>document_type</option></select>
+      <input id="pm2" placeholder="*/docs/* · exact URL" size="32" required aria-label="match">
+      <input id="pv2" placeholder="value: title template / division / doc type" size="34" list="values" required aria-label="value">
+
+      <datalist id="values"><option value="Astrophysics"><option value="Biological and Physical Sciences"><option value="Earth Science"><option value="Heliophysics"><option value="Planetary Science"><option value="Images"><option value="Data"><option value="Documentation"><option value="Software and Tools"><option value="Missions and Instruments"></datalist>
+      <button >Add rule</button>
+      <small class="muted">title templates: <code>{title}</code> <code>{url}</code> <code>{collection}</code> · the newest rule wins on the URLs it matches</small>
+    </form>
+  </details>
+</section>
+
+
+
+
+</div>
+</main>
+  <script>
+    // Per-URL edits = exact-URL rules (Dump / Delta / Curated URL tables). When the field still has an
+    // AI suggestion (`ai` = true) the edit goes through /ai/accept so the suggestion is resolved too:
+    // same value → accepted as AI, a different value → "AI, edited".
+    // A refusal's message: the JSON `detail` when the app sent one. A proxy error page (HTML from the
+    // ALB/CloudFront, e.g. 502 Bad Gateway) never reaches the user as raw markup.
+    function errorText(status, statusText, body) {
+      let m = body || statusText;
+      try { m = JSON.parse(m).detail || m; } catch (_) {}
+      if (typeof m !== 'string') return JSON.stringify(m);
+      if (/^\s*</.test(m) || [502, 503, 504].includes(status))
+        return `The server is temporarily unavailable (HTTP ${status}). Please try again in a moment.`;
+      return m;
+    }
+    // The pagers' page box (partials/pager.html): jump to the typed page, clamped to 1..pages. It
+    // clicks a new link placed beside the box, so the jump is boosted exactly when the pager's own
+    // links are (a boosted link's URL is read when htmx processes it: re-pointing › does nothing).
+    function jumpPage(input) {
+      const max = +input.max || 1;
+      const n = Math.min(max, Math.max(1, Math.round(+input.value) || 1));
+      input.value = n;
+      if (String(n) === input.dataset.page) return;
+      input.dataset.page = String(n);  // the blur after an Enter must not jump a second time
+      const link = document.createElement('a');
+      link.href = input.dataset.href.replace('__PAGE__', n);
+      link.hidden = true;
+      input.after(link);
+      htmx.process(link);
+      link.click();
+    }
+    async function postJson(path, body) {
+      const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      if (!r.ok) { alert(errorText(r.status, r.statusText, await r.text())); return false; }
+      return true;
+    }
+    async function editField(cid, url, type, value, ai) {
+      const base = `/api/collections/${encodeURIComponent(cid)}`;
+      const ok = (ai && value)
+        ? await postJson(`${base}/ai/accept`, {url, field: type, value})
+        : await postJson(`${base}/urls`, value ? {url, type, value} : {url, type, value: null});
+      if (ok) location.reload();
+    }
+    function editTitle(cid, url, current, ai) {
+      const v = prompt("Title for\n" + url + "\n\nTip: {title} = scraped title, {collection} = collection name", current);
+      if (v === null) return;
+      if (!v.trim()) { alert("Title cannot be empty. To fall back to the pattern/curated value, delete the exact-URL title rule on the Rules tab."); return; }
+      editField(cid, url, "title", v, !!ai);
+    }
+    // ✎ on an AI division / doc-type badge: preselect the suggested value and hand over to the select.
+    function pickAi(btn, value) {
+      const sel = btn.closest("td").querySelector("select");
+      if (!sel) return;
+      sel.value = value; sel.focus();
+      try { sel.showPicker(); } catch (_) {}
+    }
+    // Delta URLs → promote a selection. Ticks are per page (a promote reloads it). The confirm
+    // text is written onto the button: htmx reads hx-confirm at request time.
+    function pickCount() {
+      const on = [...document.querySelectorAll('input.pick:checked')];
+      const btn = document.querySelector('#promote-bar button'); if (!btn) return;
+      const ai = on.filter(b => b.dataset.ai === '1').length, del = on.filter(b => b.dataset.del === '1').length;
+      document.getElementById('pick-n').textContent = on.length;
+      document.getElementById('pick-warn').textContent =
+        (del ? `${del} removal${del > 1 ? 's' : ''}` : '') + (del && ai ? ' · ' : '') + (ai ? `${ai} with an undecided AI suggestion` : '');
+      btn.disabled = on.length === 0;
+      btn.setAttribute('hx-confirm', `Promote ${on.length} delta URL${on.length > 1 ? 's' : ''} to the curated URLs?`
+        + (del ? `\n${del} of them are removals: their curated rows are dropped and the next index run deletes them.` : '')
+        + (ai ? `\n${ai} still carry an undecided AI suggestion — promoting discards it.` : ''));
+    }
+    function pickAll(box) { document.querySelectorAll('input.pick:not(:disabled)').forEach(b => { b.checked = box.checked; }); pickCount(); }
+    // Edit a pattern suggestion's glob in place, then accept it with the edited match.
+    function editSuggestion(btn, cid, sid, match) {
+      const cell = btn.closest("tr").querySelector("td.match");
+      if (!cell || cell.querySelector("input")) return;
+      cell.dataset.orig = cell.innerHTML;
+      cell.innerHTML = `<span class="inline nowrap"><input size="42" aria-label="edited glob"> <button class="primary mini" type="button">Save &amp; accept</button> <button class="secondary mini" type="button">Cancel</button></span>`;
+      const input = cell.querySelector("input"); input.value = match; input.focus(); input.select();
+      const [save, cancel] = cell.querySelectorAll("button");
+      const restore = () => { cell.innerHTML = cell.dataset.orig; };
+      cancel.onclick = restore;
+      input.onkeydown = (e) => { if (e.key === "Escape") restore(); if (e.key === "Enter") save.click(); };
+      save.onclick = async () => {
+        const v = input.value.trim();
+        if (!v) { alert("The match cannot be empty."); return; }
+        if (await postJson(`/api/collections/${encodeURIComponent(cid)}/suggestions/${sid}/accept`, {match: v})) location.reload();
+      };
+    }
+    // Hamburger menu: close on outside click or Escape.
+    document.addEventListener('click', (e) => { const m = document.getElementById('menu'); if (m && m.open && !m.contains(e.target)) m.open = false; });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { const m = document.getElementById('menu'); if (m) m.open = false; } });
+    // Connection indicator: green when the SSE stream is open.
+    // Polling is the safety net for a live job only: `every Ns [jobLive()]` on the pollers. The header
+    // and the jobs strip carry data-job-live while something is queued or running.
+    function jobLive(scope) { return !!document.querySelector((scope ? scope + ' ' : '') + '[data-job-live]'); }
+    // A running job sends a progress event every second to every open tab, and each one re-fetched
+    // the header and the stepper. `sse:collection[… && sseRefresh(this)], sseRefresh` refreshes at
+    // most once per SSE_REFRESH_MS per element: the first event of a burst at once, the rest folded
+    // into one trailing refresh, so the last event (the job's end) is never dropped — htmx's own
+    // `throttle:` drops it. `every Ns [… && sseQuiet(this, N000)]` keeps the poll for when SSE is silent.
+    // Kept per element id, not on the element: a dashboard row swaps itself out (outerHTML), and the
+    // trailing refresh must reach the row now on the page.
+    const SSE_REFRESH_MS = 3000;
+    const sseState = new Map();  // element id → {last, timer}
+    function sseRefresh(elt) {
+      const s = sseState.get(elt.id) || {last: 0, timer: null};
+      sseState.set(elt.id, s);
+      if (s.timer) return false;  // a trailing refresh is already queued
+      const wait = s.last + SSE_REFRESH_MS - Date.now();
+      if (wait <= 0) { s.last = Date.now(); return true; }
+      s.timer = setTimeout(() => {
+        s.timer = null; s.last = Date.now();
+        const now = document.getElementById(elt.id);
+        if (now) htmx.trigger(now, 'sseRefresh');
+      }, wait);
+      return false;
+    }
+    function sseQuiet(elt, ms) { return Date.now() - ((sseState.get(elt.id) || {}).last || 0) >= ms; }
+    // A job poll that slows down while SSE is live: `sse:collection[… && sseSeen(this) && …], every 2s
+    // [jobPollDue(this, 10000, 4000)]` fetches once per 10 s while the element's SSE events keep
+    // arriving, and once per 4 s after they have been silent for 10 s (a dead stream). The tick is
+    // short so both intervals land on it; 500 ms of slack absorbs timer jitter. With a dead stream,
+    // the header's own poll can clear data-job-live before this poll sees the job's end, so the first
+    // tick after the job stops being live fetches once more; with a live stream the end event did.
+    const pollState = new Map();  // element id → {seen, polled, live}
+    function pollEntry(elt) { const s = pollState.get(elt.id) || {seen: 0, polled: 0, live: false}; pollState.set(elt.id, s); return s; }
+    function sseSeen(elt) { pollEntry(elt).seen = Date.now(); return true; }
+    function jobPollDue(elt, liveMs, deadMs) {
+      const s = pollEntry(elt), now = Date.now(), sseLive = now - s.seen < liveMs, wasLive = s.live;
+      s.live = jobLive();
+      if (!s.live) {
+        if (!wasLive || sseLive) return false;
+        s.polled = now;
+        return true;
+      }
+      if (now - s.polled < (sseLive ? liveMs : deadMs) - 500) return false;
+      s.polled = now;
+      return true;
+    }
+    // A reconnect after a drop fires `sseReopen`: events sent meanwhile are gone, so lists that rely
+    // on them (the dashboard table) re-fetch once instead of polling all the time.
+    let sseDropped = false;
+    document.body.addEventListener('htmx:sseOpen', () => {
+      document.getElementById('conn').classList.add('on');
+      if (sseDropped) { sseDropped = false; htmx.trigger(document.body, 'sseReopen'); }
+    });
+    document.body.addEventListener('htmx:sseError', () => { sseDropped = true; document.getElementById('conn').classList.remove('on'); });
+    // One place for server-side refusals (4xx/5xx). Aborted/replaced requests never alert, and neither
+    // do background refreshes (an `every Ns` poll fires with no triggering event, an SSE refresh with
+    // an sse:* one): the old content stays and the next refresh recovers, while an alert would freeze
+    // the page — and every timer on it — until OK is clicked.
+    document.body.addEventListener('htmx:responseError', (e) => {
+      const ev = e.detail.requestConfig && e.detail.requestConfig.triggeringEvent;
+      const xhr = e.detail.xhr;
+      if (!ev || ev.type.startsWith('sse:')) { console.warn('background refresh failed', xhr.status, e.detail.pathInfo); return; }
+      alert(errorText(xhr.status, xhr.statusText, xhr.responseText));
+    });
+
+  </script>
+</body>
+</html>

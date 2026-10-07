@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ex.org · SDE Curation Engine</title>
+  <link rel="stylesheet" href="/static/app.css?v=<V>">
+  <script src="/static/htmx.min.js?v=<V>"></script>
+  <script src="/static/sse.js?v=<V>"></script>
+  <script src="/static/json-enc.js?v=<V>"></script>
+</head>
+<body hx-ext="sse" sse-connect="/events">
+  <header>
+    <a href="/" class="brand">SDE Curation Engine</a>
+    <span id="conn" class="dot" title="SSE connection"></span>
+
+
+    <details class="menu" id="menu">
+      <summary aria-label="Menu" title="Menu">
+
+        <span class="burger" aria-hidden="true"><i></i><i></i><i></i></span>
+      </summary>
+      <div class="menu-panel" role="menu">
+
+        <a role="menuitem" href="/">Collections</a>
+        <a role="menuitem" href="/jobs">Jobs</a>
+        <a role="menuitem" href="/history">History</a>
+        <a role="menuitem" href="/manual">User manual</a>
+
+
+
+      </div>
+    </details>
+
+  </header>
+  <main>
+
+<div id="job-watch" hx-get="/collections/ex.org?tab=overview" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:drop"
+     hx-on::config-request="event.detail.path = location.pathname + location.search"
+     hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded&quot;') || detail.data.includes('&quot;state&quot;: &quot;failed&quot;'))], every 2s [jobPollDue(this, 10000, 4000)], sseReopen from:body"></div>
+
+<div id="wb-header" hx-get="/collections/ex.org/header"
+     hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseRefresh(this)], sseRefresh, every 10s [jobLive() && sseQuiet(this, 10000)], sseReopen from:body" hx-sync="this:replace" hx-swap="innerHTML">
+
+
+
+
+
+<div class="wb-head">
+  <div class="wb-ident">
+    <a class="crumb" href="/">← Collections</a>
+    <h1 class="wb-name">ex.org
+      <a class="wb-id" href="https://ex.org" target="_blank" rel="noopener" title="open the seed URL">https://ex.org ↗</a>
+    </h1>
+    <div class="badges">
+
+<span class="status s-curating" title="workflow status">✎ Curating</span> <span class="chip stage" title="curation stage: setting titles, divisions and document types">② Metadata</span>
+
+    </div>
+  </div>
+  <div class="wb-next">
+    <span class="muted small">Next:</span>
+
+
+
+
+
+  <a class="button primary" href="/collections/ex.org?tab=curate" title="Settle the exclusions, set metadata, then promote">Open curation</a>
+
+
+
+  </div>
+</div>
+</div>
+
+
+
+<div id="pipeline-ex_org" class="pipeline-wrap"
+     hx-get="/collections/ex.org/pipeline"
+     hx-on::config-request="if (event.detail.elt === this) event.detail.parameters.step = new URLSearchParams(location.search).get('step') || ''"
+     hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseRefresh(this)], sseRefresh, every 5s [jobLive() && sseQuiet(this, 5000)], sseReopen from:body"
+     hx-sync="this:replace" hx-swap="innerHTML">
+
+<ol class="pipeline">
+
+  <li class="done " title="Registered">
+    <a href="/collections/ex.org?step=backlog" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">1</span> Backlog</a></li>
+
+  <li class="done " title="Crawl ingested">
+    <a href="/collections/ex.org?step=scraped" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">2</span> Scraped</a></li>
+
+  <li class="current selected" title="Settle the exclusions, set metadata, then promote.">
+    <a href="/collections/ex.org?step=curating" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">3</span> Curating <small class="stage">· metadata</small></a></li>
+
+  <li class="todo " title="Index the curated set to the test index.">
+    <a href="/collections/ex.org?step=curated" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">4</span> Curated</a></li>
+
+  <li class="todo " title="Check the validation result, then index to production.">
+    <a href="/collections/ex.org?step=config_generated" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">5</span> Test index</a></li>
+
+  <li class="todo " title="Live. Re-scrape to start a new cycle.">
+    <a href="/collections/ex.org?step=live" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">6</span> Live</a></li>
+
+
+
+
+</ol>
+</div>
+
+<div id="tab-body" data-tab="overview" data-step="curating">
+
+
+<nav class="tabs" role="tablist" aria-label="collection sections">
+
+  <a role="tab" aria-selected="true" class="tab active" title="This step: what it did, its actions, details and last job"
+     href="/collections/ex.org?step=curating&tab=overview">Overview</a>
+
+  <a role="tab" aria-selected="false" class="tab " title="Every URL the last crawl found (raw)"
+     href="/collections/ex.org?step=curating&tab=dump">Dump URLs <span class="count  ">8</span></a>
+
+  <a role="tab" aria-selected="false" class="tab " title="Exclusions, metadata, promote"
+     href="/collections/ex.org?step=curating&tab=curate">Curate</a>
+
+  <a role="tab" aria-selected="false" class="tab " title="Every rule in force for this collection"
+     href="/collections/ex.org?step=curating&tab=rules">Rules <span class="count  ">23</span></a>
+
+  <a role="tab" aria-selected="false" class="tab " title="What will change in the curated URLs when you promote"
+     href="/collections/ex.org?step=curating&tab=delta">Delta URLs <span class="count warn ">4</span></a>
+
+  <a role="tab" aria-selected="false" class="tab " title="The approved set. The count is the rows that reach the index; excluded rows stay in the list but are not counted"
+     href="/collections/ex.org?step=curating&tab=curated">Curated URLs <span class="count ok ">2</span></a>
+
+  <a role="tab" aria-selected="false" class="tab " title="Jobs, status history and audit trail"
+     href="/collections/ex.org?step=curating&tab=activity">Activity</a>
+
+</nav>
+
+
+<div id="step-panel" class="next">
+
+
+
+
+
+
+
+<div class="step-head">
+  <strong>Step 3 · Curating</strong>
+  <span class="state-tag current">current step</span>
+
+</div>
+<p class="muted">Settle the exclusions, set metadata, then promote.</p>
+
+
+
+  <dl class="meta"><dt>Delta URLs</dt><dd>4 (4 new, 0 modified, 0 removed) · 2 dump URLs excluded by rules</dd>
+      <dt>Patterns</dt><dd>23</dd></dl>
+  <div class="inline">
+
+      <a class="button primary" href="/collections/ex.org?tab=curate">Open curation</a>
+      <button class="secondary" title="Re-run the diff of the dump URLs against the curated URLs (safe to repeat)"
+
+          hx-post="/api/collections/ex.org/recompute" hx-swap="none"
+          >Recompute delta URLs</button>
+      <span class="muted small">Promote from the Curate tab once exclusions and metadata are reviewed.</span>
+
+  </div>
+
+
+
+
+</div>
+
+<div class="cols">
+  <section class="card">
+    <h2>Details</h2>
+    <dl class="meta">
+
+      <dt>Name</dt>
+      <dd><form hx-post="/api/collections/ex.org/name" hx-ext="json-enc" hx-swap="none" class="inline"
+                hx-confirm="Rename this collection? The index key will follow the new name. Once the collection is indexed the name can no longer change. Title rules that use {collection} are re-applied."
+                hx-vals='js:{name: document.getElementById("cname").value}'>
+            <input id="cname" name="name" size="32" maxlength="200" required value="ex.org"
+                   >
+            <button class="secondary mini" >Rename</button>
+          </form></dd>
+      <dt>Seed</dt><dd><a href="https://ex.org" target="_blank" rel="noopener">https://ex.org</a></dd>
+      <dt>Index key</dt><dd><code>ex_org</code> <span class="muted">ex.org</span> <span class="muted small" title="The collection name, slugified — the same key COSMOS uses. Pinned by the first index run.">from the name</span></dd>
+
+
+
+      <dt>Division</dt>
+      <dd><form hx-post="/api/collections/ex.org/division" hx-ext="json-enc" hx-swap="none" class="inline"
+                hx-confirm="Change the division of this collection? It applies to every URL no division rule decides — including URLs already curated, which come back as delta URLs to promote. With a division assigned, Suggest metadata does not ask for one; General hands it back to the AI. Once the collection is indexed the division can no longer change."
+                hx-vals='js:{division: document.getElementById("cdiv").value}'>
+            <select id="cdiv" name="division"
+                    title="one division for the whole collection, or General to have the AI suggest one per page">
+
+              <option value="Astrophysics" >Astrophysics</option><option value="Biological and Physical Sciences" >Biological and Physical Sciences</option><option value="Earth Science" >Earth Science</option><option value="Heliophysics" >Heliophysics</option><option value="Planetary Science" >Planetary Science</option><option value="General" selected>General — not assigned</option>
+            </select>
+            <button class="secondary mini" >Save</button>
+          </form>
+          <br><span class="muted small">Not assigned: Suggest metadata asks for a division per page and you review the answers. Nothing is promoted on General.</span></dd>
+      <dt>Connector</dt><dd>crawler2</dd>
+      <dt>Max pages</dt><dd>10</dd>
+      <dt>Created</dt><dd><TS> <span class="muted">by anonymous</span></dd>
+      <dt>Updated</dt><dd><TS></dd>
+    </dl>
+  </section>
+  <section class="card">
+    <h2>Last job</h2>
+
+    <dl class="meta">
+      <dt>Kind</dt><dd>llm_metadata</dd>
+      <dt>State</dt><dd><span class="job j-succeeded">succeeded</span></dd>
+      <dt>Started</dt><dd><TS></dd>
+      <dt>Took</dt><dd>0s</dd>
+
+
+    </dl>
+    <p><a href="/collections/ex.org?tab=activity">All jobs & history →</a></p>
+
+  </section>
+</div>
+
+<details class="advanced">
+  <summary>Advanced</summary>
+  <div class="inline">
+    <form hx-post="/api/collections/ex.org/scrape" hx-swap="none" hx-confirm="Re-run the crawl? The dump URLs are replaced and the delta URLs cleared." class="inline">
+      <button class="secondary" >Re-scrape</button>
+    </form>
+    <form hx-post="/api/collections/ex.org/status" hx-ext="json-enc" hx-swap="none" class="inline"
+          hx-confirm="Override the workflow status? Data-consistency rules still apply." hx-vals='js:{status: document.getElementById("st").value, note: document.getElementById("note").value || "manual override", force: true}'>
+      <label class="muted" title="Bypasses the normal step order, but never the data rules (e.g. cannot be curated with nothing promoted)">Set status manually</label>
+      <select id="st"><option >backlog</option><option >scraped</option><option selected>curating</option><option >curated</option><option >config_generated</option><option >live</option></select>
+      <input id="note" placeholder="note" size="24">
+      <button class="secondary">Apply</button>
+    </form>
+    <form hx-post="/api/collections/ex.org/index-key" hx-ext="json-enc" hx-swap="none" class="inline"
+          hx-confirm="Index this collection under a different OpenSearch collection key? The next Index to test writes to it." hx-vals='js:{index_key: document.getElementById("ik").value, index_name: document.getElementById("iname").value || null}'>
+      <label class="muted" title="The collection_key of the existing OpenSearch collection (the COSMOS config folder), when it does not follow from the name">Set index key</label>
+      <input id="ik" placeholder="collection_key" size="20" value="ex_org" required>
+      <input id="iname" placeholder="collection name" size="24" value="ex.org">
+      <button class="secondary">Set</button>
+    </form>
+
+    <form hx-delete="/api/collections/ex.org" hx-swap="none" class="inline"
+          hx-confirm="Delete 'ex.org' and everything the engine holds for it — crawl, rules, curated URLs, index runs and history? This cannot be undone. Nothing is removed from S3 or the index.">
+      <button class="danger" >Delete collection</button>
+    </form>
+
+  </div>
+</details>
+</div>
+</main>
+  <script>
+    // Per-URL edits = exact-URL rules (Dump / Delta / Curated URL tables). When the field still has an
+    // AI suggestion (`ai` = true) the edit goes through /ai/accept so the suggestion is resolved too:
+    // same value → accepted as AI, a different value → "AI, edited".
+    // A refusal's message: the JSON `detail` when the app sent one. A proxy error page (HTML from the
+    // ALB/CloudFront, e.g. 502 Bad Gateway) never reaches the user as raw markup.
+    function errorText(status, statusText, body) {
+      let m = body || statusText;
+      try { m = JSON.parse(m).detail || m; } catch (_) {}
+      if (typeof m !== 'string') return JSON.stringify(m);
+      if (/^\s*</.test(m) || [502, 503, 504].includes(status))
+        return `The server is temporarily unavailable (HTTP ${status}). Please try again in a moment.`;
+      return m;
+    }
+    // The pagers' page box (partials/pager.html): jump to the typed page, clamped to 1..pages. It
+    // clicks a new link placed beside the box, so the jump is boosted exactly when the pager's own
+    // links are (a boosted link's URL is read when htmx processes it: re-pointing › does nothing).
+    function jumpPage(input) {
+      const max = +input.max || 1;
+      const n = Math.min(max, Math.max(1, Math.round(+input.value) || 1));
+      input.value = n;
+      if (String(n) === input.dataset.page) return;
+      input.dataset.page = String(n);  // the blur after an Enter must not jump a second time
+      const link = document.createElement('a');
+      link.href = input.dataset.href.replace('__PAGE__', n);
+      link.hidden = true;
+      input.after(link);
+      htmx.process(link);
+      link.click();
+    }
+    async function postJson(path, body) {
+      const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      if (!r.ok) { alert(errorText(r.status, r.statusText, await r.text())); return false; }
+      return true;
+    }
+    async function editField(cid, url, type, value, ai) {
+      const base = `/api/collections/${encodeURIComponent(cid)}`;
+      const ok = (ai && value)
+        ? await postJson(`${base}/ai/accept`, {url, field: type, value})
+        : await postJson(`${base}/urls`, value ? {url, type, value} : {url, type, value: null});
+      if (ok) location.reload();
+    }
+    function editTitle(cid, url, current, ai) {
+      const v = prompt("Title for\n" + url + "\n\nTip: {title} = scraped title, {collection} = collection name", current);
+      if (v === null) return;
+      if (!v.trim()) { alert("Title cannot be empty. To fall back to the pattern/curated value, delete the exact-URL title rule on the Rules tab."); return; }
+      editField(cid, url, "title", v, !!ai);
+    }
+    // ✎ on an AI division / doc-type badge: preselect the suggested value and hand over to the select.
+    function pickAi(btn, value) {
+      const sel = btn.closest("td").querySelector("select");
+      if (!sel) return;
+      sel.value = value; sel.focus();
+      try { sel.showPicker(); } catch (_) {}
+    }
+    // Delta URLs → promote a selection. Ticks are per page (a promote reloads it). The confirm
+    // text is written onto the button: htmx reads hx-confirm at request time.
+    function pickCount() {
+      const on = [...document.querySelectorAll('input.pick:checked')];
+      const btn = document.querySelector('#promote-bar button'); if (!btn) return;
+      const ai = on.filter(b => b.dataset.ai === '1').length, del = on.filter(b => b.dataset.del === '1').length;
+      document.getElementById('pick-n').textContent = on.length;
+      document.getElementById('pick-warn').textContent =
+        (del ? `${del} removal${del > 1 ? 's' : ''}` : '') + (del && ai ? ' · ' : '') + (ai ? `${ai} with an undecided AI suggestion` : '');
+      btn.disabled = on.length === 0;
+      btn.setAttribute('hx-confirm', `Promote ${on.length} delta URL${on.length > 1 ? 's' : ''} to the curated URLs?`
+        + (del ? `\n${del} of them are removals: their curated rows are dropped and the next index run deletes them.` : '')
+        + (ai ? `\n${ai} still carry an undecided AI suggestion — promoting discards it.` : ''));
+    }
+    function pickAll(box) { document.querySelectorAll('input.pick:not(:disabled)').forEach(b => { b.checked = box.checked; }); pickCount(); }
+    // Edit a pattern suggestion's glob in place, then accept it with the edited match.
+    function editSuggestion(btn, cid, sid, match) {
+      const cell = btn.closest("tr").querySelector("td.match");
+      if (!cell || cell.querySelector("input")) return;
+      cell.dataset.orig = cell.innerHTML;
+      cell.innerHTML = `<span class="inline nowrap"><input size="42" aria-label="edited glob"> <button class="primary mini" type="button">Save &amp; accept</button> <button class="secondary mini" type="button">Cancel</button></span>`;
+      const input = cell.querySelector("input"); input.value = match; input.focus(); input.select();
+      const [save, cancel] = cell.querySelectorAll("button");
+      const restore = () => { cell.innerHTML = cell.dataset.orig; };
+      cancel.onclick = restore;
+      input.onkeydown = (e) => { if (e.key === "Escape") restore(); if (e.key === "Enter") save.click(); };
+      save.onclick = async () => {
+        const v = input.value.trim();
+        if (!v) { alert("The match cannot be empty."); return; }
+        if (await postJson(`/api/collections/${encodeURIComponent(cid)}/suggestions/${sid}/accept`, {match: v})) location.reload();
+      };
+    }
+    // Hamburger menu: close on outside click or Escape.
+    document.addEventListener('click', (e) => { const m = document.getElementById('menu'); if (m && m.open && !m.contains(e.target)) m.open = false; });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { const m = document.getElementById('menu'); if (m) m.open = false; } });
+    // Connection indicator: green when the SSE stream is open.
+    // Polling is the safety net for a live job only: `every Ns [jobLive()]` on the pollers. The header
+    // and the jobs strip carry data-job-live while something is queued or running.
+    function jobLive(scope) { return !!document.querySelector((scope ? scope + ' ' : '') + '[data-job-live]'); }
+    // A running job sends a progress event every second to every open tab, and each one re-fetched
+    // the header and the stepper. `sse:collection[… && sseRefresh(this)], sseRefresh` refreshes at
+    // most once per SSE_REFRESH_MS per element: the first event of a burst at once, the rest folded
+    // into one trailing refresh, so the last event (the job's end) is never dropped — htmx's own
+    // `throttle:` drops it. `every Ns [… && sseQuiet(this, N000)]` keeps the poll for when SSE is silent.
+    // Kept per element id, not on the element: a dashboard row swaps itself out (outerHTML), and the
+    // trailing refresh must reach the row now on the page.
+    const SSE_REFRESH_MS = 3000;
+    const sseState = new Map();  // element id → {last, timer}
+    function sseRefresh(elt) {
+      const s = sseState.get(elt.id) || {last: 0, timer: null};
+      sseState.set(elt.id, s);
+      if (s.timer) return false;  // a trailing refresh is already queued
+      const wait = s.last + SSE_REFRESH_MS - Date.now();
+      if (wait <= 0) { s.last = Date.now(); return true; }
+      s.timer = setTimeout(() => {
+        s.timer = null; s.last = Date.now();
+        const now = document.getElementById(elt.id);
+        if (now) htmx.trigger(now, 'sseRefresh');
+      }, wait);
+      return false;
+    }
+    function sseQuiet(elt, ms) { return Date.now() - ((sseState.get(elt.id) || {}).last || 0) >= ms; }
+    // A job poll that slows down while SSE is live: `sse:collection[… && sseSeen(this) && …], every 2s
+    // [jobPollDue(this, 10000, 4000)]` fetches once per 10 s while the element's SSE events keep
+    // arriving, and once per 4 s after they have been silent for 10 s (a dead stream). The tick is
+    // short so both intervals land on it; 500 ms of slack absorbs timer jitter. With a dead stream,
+    // the header's own poll can clear data-job-live before this poll sees the job's end, so the first
+    // tick after the job stops being live fetches once more; with a live stream the end event did.
+    const pollState = new Map();  // element id → {seen, polled, live}
+    function pollEntry(elt) { const s = pollState.get(elt.id) || {seen: 0, polled: 0, live: false}; pollState.set(elt.id, s); return s; }
+    function sseSeen(elt) { pollEntry(elt).seen = Date.now(); return true; }
+    function jobPollDue(elt, liveMs, deadMs) {
+      const s = pollEntry(elt), now = Date.now(), sseLive = now - s.seen < liveMs, wasLive = s.live;
+      s.live = jobLive();
+      if (!s.live) {
+        if (!wasLive || sseLive) return false;
+        s.polled = now;
+        return true;
+      }
+      if (now - s.polled < (sseLive ? liveMs : deadMs) - 500) return false;
+      s.polled = now;
+      return true;
+    }
+    // A reconnect after a drop fires `sseReopen`: events sent meanwhile are gone, so lists that rely
+    // on them (the dashboard table) re-fetch once instead of polling all the time.
+    let sseDropped = false;
+    document.body.addEventListener('htmx:sseOpen', () => {
+      document.getElementById('conn').classList.add('on');
+      if (sseDropped) { sseDropped = false; htmx.trigger(document.body, 'sseReopen'); }
+    });
+    document.body.addEventListener('htmx:sseError', () => { sseDropped = true; document.getElementById('conn').classList.remove('on'); });
+    // One place for server-side refusals (4xx/5xx). Aborted/replaced requests never alert, and neither
+    // do background refreshes (an `every Ns` poll fires with no triggering event, an SSE refresh with
+    // an sse:* one): the old content stays and the next refresh recovers, while an alert would freeze
+    // the page — and every timer on it — until OK is clicked.
+    document.body.addEventListener('htmx:responseError', (e) => {
+      const ev = e.detail.requestConfig && e.detail.requestConfig.triggeringEvent;
+      const xhr = e.detail.xhr;
+      if (!ev || ev.type.startsWith('sse:')) { console.warn('background refresh failed', xhr.status, e.detail.pathInfo); return; }
+      alert(errorText(xhr.status, xhr.statusText, xhr.responseText));
+    });
+
+  </script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+
+
+
+<table id="collections" hx-get="/rows" hx-include="#filters"
+       hx-trigger="sse:collection_deleted, sse:collection_created, sseReopen from:body" hx-swap="outerHTML" hx-sync="this:replace">
+  <thead>
+    <tr><th class="sn" title="place in the current view">#</th>
+
+<th ><a class="sort" href="/?sort=name&dir=asc" onclick="return dashSort('name', 'asc')" title="sort by collection, ascending">Collection<span class="arrow">⇅</span></a></th>
+
+
+<th  title="sorts in pipeline order"><a class="sort" href="/?sort=status&dir=asc" onclick="return dashSort('status', 'asc')" title="sort by status, ascending">Status<span class="arrow">⇅</span></a></th>
+
+
+<th  title="every URL the last crawl found"><a class="sort" href="/?sort=dump&dir=asc" onclick="return dashSort('dump', 'asc')" title="sort by dump urls, ascending">Dump URLs<span class="arrow">⇅</span></a></th>
+
+
+<th  title="what will change in the curated URLs when you promote"><a class="sort" href="/?sort=delta&dir=asc" onclick="return dashSort('delta', 'asc')" title="sort by delta urls, ascending">Delta URLs<span class="arrow">⇅</span></a></th>
+
+
+<th  title="the approved set; included rows are exported to the index"><a class="sort" href="/?sort=curated&dir=asc" onclick="return dashSort('curated', 'asc')" title="sort by curated urls, ascending">Curated URLs<span class="arrow">⇅</span></a></th>
+
+
+<th ><a class="sort" href="/?sort=job&dir=asc" onclick="return dashSort('job', 'asc')" title="sort by last job, ascending">Last job<span class="arrow">⇅</span></a></th>
+
+
+<th ><a class="sort" href="/?sort=updated&dir=asc" onclick="return dashSort('updated', 'asc')" title="sort by updated, ascending">Updated<span class="arrow">⇅</span></a></th>
+<th></th></tr>
+  </thead>
+  <tbody id="rows">
+
+<tr id="row-run_org"
+    hx-get="/collections/run.org/row"
+    hx-trigger="sse:collection[detail.data.includes('&quot;run.org&quot;') && sseRefresh(this)], sseRefresh, every 10s [sseQuiet(this, 10000)]"
+    hx-sync="this:replace" hx-swap="outerHTML">
+
+  <td class="sn"></td>
+  <td class="name"><a href="/collections/run.org">run.org</a><br>
+      <a class="seed" href="https://run.org" target="_blank" rel="noopener" title="open the seed URL">https://run.org</a></td>
+  <td class="status-cell"><span class="status s-curating">✎ Curating</span>
+      <span class="chip stage" title="curation stage">① Exclusions</span>
+
+
+      </td>
+  <td title="dump URLs"><a href="/collections/run.org?tab=dump">8</a></td>
+  <td title="delta URLs"><a href="/collections/run.org?tab=delta">8</a></td>
+
+  <td title="curated URLs that reach the index"><a href="/collections/run.org?tab=curated">0</a></td>
+  <td class="lastjob"><span class="job j-running" title="">llm_metadata · running</span>
+      <small class="muted"> LLM calls in progress · 3/8 URLs</small></td>
+  <td><time datetime="<TS>"><TS></time></td>
+  <td class="actions">
+
+
+
+
+
+  <span class="spinner"></span> <small class="muted">llm_metadata running…</small>
+  <button class="mini" title="Cancel the running job" hx-post="/api/collections/run.org/jobs/cancel" hx-confirm="Cancel the running job?" hx-target="closest tr" hx-swap="outerHTML">✕</button>
+</td>
+</tr>
+<tr id="row-ex_org"
+    hx-get="/collections/ex.org/row"
+    hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseRefresh(this)], sseRefresh"
+    hx-sync="this:replace" hx-swap="outerHTML">
+
+  <td class="sn"></td>
+  <td class="name"><a href="/collections/ex.org">ex.org</a><br>
+      <a class="seed" href="https://ex.org" target="_blank" rel="noopener" title="open the seed URL">https://ex.org</a></td>
+  <td class="status-cell"><span class="status s-curating">✎ Curating</span>
+      <span class="chip stage" title="curation stage">② Metadata</span>
+
+
+      </td>
+  <td title="dump URLs"><a href="/collections/ex.org?tab=dump">8</a></td>
+  <td title="delta URLs"><a href="/collections/ex.org?tab=delta">4</a></td>
+
+  <td title="curated URLs that reach the index"><a href="/collections/ex.org?tab=curated">2</a></td>
+  <td class="lastjob"><span class="job j-succeeded" title="">llm_metadata · succeeded</span>
+      <small class="muted"> 7 classified · 13,160 tokens in / 224 out (56 reasoning)</small></td>
+  <td><time datetime="<TS>"><TS></time></td>
+  <td class="actions">
+
+
+
+
+
+  <a class="button primary" href="/collections/ex.org?tab=curate" title="Settle the exclusions, set metadata, then promote">Open curation</a>
+</td>
+</tr>
+
+  </tbody>
+</table>
+
+<span id="f-shown" hx-swap-oob="true">2</span>
+<span id="f-status-backlog" class="cnt" hx-swap-oob="true">0</span><span id="f-status-scraped" class="cnt" hx-swap-oob="true">0</span><span id="f-status-curating" class="cnt" hx-swap-oob="true">2</span><span id="f-status-curated" class="cnt" hx-swap-oob="true">0</span><span id="f-status-config_generated" class="cnt" hx-swap-oob="true">0</span><span id="f-status-live" class="cnt" hx-swap-oob="true">0</span>
+<span id="f-stage-exclusions" class="cnt" hx-swap-oob="true">1</span><span id="f-stage-metadata" class="cnt" hx-swap-oob="true">1</span>
+<span id="f-flag-needs_recuration" class="cnt" hx-swap-oob="true">0</span>
+<span id="f-flag-needs_reindexing" class="cnt" hx-swap-oob="true">0</span>
+<span id="f-flag-prod_not_validated" class="cnt" hx-swap-oob="true">0</span>
+<span id="f-division-Astrophysics" class="cnt" hx-swap-oob="true">0</span><span id="f-division-Biological_and_Physical_Sciences" class="cnt" hx-swap-oob="true">0</span><span id="f-division-Earth_Science" class="cnt" hx-swap-oob="true">0</span><span id="f-division-Heliophysics" class="cnt" hx-swap-oob="true">0</span><span id="f-division-Planetary_Science" class="cnt" hx-swap-oob="true">0</span><span id="f-division-General" class="cnt" hx-swap-oob="true">2</span>
+<span id="f-curator-anonymous" class="cnt" hx-swap-oob="true">2</span>

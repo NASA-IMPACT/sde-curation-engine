@@ -271,3 +271,42 @@ def test_waf_lets_crawled_urls_with_dot_segments_through(template):
         "SizeRestrictions_BODY": {"Count": {}}, "GenericLFI_BODY": {"Count": {}},
         "GenericLFI_QUERYARGUMENTS": {"Count": {}},
     }
+
+
+def test_database_records_query_statistics_and_slow_statements(template):
+    """pg_stat_statements is preloaded (schema V13 creates the extension) and every statement over
+    2 s is logged, so the next load incident can be traced to its statement while it happens."""
+    template.resource_count_is("AWS::RDS::DBParameterGroup", 1)
+    template.has_resource_properties("AWS::RDS::DBParameterGroup", {
+        "Family": "postgres17",
+        "Parameters": {
+            "shared_preload_libraries": "pg_stat_statements",
+            "pg_stat_statements.track": "top",
+            "log_min_duration_statement": "2000",
+        },
+    })
+    params = template.find_resources("AWS::RDS::DBParameterGroup")
+    (pg_id,) = params
+    template.has_resource_properties("AWS::RDS::DBInstance", {"DBParameterGroupName": {"Ref": pg_id}})
+
+
+def test_alarms_notify_one_topic(template):
+    """Database CPU, 5xx answers, slow answers and an unhealthy engine each raise an alarm on one SNS
+    topic (subscribed by hand)."""
+    template.resource_count_is("AWS::SNS::Topic", 1)
+    (topic_id,) = template.find_resources("AWS::SNS::Topic")
+    alarms = template.find_resources("AWS::CloudWatch::Alarm")
+    by_metric = {a["Properties"]["MetricName"]: a["Properties"] for a in alarms.values()}
+    assert set(by_metric) >= {"CPUUtilization", "HTTPCode_Target_5XX_Count", "TargetResponseTime", "UnHealthyHostCount"}
+    cpu = by_metric["CPUUtilization"]
+    assert (cpu["Namespace"], cpu["Threshold"], cpu["EvaluationPeriods"], cpu["Period"]) == ("AWS/RDS", 70, 5, 60)
+    errors = by_metric["HTTPCode_Target_5XX_Count"]
+    assert (errors["Threshold"], errors["EvaluationPeriods"], errors["Period"], errors["Statistic"]) == (10, 1, 300, "Sum")
+    slow = by_metric["TargetResponseTime"]
+    assert (slow["Threshold"], slow["EvaluationPeriods"], slow["ExtendedStatistic"]) == (5, 5, "p95")
+    unhealthy = by_metric["UnHealthyHostCount"]
+    assert (unhealthy["Threshold"], unhealthy["EvaluationPeriods"],
+            unhealthy["ComparisonOperator"]) == (1, 2, "GreaterThanOrEqualToThreshold")
+    for props in by_metric.values():
+        assert props["AlarmActions"] == [{"Ref": topic_id}]
+        assert props["TreatMissingData"] == "notBreaching"
