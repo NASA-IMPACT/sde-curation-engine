@@ -65,8 +65,8 @@ Read these before starting. They apply to every step.
 | 0 | #2 Event-loop lag probe | [x] | [x] |
 | 0 | #14 Monitoring, slow-query log, alarms, app logging | [x] | [x] |
 | 0 | #15 Autovacuum tuning | [x] | [x] |
-| 1 | #1 Recompute stops overwriting AI columns | [ ] | [ ] |
-| 1 | #18 Fix "Re-curate everything" | [ ] | [ ] |
+| 1 | #1 Recompute stops overwriting AI columns | [x] | [x] |
+| 1 | #18 Fix "Re-curate everything" | [x] | [x] |
 | 2 | #3 Row objects and COPY data off the event loop | [ ] | [ ] |
 | 2 | #4 Partial promote computed in a thread | [ ] | [ ] |
 | 2 | #5 Repeated lookups fetched once per page | [ ] | [ ] |
@@ -220,8 +220,8 @@ about a minute. Bernard schedules the deploy.
 
 ### #1 Recompute stops overwriting the AI suggestion columns
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **What curators see.** None. A rare lost or returning suggestion stops happening.
 
@@ -238,20 +238,20 @@ about a minute. Bernard schedules the deploy.
    clear. They stay the only writers for existing rows.
 
 **Validation.**
-- [ ] New test (interleaving): monkeypatch `Database.load_dump_failures`, the last load before the
+- [x] New test (interleaving): monkeypatch `Database.load_dump_failures`, the last load before the
       recompute computes, so it first writes `title_ai = "X"` to a delta row with `set_delta_ai`,
       then returns normally. Make one per-URL edit on another row. After the edit, the first row
       still has `title_ai = "X"`.
-- [ ] Same shape for a reject: the hook calls `clear_delta_ai` on a row with a pending title. After
+- [x] Same shape for a reject: the hook calls `clear_delta_ai` on a row with a pending title. After
       the edit, the suggestion stays cleared.
-- [ ] Existing `tests/test_scale.py::test_an_edit_rewrites_only_the_rows_it_changes` passes.
-- [ ] Existing LLM and review-round tests pass unchanged.
-- [ ] Snapshot guard unchanged.
+- [x] Existing `tests/test_scale.py::test_an_edit_rewrites_only_the_rows_it_changes` passes.
+- [x] Existing LLM and review-round tests pass unchanged.
+- [x] Snapshot guard unchanged.
 
 ### #18 Fix "Re-curate everything"
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **What curators see.** After a re-curate, the queue stays full when they edit a row. (Approved
 visible change.)
@@ -274,17 +274,17 @@ visible change.)
 6. Partially promoted rows are not in `previous` after their promote, so they are not queued again.
 
 **Validation.**
-- [ ] Add to `tests/test_review_round.py`: re-curate, then one per-URL title edit. The queue size is
+- [x] Add to `tests/test_review_round.py`: re-curate, then one per-URL title edit. The queue size is
       unchanged and the AI suggestions on the other rows are still there. (This is the probe from
       the assessment; today it fails with "queue shrank from 8 to 1".)
-- [ ] Re-curate, then add an exclude glob. Only the newly excluded rows leave the queue.
-- [ ] Re-curate, partially promote three rows, then edit another row. The three promoted rows do not
+- [x] Re-curate, then add an exclude glob. Only the newly excluded rows leave the queue.
+- [x] Re-curate, partially promote three rows, then edit another row. The three promoted rows do not
       come back.
-- [ ] Re-curate, promote all, then "Check for changes". Nothing is queued, and `review_round` is
+- [x] Re-curate, promote all, then "Check for changes". Nothing is queued, and `review_round` is
       false.
-- [ ] Re-curate, then re-crawl. `review_round` is false after the ingest.
-- [ ] Existing `test_re_curate_puts_the_whole_collection_back_in_the_queue` passes unchanged.
-- [ ] Snapshot guard: no change in the default fixture. (Re-curate is not part of the fixture.)
+- [x] Re-curate, then re-crawl. `review_round` is false after the ingest.
+- [x] Existing `test_re_curate_puts_the_whole_collection_back_in_the_queue` passes unchanged.
+- [x] Snapshot guard: no change in the default fixture. (Re-curate is not part of the fixture.)
 
 ---
 
@@ -1146,3 +1146,6 @@ Add one line per validated item or sub-step. Do not edit earlier lines.
 | 2026-10-07 | #15 | `pytest tests/test_db_pg.py` | V14 reloptions present on `delta_urls`, `pattern_effects`, `patterns`: vacuum and analyze scale factor 0.02. | agent |
 | 2026-10-07 | T0.2 | `source newrun.sh local "…"`; `profile_pages_edits.py -n 100000` (profiler extended: loop freeze per edit, 5 samples with max, statements per render, duplicate-scan EXPLAIN ANALYZE); results `~/projects/sde-curation-stress/results/local-20261007T202727Z/` | Baseline, laptop, 100K URLs, fake LLM, no curated rows. State A = suggestions pending; state B = all accepted (per-URL rules). **Worst event-loop freeze per edit:** A 393 ms, B 429 ms (bulk accept froze it up to 659 ms). **Per-URL title edit:** A 2.72 s, B 5.74 s median (B steps: replace_deltas 2.45 s, engine 1.87 s, load_deltas 0.56 s, load_rules 0.38 s). **Curate page (job-watch reload):** A 0.97 s median / 1.07 s max, B 1.69 / 1.72 s. **Delta tab fragment:** A 0.47 / 0.50 s, B 0.48 / 0.51 s. **Rules tab fragment:** A 0.04 / 0.06 s, B 0.15 / 0.17 s. **Statements per Curate render:** 97.2. **Duplicate-title scan:** A 116 ms, B 234 ms median. | agent |
 | 2026-10-07 | Tier 0 | `make lint`; `make test` | lint clean; 390 passed (386 before + 4 new). | agent |
+| 2026-10-07 | #1 | New `tests/test_concurrent_writes.py` run on the unchanged code, then with the change; `pytest` on test_scale, test_llm, test_review_round, test_collection_division, test_duplicate_titles, test_page_snapshots | Before the change both race tests failed: a suggestion written mid-recompute was overwritten (`'Page 1' == 'Newer suggestion'`) and a rejected one came back. After: 4/4 pass (both races, suggestions kept through recomputes, AI column list equals `engine.diff._AI_FIELDS`). 82 related tests pass; snapshots unchanged. Every reader of the AI columns already skips removed rows, so the one case where a row turns into a removal is not visible either. | agent |
+| 2026-10-07 | #18 | 6 new tests in `tests/test_review_round.py`; the fix switched off for one run (`keep_queued=False`) and restored | Migration V15 adds `collections.review_round` (default false). New tests pass: one edit keeps the whole queue and every other suggestion; an exclude rule removes only its page; partly promoted pages do not come back; promote (full, or the last rows one by one) closes the round; a new crawl closes it. With the fix off, the edit and partial-promote tests fail. Existing re-curate test passes unchanged; snapshots unchanged. | agent |
+| 2026-10-07 | Tier 1 | `make lint`; `make test` | lint clean; 400 passed (390 + 10 new). | agent |

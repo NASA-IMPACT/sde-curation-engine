@@ -367,8 +367,16 @@ ALTER TABLE pattern_effects SET (autovacuum_vacuum_scale_factor = 0.02, autovacu
 ALTER TABLE patterns SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.02);
 """
 
+# "Re-curate everything" queues every included page for review. That was a property of the one
+# recompute that did it, so the next ordinary edit's recompute dropped every unchanged page from the
+# queue again, with its AI suggestions. The collection now remembers that a review round is open:
+# every recompute keeps the pages already queued, until the queue is promoted or a new crawl arrives.
+V15 = """
+ALTER TABLE collections ADD COLUMN review_round boolean NOT NULL DEFAULT false;
+"""
+
 MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8),
-                                     (9, V9), (10, V10), (11, V11), (12, V12), (13, V13), (14, V14)]
+                                     (9, V9), (10, V10), (11, V11), (12, V12), (13, V13), (14, V14), (15, V15)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).

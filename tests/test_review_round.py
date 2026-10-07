@@ -346,3 +346,84 @@ def test_llm_workers_default_is_16():
     from sde_curation.config import Settings
 
     assert Settings.model_fields["llm_workers"].default == 16
+
+
+# ── 6c. a re-curation round survives the curator's work on it ──────────
+
+
+async def _recurated(c) -> tuple[int, list[str]]:
+    """ex.org promoted, then "Re-curate everything": how many pages are queued, and their URLs."""
+    await setup(c)
+    await classify(c)
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
+    r = await c.post("/api/collections/ex.org/recompute?all=true")
+    assert r.status_code == 200, r.text
+    queued = sorted(d["url"] for d in (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"])
+    assert len(queued) == r.json()["modified"] > 3 and (await coll(c))["review_round"] is True
+    return len(queued), queued
+
+
+async def test_one_edit_after_re_curating_keeps_the_whole_queue(crawler_client):
+    """The assessment's probe (2026-10-07): the queue shrank from 8 to 1 after one title edit,
+    taking every other page's AI suggestions with it."""
+    c = crawler_client
+    n, queued = await _recurated(c)
+    await c.post("/api/collections/ex.org/suggest/metadata")
+    await wait_job(c, "ex.org")
+    with_ai = {d["url"] for d in (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"] if d["title_ai"]}
+    assert with_ai
+    r = await c.post("/api/collections/ex.org/urls", json={"url": queued[0], "type": "title", "value": "Edited by hand"})
+    assert r.status_code == 200, r.text
+    rows = {d["url"]: d for d in (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]}
+    assert len(rows) == n and (await coll(c))["delta_count"] == n
+    assert rows[queued[0]]["title"] == "Edited by hand"
+    assert {u for u, d in rows.items() if d["title_ai"]} == with_ai  # every other suggestion is still there
+
+
+async def test_an_exclude_rule_takes_only_its_pages_out_of_the_round(crawler_client):
+    c = crawler_client
+    _, queued = await _recurated(c)
+    gone = queued[1]
+    r = await c.post("/api/collections/ex.org/patterns", json={"type": "exclude", "match": gone})
+    assert r.status_code == 201, r.text
+    left = sorted(d["url"] for d in (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"])
+    assert left == [u for u in queued if u != gone]
+
+
+async def test_pages_promoted_out_of_the_round_do_not_come_back(crawler_client):
+    c = crawler_client
+    _, queued = await _recurated(c)
+    picked = queued[:3]
+    r = await c.post("/api/collections/ex.org/promote/urls", json={"urls": picked})
+    assert r.status_code == 200, r.text
+    assert (await coll(c))["review_round"] is True  # the rest of the queue is still under review
+    r = await c.post("/api/collections/ex.org/urls", json={"url": queued[3], "type": "title", "value": "By hand"})
+    assert r.status_code == 200, r.text
+    left = sorted(d["url"] for d in (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"])
+    assert left == queued[3:]
+
+
+async def test_promoting_the_round_closes_it(crawler_client):
+    c = crawler_client
+    await _recurated(c)
+    assert (await c.post("/api/collections/ex.org/promote")).status_code == 200
+    assert (await coll(c))["review_round"] is False
+    r = await c.post("/api/collections/ex.org/recompute")  # Check for changes: nothing differs
+    assert r.status_code == 200 and r.json()["modified"] == 0 and r.json()["new"] == 0
+    assert (await coll(c))["delta_count"] == 0
+
+
+async def test_promoting_the_last_rows_of_the_round_one_by_one_closes_it(crawler_client):
+    c = crawler_client
+    _, queued = await _recurated(c)
+    assert (await c.post("/api/collections/ex.org/promote/urls", json={"urls": queued})).status_code == 200
+    assert (await coll(c))["review_round"] is False
+    assert (await c.post("/api/collections/ex.org/recompute")).json()["modified"] == 0
+
+
+async def test_a_new_crawl_closes_the_round(crawler_client):
+    c = crawler_client
+    await _recurated(c)
+    assert (await c.post("/api/collections/ex.org/scrape")).status_code == 202
+    assert (await wait_job(c, "ex.org"))["state"] == "succeeded"
+    assert (await coll(c))["review_round"] is False

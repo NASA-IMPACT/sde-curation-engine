@@ -83,6 +83,7 @@ class CurationService:
             capped=c.last_crawl_capped,
             division=c.division if division_assigned(c.division) else None,
             review_all=review_all,
+            keep_queued=c.review_round,
         )
         await self.db.replace_deltas(c.collection_id, ds.deltas, ds.effects, excluded_count=ds.excluded)
         if ds.curated_edited_by:
@@ -248,6 +249,7 @@ class CurationService:
         # the rules did not change: keep the rule→URL effects so the Curated table can still say why
         await self.db.replace_deltas(c.collection_id, [], [], keep_effects=True)
         await self.db.set_flag(c.collection_id, False)
+        await self.db.set_review_round(c.collection_id, False)
         note = f"promoted {len(deltas)} delta URLs → {n} curated URLs" if deltas else "no delta URLs → curated"
         await self.db.set_status(c.collection_id, Status.CURATED, note=note, force=True, actor=actor)
         return n
@@ -281,4 +283,5 @@ class CurationService:
             await self.db.delete_effects(c.collection_id, [d.url for d in picked if d.kind is DeltaKind.DELETED])
             if not left:  # the whole queue is through: the re-curation flag comes down, as in _promote
                 await self.db.set_flag(c.collection_id, False)
+                await self.db.set_review_round(c.collection_id, False)
             return n, DeltaSet(left)

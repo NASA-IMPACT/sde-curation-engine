@@ -1507,6 +1507,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 request, c, ds, note=f"re-curating: {n} delta URLs queued for review" if all else None)
             if all and n:  # start the walk-through again, whatever stage the last one ended on
                 await _set_stage(request, collection_id, CurationStage.EXCLUSIONS)
+                await db(request).set_review_round(collection_id, True)  # later recomputes keep the queue
             await audit(request, "recompute.all" if all else "recompute", collection_id, f"{n} delta URLs")
             return ds.counts
 

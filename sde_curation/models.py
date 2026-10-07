@@ -305,6 +305,9 @@ class Collection(BaseModel):
     # dump URLs the rules keep out (no delta row); stored by every recompute. None = not known yet:
     # read it through Database.excluded_count, which counts and stores it then.
     excluded_count: int | None = None
+    # A "Re-curate everything" round is open: recomputes keep the pages it queued (engine.diff,
+    # keep_queued) until the queue is promoted or a new crawl is ingested.
+    review_round: bool = False
     # when the curated set last changed (a promote, or an exclude rule applied in place): an index
     # run older than this is behind the curated set
     curated_changed_at: datetime | None = None

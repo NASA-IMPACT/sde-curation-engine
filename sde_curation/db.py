@@ -599,6 +599,11 @@ class Database:
                 (needs_recuration, (reason or None) if needs_recuration else None, utcnow(), collection_id),
             )
 
+    async def set_review_round(self, collection_id: str, open_: bool) -> None:
+        """Open or close a "Re-curate everything" round (Collection.review_round)."""
+        async with self._conn() as conn:
+            await conn.execute("UPDATE collections SET review_round=%s WHERE collection_id=%s", (open_, collection_id))
+
     @staticmethod
     async def _recount_curated(conn, collection_id: str, *, changed: bool) -> int:
         """Refresh the stored curated counters from the table and return the included count.
@@ -734,7 +739,8 @@ class Database:
             await self._gc_page_text(conn, collection_id)
             # the excluded count is over the dump: unknown until the next recompute (or first view)
             await conn.execute(
-                "UPDATE collections SET dump_count=%s, excluded_count=NULL, updated_at=%s WHERE collection_id=%s",
+                "UPDATE collections SET dump_count=%s, excluded_count=NULL, review_round=false, updated_at=%s"
+                " WHERE collection_id=%s",
                 (n, utcnow(), collection_id),
             )
             return n
@@ -1020,6 +1026,15 @@ class Database:
         "title_ai_conf", "division_ai_conf", "document_type_ai_conf", "ai_model", "ai_content_hash", "ai_error",
         "ai_failures", "title_ai_before", "division_skipped",
     )
+    # The AI suggestion columns of a delta row. Their writers are Suggest metadata
+    # (set_delta_ai, set_delta_ai_errors), Regenerate titles (set_delta_ai_titles), accept / reject
+    # (clear_delta_ai, clear_delta_ai_field) and assigning a collection division. A recompute only
+    # carries them onto a row it inserts (replace_deltas).
+    _AI_COLS = frozenset((
+        "title_ai", "division_ai", "document_type_ai", "title_ai_conf", "division_ai_conf",
+        "document_type_ai_conf", "ai_model", "ai_content_hash", "ai_error", "ai_failures", "title_ai_before",
+        "division_skipped",
+    ))
 
     async def replace_deltas(
         self, collection_id: str, deltas: list[DeltaUrl], effects: list[tuple[int, str, str]],
@@ -1032,9 +1047,12 @@ class Database:
         rewriting them all was most of what the edit cost).
         `excluded_count`: the dump URLs the rules keep out under these effects (DeltaSet.excluded),
         stored on the collection with them. New effects without it leave the count unknown (NULL),
-        and `excluded_count()` recounts it the first time it is wanted."""
+        and `excluded_count()` recounts it the first time it is wanted.
+        The AI suggestion columns (`_AI_COLS`) are written for a new row only: on a row that stays a
+        delta they belong to Suggest metadata and to accept / reject, which may have written them
+        after this recompute loaded the rows. Writing back the loaded values would undo that."""
         cols = self._DELTA_COLS
-        data = [c for c in cols if c not in ("collection_id", "url")]
+        data = [c for c in cols if c not in ("collection_id", "url") and c not in self._AI_COLS]
         async with self._conn() as conn, conn.cursor() as cur:
             written = 0
             if not deltas:
