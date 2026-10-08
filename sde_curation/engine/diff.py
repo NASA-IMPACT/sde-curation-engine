@@ -74,9 +74,19 @@ class DeltaSet:
     curated_excluded: list[tuple[str, bool]] = field(default_factory=list)
     # dump URLs the rules keep out (they have no delta row, so they are counted here)
     excluded: int = 0
+    # A recompute of a few pages only (CurationService.recompute_keys) holds just their rows; this is
+    # then the whole collection's counts after its write, which `counts` and `total` report instead.
+    whole: dict[str, int] | None = None
+
+    @property
+    def total(self) -> int:
+        """Delta URLs in the whole collection after this recompute."""
+        return self.whole["total"] if self.whole is not None else len(self.deltas)
 
     @property
     def counts(self) -> dict[str, int]:
+        if self.whole is not None:
+            return {k: v for k, v in self.whole.items() if k != "total"}
         c = {k.value: 0 for k in DeltaKind}
         for d in self.deltas:
             c[d.kind.value] += 1

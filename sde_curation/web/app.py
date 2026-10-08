@@ -41,6 +41,7 @@ from ..db import (
     ConflictError,
     Database,
     db_scope,
+    work_context,
 )
 from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
@@ -547,9 +548,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await jobs.recover()
         app.state.loop_lag = LoopLagProbe()
         app.state.loop_lag.start()
+
+        async def backfill_keys() -> None:
+            """Rows written before schema V18 get their canonical key, in the background: until a
+            collection has them all, its per-URL edits use the full recompute (CurationService.keyed)."""
+            try:
+                n = await db.backfill_keys()
+                if n:
+                    log.info("canonical keys filled in on %d rows written before schema V18", n)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # the full recompute keeps working without it
+                log.exception("filling in canonical keys failed; per-URL edits use the full recompute")
+
+        app.state.key_backfill = asyncio.create_task(backfill_keys(), name="key-backfill", context=work_context())
         try:
             yield
         finally:
+            app.state.key_backfill.cancel()
+            await asyncio.gather(app.state.key_backfill, return_exceptions=True)
             await app.state.loop_lag.stop()
             await jobs.shutdown()
             await app.state.patterns_file.flush()
@@ -1505,7 +1522,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         'curating'. A recompute with nothing to review never demotes a curated/live
         collection (otherwise it would be stuck: nothing to promote, no way forward).
         `note`: what happened, for the status history (default: a recompute)."""
-        n = len(ds.deltas)
+        n = ds.total  # the whole queue, also after a recompute of one page (DeltaSet.whole)
         pre = c.status in (Status.BACKLOG, Status.SCRAPED)
         if pre and n == 0 and c.curated_rows:
             # re-crawl identical to the curated set: nothing to review
@@ -1614,7 +1631,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # an exact rule matches every spelling of its page, so find it under any spelling
         existing = await db(request).exact_patterns_for(collection_id, body.url, str(body.type))
         if existing and existing[0].value == body.value:
-            ds = await curation(request).recompute(c)  # no-op edit
+            ds = await curation(request).recompute_page(c, body.url)  # no-op edit
         else:
             ds = await curation(request).replace_exact_pattern(
                 c, PatternCreate(type=body.type, match=body.url, value=body.value),

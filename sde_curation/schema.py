@@ -403,9 +403,24 @@ CREATE TABLE collection_stats (
 );
 """
 
+# The page each row belongs to (engine.urls.canonical_key: host without www., path, query; no scheme,
+# fragment or trailing slash), stored so a per-URL edit can find exactly the rows of its page with an
+# index probe instead of loading the whole collection (CurationService.recompute_keys), and an
+# exact-URL rule can be looked up by its page. Only Python computes the key, so the column starts
+# empty: every writer fills it from now on, and Database.backfill_keys fills the rows written before.
+# A rule's key is set only for an exact rule (a glob has no page).
+V18 = """
+ALTER TABLE dump_urls ADD COLUMN canonical_key text;
+ALTER TABLE curated_urls ADD COLUMN canonical_key text;
+ALTER TABLE patterns ADD COLUMN canonical_key text;
+CREATE INDEX dump_urls_key ON dump_urls (collection_id, canonical_key);
+CREATE INDEX curated_urls_key ON curated_urls (collection_id, canonical_key);
+CREATE INDEX patterns_key ON patterns (collection_id, canonical_key);
+"""
+
 MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8),
                                      (9, V9), (10, V10), (11, V11), (12, V12), (13, V13), (14, V14), (15, V15),
-                                     (16, V16), (17, V17)]
+                                     (16, V16), (17, V17), (18, V18)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).

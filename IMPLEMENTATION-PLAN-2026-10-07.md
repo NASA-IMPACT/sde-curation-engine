@@ -77,8 +77,8 @@ Read these before starting. They apply to every step.
 | 3 | #11 Indexes, including the duplicate-title check | [x] | [x] |
 | 3 | #10 Exact stored counts | [x] | [x] |
 | 3 | #6 `#job-watch` fetches only the tab body | [x] | [x] |
-| 4 | #13 Scoped recompute for per-URL edits | [ ] | [ ] |
-| 4 | #12 Rules tab counts from the database (moved: needs #13's `canonical_key`) | [ ] | [ ] |
+| 4 | #13 Scoped recompute for per-URL edits | [x] | [x] |
+| 4 | #12 Rules tab counts from the database (moved: needs #13's `canonical_key`) | [x] | [x] |
 | 5 | T5.0 Safe-resume foundation (tooling) | [ ] | [ ] |
 | 5 | #22 Index runs survive restarts; cancel stops them | [ ] | [ ] |
 | 5 | #33 Index to test resumes during export | [ ] | [ ] |
@@ -583,8 +583,8 @@ than the newest committed change. Jobs and actions still count from the tables.
 
 ### #13 Scoped recompute for per-URL edits
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **Depends on.** #1, #3, #10.
 
@@ -620,7 +620,7 @@ test below proves the scoped result equals the full one.
 7. `exact_patterns_for` uses the `canonical_key` index instead of scanning with `position()`.
 
 **Validation.**
-- [ ] Equivalence property test (`tests/test_scoped_recompute.py`): build random collections (dump,
+- [x] Equivalence property test (`tests/test_scoped_recompute.py`): build random collections (dump,
       curated set with renames, failures, a capped crawl, globs of every type, exact rules for
       several spellings). Apply random sequences of per-URL edits: title, division, document type,
       exclude, include, AI accept, rule delete. After each edit, compare the scoped result with a
@@ -628,11 +628,11 @@ test below proves the scoped result equals the full one.
       write-backs, `delta_count`, `excluded_count`, `collection_stats`. At least 300 sequences.
       **STOP IF** any case differs and the cause is not a bug in the scoped code. Report it to
       Bernard; do not ship #13.
-- [ ] Backfill test: a collection created before the migration gets keys, and the scoped path is
+- [x] Backfill test: a collection created before the migration gets keys, and the scoped path is
       used only after that.
-- [ ] T0.2: per-URL title edit at 100K with about 300K rules under 0.5 s server time. Record before
+- [x] T0.2: per-URL title edit at 100K with about 300K rules under 0.5 s server time. Record before
       (baseline about 5.8 s) and after.
-- [ ] Snapshot guard unchanged.
+- [x] Snapshot guard unchanged.
 
 ---
 
@@ -644,8 +644,8 @@ case), so the counts would not be guaranteed identical, which is this item's con
 stored `canonical_key` column; with it the count is exact and indexed. Today's Rules tab costs
 0.14–0.21 s at 100K, so the wait costs little.
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **What curators see.** Faster only. The counts must be identical.
 
@@ -660,11 +660,11 @@ stored `canonical_key` column; with it the count is exact and indexed. Today's R
 3. `effect_counts` (the "superseded" marker) is unchanged.
 
 **Validation.**
-- [ ] New test: on a fixture with globs, exact rules, `%` and `_` in URLs, and several spellings of
+- [x] New test: on a fixture with globs, exact rules, `%` and `_` in URLs, and several spellings of
       one page, the SQL counts equal today's `match_counts` result for every rule and every set.
-- [ ] Existing `test_rules_tab_pages_the_per_url_rules` passes.
-- [ ] T0.2: Rules tab p95 at 100K. Record before and after.
-- [ ] Snapshot guard unchanged.
+- [x] Existing `test_rules_tab_pages_the_per_url_rules` passes.
+- [x] T0.2: Rules tab p95 at 100K. Record before and after.
+- [x] Snapshot guard unchanged.
 
 ---
 
@@ -1183,3 +1183,6 @@ Add one line per validated item or sub-step. Do not edit earlier lines.
 | 2026-10-08 | #10 | New `tests/test_stored_counts.py`, also run with the version bump switched off; profiler `results/local-20261008T151022Z/` | V17 `collection_stats`; `@_stored` on count_deltas_by_kind, count_curated_excluded, count_curated_unreachable, curated_export_count, count_deltas_for_llm, count_ai_suggestions, count_patterns, delta_ai_counts, pattern_suggestion_counts. Flow test: after scrape, Start curating, rule add, rule delete, per-URL edit, exclude toggle, Suggest patterns, accept-all suggestions, Suggest metadata, accept one, reject one, accept-all AI, partial promote, full promote, Re-curate everything and re-crawl, every stored count equals a fresh count from the tables. Second test: three more views of an unchanged page compute nothing; an edit makes the next one count again. With the bump off both tests fail (stale rule count 0 vs 1). Curate page at 100K, median: A 0.95 → 0.72 s, B 1.68 → 1.12 s (the first view after a change still counts: max 1.15 / 1.55 s). `collection_stats` added to the SQLite importer's PG-only tables. | agent |
 | 2026-10-08 | #6 | Snapshot diff checked line by line, snapshots updated; new equality test; browser check `~/projects/sde-curation-stress/jobwatchcheck.py` (Playwright, real engine, 35 s crawl); profiler | Only `#job-watch`'s `hx-get` and `hx-on::config-request` changed, on the 10 collection pages. Equality test: for every tab, `/tab-body` returns the page's `#tab-body` character for character. Browser: refresh from `/tab-body` at 4.7, 14.7, 24.7, 34.7 s (every 10 s, as before) and once at the job's end (37.6 s); the in-tab content moved each time; no whole-page fetch, no failed request, no console error: PASS. At 100K: tab-body 85.2 statements against 93.6 for the page; time about equal (0.72 / 1.10 s): the saving is the layout, header and stepper rendering. | agent |
 | 2026-10-08 | Tier 3 | `make lint`; `make test` | lint clean; 413 passed. #12 moved to Tier 4 after #13 (see its section). | agent |
+| 2026-10-08 | #13 | New `tests/test_scoped_recompute.py`; six bugs planted one at a time in the scoped path; `SCOPED_SEQUENCES=300`; profiler `results/local-20261008T154153Z/` | V18: `canonical_key` + index on dump_urls, curated_urls, patterns (exact rules only); every writer fills it; a startup task backfills older rows (`backfill_keys`); `keyed()` gates the scoped path per collection. `CurationService._recompute_keys` runs the unchanged pure `recompute` over the page's rows and writes them with `replace_deltas_scoped`; `DeltaSet.whole` carries the collection's counts for the status rules and the API. Used by per-URL edits, ✗ / ✓, one row's AI accept and ✓ row, and the no-op edit; everything else keeps the full recompute. Test: every random collection is built twice from one seed (most via crawl → rules → promote → re-crawl with changes), one twin edits through the scoped path, the other is forced onto the full recompute; after each edit both hold identical delta rows (every column), effects, curated rows and counts, and a full recompute of the scoped twin changes nothing. 300 collections × 8 edits = 2,400 edits: all identical (129 s). Planted bugs caught: excluded count not moved, page's per-URL rules not loaded, review round forgotten (missed by the first, weaker version of the test; caught after the builds went through a real promote), crawl failures forgotten, page cap forgotten, collection division forgotten. Backfill test: rows without keys use the full path until filled. At 100K, per-URL title edit: A 2.66 → 0.09 s, B (≈300K rules) 5.63 → 0.13–0.15 s; worst loop freeze per edit 150 → 1–6 ms. Known limit: a ✓ include that deletes a per-URL exclude (or the reverse) falls back to the full recompute, because deleting an exclude/include rule makes the excluded count unknown (`delete_pattern`); correct, only slower. | agent |
+| 2026-10-08 | #12 | New `tests/test_rule_counts.py`; two bugs planted in the SQL counts; profiler `results/local-20261008T154938Z/` | `Database.rule_match_counts`: globs by LIKE (`glob_to_like`), exact rules by `canonical_key` (the delta set through its dump and curated rows); Python fallback when a collection is not keyed. Tests: SQL counts equal `engine.patterns.match_counts` for every rule and set on 30 random collections and on a collection with `%`, `_`, a backslash and a mixed-case host in its URLs; the Rules tab renders the same HTML with and without keys. Planted bugs (delta set without removals; LIKE wildcards unescaped) both fail the tests. Rules tab at 100K: A 0.04 → 0.01 s, B 0.15 → 0.10 s. | agent |
+| 2026-10-08 | Tier 4 | `make lint`; `make test` | lint clean; 418 passed. | agent |
