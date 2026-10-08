@@ -6,16 +6,18 @@
    data-job-live) — an idle page sends nothing. The poll also moves the in-tab progress line, and each
    one renders the whole tab (the Overview/Curate counts), so it runs every 10 s while this
    collection's SSE events keep arriving and every 4 s once they stop (jobPollDue in base.html).
-   `sseReopen` re-fetches once after the stream reconnects. The request path is taken from the
-   address bar at fire time (not baked in at render) because the URLs-tab filter form only swaps
-   #tab-body via hx-boost, so the page URL moves on while this element stays. Quotes inside the
+   `sseReopen` re-fetches once after the stream reconnects. It asks for the tab body alone
+   (/collections/<id>/tab-body: the same context as this page, without rendering the layout, header
+   and stepper only to discard them). The query is taken from the address bar at fire time (not baked
+   in at render) because the URLs-tab filter form only swaps #tab-body via hx-boost, so the page URL
+   moves on while this element stays. Quotes inside the
    trigger filter must be &quot; — HTML has no backslash escaping, a literal " would end the attribute.
    hx-sync="#tab-body:drop": the poll shares #tab-body's queue with the curator's own swaps of it
    (stepper clicks, the filter forms — all `#tab-body:replace`), and gives way to them: a poll is
    skipped while one of them loads, and a click replaces a poll in flight. Otherwise a poll for the
    old address could land after the click and put the previous step back. #}
-<div id="job-watch" hx-get="{{ request.url.path }}?{{ request.url.query }}" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:drop"
-     hx-on::config-request="event.detail.path = location.pathname + location.search"
+<div id="job-watch" hx-get="/collections/{{ c.collection_id }}/tab-body?{{ request.url.query }}" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:drop"
+     hx-on::config-request="event.detail.path = '/collections/{{ c.collection_id }}/tab-body' + location.search"
      hx-trigger="sse:collection[detail.data.includes('&quot;{{ c.collection_id }}&quot;') && sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded&quot;') || detail.data.includes('&quot;state&quot;: &quot;failed&quot;'))], every 2s [jobPollDue(this, 10000, 4000)], sseReopen from:body"></div>
 
 <div id="wb-header" hx-get="/collections/{{ c.collection_id }}/header"
@@ -26,8 +28,5 @@
 {# The pipeline stepper is always visible; clicking a step swaps #tab-body (and the URL) to that step. #}
 {% include "partials/pipeline.html" %}
 
-<div id="tab-body" data-tab="{{ tab }}" data-step="{{ selected }}">
-  {% if tabbed %}{% include "partials/tabs.html" %}{% endif %}
-  {% include tab_template %}
-</div>
+{% include "partials/tab_body.html" %}
 {% endblock %}

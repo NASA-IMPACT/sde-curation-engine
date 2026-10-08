@@ -202,3 +202,16 @@ def test_query_statistics_extension_is_created_where_postgres_has_it(pg_url):
         installed = conn.execute(
             "SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'").fetchone()
     assert bool(installed) == bool(available)
+
+
+def test_the_busy_filters_and_rule_loads_have_indexes(pg_url):
+    """V16: the delta table's kind / excluded filter, the renamed_from anti-join of the duplicate-title
+    scan, rule loads in id order and the rule-effect lookups by field each have an index."""
+    import psycopg
+
+    with psycopg.connect(pg_url) as conn:
+        defs = dict(conn.execute("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema()").fetchall())
+    assert "(collection_id, kind, excluded)" in defs["delta_urls_kind"]
+    assert "(collection_id, renamed_from) WHERE (renamed_from IS NOT NULL)" in defs["delta_urls_renamed_from"]
+    assert "(collection_id, id)" in defs["patterns_coll_id"]
+    assert "(collection_id, field)" in defs["pattern_effects_coll_field"]

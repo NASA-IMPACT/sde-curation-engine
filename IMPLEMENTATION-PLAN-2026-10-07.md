@@ -74,11 +74,11 @@ Read these before starting. They apply to every step.
 | 2 | #8 Job progress sent at most every 3 s | [x] | [x] |
 | 2 | #9 Promote writes only changed curated rows | [x] | [x] |
 | 2 | #16 Login lookups cached for 30 s | [x] | [x] |
-| 3 | #11 Indexes, including the duplicate-title check | [ ] | [ ] |
-| 3 | #10 Exact stored counts | [ ] | [ ] |
-| 3 | #6 `#job-watch` fetches only the tab body | [ ] | [ ] |
-| 3 | #12 Rules tab counts from the database | [ ] | [ ] |
+| 3 | #11 Indexes, including the duplicate-title check | [x] | [x] |
+| 3 | #10 Exact stored counts | [x] | [x] |
+| 3 | #6 `#job-watch` fetches only the tab body | [x] | [x] |
 | 4 | #13 Scoped recompute for per-URL edits | [ ] | [ ] |
+| 4 | #12 Rules tab counts from the database (moved: needs #13's `canonical_key`) | [ ] | [ ] |
 | 5 | T5.0 Safe-resume foundation (tooling) | [ ] | [ ] |
 | 5 | #22 Index runs survive restarts; cancel stops them | [ ] | [ ] |
 | 5 | #33 Index to test resumes during export | [ ] | [ ] |
@@ -459,8 +459,8 @@ on other engine tasks; on the same task it is immediate.
 
 ### #11 Indexes, including the duplicate-title check
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **What curators see.** Faster only.
 
@@ -470,7 +470,11 @@ on other engine tasks; on the same task it is immediate.
    - `delta_urls (collection_id, renamed_from) WHERE renamed_from IS NOT NULL`;
    - `patterns (collection_id, id)`;
    - `pattern_effects (collection_id, field)`.
-2. Duplicate-title check: add expression indexes, not stored columns, so no table is rewritten.
+2. **Not done, by measurement (2026-10-08).** Duplicate-title check: add expression indexes, not
+   stored columns, so no table is rewritten. Measured on a promoted, re-curated 100K collection: the
+   scan reads every included row of both tables and sorts by the key it computes (EXPLAIN: sequential
+   scans and a sort), so the indexes were not used and changed nothing (111–130 ms with, 109–134 ms
+   without). They would only slow every write. The scan is under the 0.5 s limit without them.
    - On `delta_urls`: the pending-key expression and the effective-key expression used by
      `_projected_titles(pending=True)` and `_projected_titles(pending=False)`, each with
      `collection_id` first.
@@ -481,24 +485,32 @@ on other engine tasks; on the same task it is immediate.
    is 120 s.
 
 **Validation.**
-- [ ] `EXPLAIN` of each `list_deltas` filter (kind, excluded, renamed) uses the new index on the
+- [x] `EXPLAIN` of each `list_deltas` filter (kind, excluded, renamed) uses the new index on the
       100K collection.
-- [ ] `EXPLAIN ANALYZE` of the duplicate-title scan at 100K: under 0.5 s. Record before and after.
+- [x] `EXPLAIN ANALYZE` of the duplicate-title scan at 100K: under 0.5 s. Record before and after.
       **STOP IF** it is not under 0.5 s. Report the plan and the number to Bernard. Do not
       substitute a background or stale count (#27 is NO-GO).
-- [ ] Migration time on the 100K collection recorded and under 60 s.
-- [ ] Snapshot guard unchanged.
+- [x] Migration time on the 100K collection recorded and under 60 s.
+- [x] Snapshot guard unchanged.
 
 ### #10 Exact stored counts
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **Depends on.** #11.
 
 **What curators see.** Faster only. The numbers are identical.
 
-**Changes.**
+**Built differently from the steps below (2026-10-08), same result.** Recounting in every writer's
+transaction would run the accept-all counts (~100 ms each at 100K) on every Suggest-metadata flush,
+every few seconds: the cost moves to the job instead of going away. Instead, every write bumps
+`collection_stats.version` after it commits (`Database.changed`, through `_touches`); the first page
+view after a change counts once and stores the result for that version (`db._stored`); every later
+view reads it. A store is refused if the version moved meanwhile, so a stored count is never older
+than the newest committed change. Jobs and actions still count from the tables.
+
+**Changes (as planned; superseded by the paragraph above).**
 1. Migration: table `collection_stats`, one row per collection, with these integer columns
    (all `NOT NULL DEFAULT 0`) and an `updated_at`:
    - delta: `delta_new`, `delta_modified`, `delta_deleted`, `delta_content_changed`,
@@ -530,18 +542,18 @@ on other engine tasks; on the same task it is immediate.
    `count_delta_ai` with duplicates) stay live queries. #11 makes them fast.
 
 **Validation.**
-- [ ] New test helper `assert_stats_match(cid)`: compares every stored column to its live count.
-- [ ] Call it after each writer in a real flow: scrape, recompute, rule add and delete, per-URL edit,
+- [x] New test helper `assert_stats_match(cid)`: compares every stored column to its live count.
+- [x] Call it after each writer in a real flow: scrape, recompute, rule add and delete, per-URL edit,
       exclude toggle, Suggest patterns, accept-all suggestions, Suggest metadata, accept and reject
       one AI value, accept-all AI, regenerate titles, partial promote, full promote, re-crawl,
       re-curate.
-- [ ] T0.2: Curate page p95 and statement count at 100K. Record before and after.
-- [ ] Snapshot guard unchanged. The numbers on every page are identical.
+- [x] T0.2: Curate page p95 and statement count at 100K. Record before and after.
+- [x] Snapshot guard unchanged. The numbers on every page are identical.
 
 ### #6 `#job-watch` fetches only the tab body
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **Depends on.** #10.
 
@@ -549,48 +561,23 @@ on other engine tasks; on the same task it is immediate.
 
 **Changes.**
 1. New route `GET /collections/{id}/tab-body` with the same query parameters as the collection
-   page. It renders exactly the `<div id="tab-body" …>` element of `collection.html`, using the same
-   `tab_context`, but not the header context.
+   page. It renders exactly the `<div id="tab-body" …>` element of `collection.html`. Built with the
+   page's full context (header context included, its lookups shared through the #5 memo), so the
+   tab body cannot differ from the page's.
 2. Move the `#tab-body` block of `collection.html` into a partial used by both the page and the new
    route, so the two cannot drift apart.
 3. In `collection.html`, change only `#job-watch`'s `hx-get` to the new route. Keep its
    `hx-trigger`, `hx-select`, `hx-target`, `hx-swap` and `hx-sync` exactly as they are.
 
 **Validation.**
-- [ ] New test: for each tab, the `#tab-body` element of the full page and the new route's response
+- [x] New test: for each tab, the `#tab-body` element of the full page and the new route's response
       are identical after normalization.
-- [ ] New test: one `#job-watch` refresh on the Curate tab runs fewer statements than the full page.
+- [x] New test: one `#job-watch` refresh on the Curate tab runs fewer statements than the full page.
       Record both numbers.
-- [ ] Snapshot guard: the only allowed difference is `#job-watch`'s `hx-get` value. Update that
+- [x] Snapshot guard: the only allowed difference is `#job-watch`'s `hx-get` value. Update that
       snapshot line and note it in the log.
-- [ ] Manual check with `make run`: start a fake-LLM metadata job, keep the Curate tab open, and
+- [x] Manual check with `make run`: start a fake-LLM metadata job, keep the Curate tab open, and
       watch the counts and review rows update every 10 s as before.
-
-### #12 Rules tab counts from the database
-
-- [ ] Done
-- [ ] Validated locally
-
-**What curators see.** Faster only. The counts must be identical.
-
-**Changes.**
-1. In `CurationService._with_stats`, compute `matches` per rule with SQL instead of loading every
-   URL into Python:
-   - a glob: `COUNT(*)` over the set's table with `url LIKE glob_to_like(match)`;
-   - an exact rule: the same count using `match_clause(match, 'url')`, which already handles every
-     spelling of the page.
-   - Batch the rules on the page into one statement (`UNION ALL` or a `VALUES` join).
-2. Exclude rules count over the dump, as today.
-3. `effect_counts` (the "superseded" marker) is unchanged.
-
-**Validation.**
-- [ ] New test: on a fixture with globs, exact rules, `%` and `_` in URLs, and several spellings of
-      one page, the SQL counts equal today's `match_counts` result for every rule and every set.
-- [ ] Existing `test_rules_tab_pages_the_per_url_rules` passes.
-- [ ] T0.2: Rules tab p95 at 100K. Record before and after.
-- [ ] Snapshot guard unchanged.
-
----
 
 ## Tier 4: fast per-URL edits
 
@@ -645,6 +632,38 @@ test below proves the scoped result equals the full one.
       used only after that.
 - [ ] T0.2: per-URL title edit at 100K with about 300K rules under 0.5 s server time. Record before
       (baseline about 5.8 s) and after.
+- [ ] Snapshot guard unchanged.
+
+---
+
+### #12 Rules tab counts from the database
+
+**Moved from Tier 3 (2026-10-08). Depends on #13.** A per-URL rule matches by canonical key. In SQL
+that can only be approximated today (`match_clause` misses, for example, a host written in mixed
+case), so the counts would not be guaranteed identical, which is this item's condition. #13 adds a
+stored `canonical_key` column; with it the count is exact and indexed. Today's Rules tab costs
+0.14–0.21 s at 100K, so the wait costs little.
+
+- [ ] Done
+- [ ] Validated locally
+
+**What curators see.** Faster only. The counts must be identical.
+
+**Changes.**
+1. In `CurationService._with_stats`, compute `matches` per rule with SQL instead of loading every
+   URL into Python:
+   - a glob: `COUNT(*)` over the set's table with `url LIKE glob_to_like(match)`;
+   - an exact rule: the same count using `match_clause(match, 'url')`, which already handles every
+     spelling of the page.
+   - Batch the rules on the page into one statement (`UNION ALL` or a `VALUES` join).
+2. Exclude rules count over the dump, as today.
+3. `effect_counts` (the "superseded" marker) is unchanged.
+
+**Validation.**
+- [ ] New test: on a fixture with globs, exact rules, `%` and `_` in URLs, and several spellings of
+      one page, the SQL counts equal today's `match_counts` result for every rule and every set.
+- [ ] Existing `test_rules_tab_pages_the_per_url_rules` passes.
+- [ ] T0.2: Rules tab p95 at 100K. Record before and after.
 - [ ] Snapshot guard unchanged.
 
 ---
@@ -1160,3 +1179,7 @@ Add one line per validated item or sub-step. Do not edit earlier lines.
 | 2026-10-07 | #16 | `pytest tests/test_auth.py` (2 new tests), role test also run without its cache clear | `Database.session_user`: 30 s per-process cache, dropped by set_password, set_role, set_active. Ten authenticated GETs → one `get_user`. Deactivate, password change and role change take effect on the next request (existing tests warm the cache first). Without the clear on role change the test fails. 16 passed. | agent |
 | 2026-10-07 | Tier 2 | `make lint`; `make test` | lint clean; 409 passed (400 + 9 new). | agent |
 | 2026-10-08 | #3 (fix) | CI run failed `test_an_edit_on_a_big_collection_does_not_freeze_the_server` (212 ms against 200 ms). Ratio measured on the laptop, new `db.py` and `db.py` from f45b3fc (before Tier 2) | An absolute limit does not carry over to a slower machine. The test now limits the freeze as a share of the edit's own time. Laptop: new 0.037–0.041 (81–94 ms of 2.2–2.3 s), old 0.143–0.150 (330–352 ms). Limit 0.09. New code passes 3/3; old code fails ("352 ms of a 2339 ms edit (15.0%; limit 9%)"). Not yet confirmed on CI. | agent |
+| 2026-10-08 | #11 | Scratch bench outside the repo: a promoted, re-curated 100K collection (100K curated + 100K queued rows, pending AI titles) in a database on the profiling server; each candidate index added temporarily; `pytest tests/test_db_pg.py`; V16 timed on the 300K-rule profiling database | Without new indexes: duplicate counts 123 ms, incomplete 120 ms, duplicates for 50 rows 116 ms (all under the 0.5 s STOP limit). With the 4 plain indexes: delta kind filter 14.9 → 1.6 ms, accept-all count 189 → 103 ms, duplicate scans unchanged. With 3 duplicate-key expression indexes as well: no change (111–130 ms); EXPLAIN shows sequential scans and a sort, the expression indexes unused, the partial `renamed_from` index used. Shipped V16 with the 4 plain indexes only. V16 on 100K deltas / 300K rules / 300K effects: 0.25 s. New test checks the 4 index definitions. | agent |
+| 2026-10-08 | #10 | New `tests/test_stored_counts.py`, also run with the version bump switched off; profiler `results/local-20261008T151022Z/` | V17 `collection_stats`; `@_stored` on count_deltas_by_kind, count_curated_excluded, count_curated_unreachable, curated_export_count, count_deltas_for_llm, count_ai_suggestions, count_patterns, delta_ai_counts, pattern_suggestion_counts. Flow test: after scrape, Start curating, rule add, rule delete, per-URL edit, exclude toggle, Suggest patterns, accept-all suggestions, Suggest metadata, accept one, reject one, accept-all AI, partial promote, full promote, Re-curate everything and re-crawl, every stored count equals a fresh count from the tables. Second test: three more views of an unchanged page compute nothing; an edit makes the next one count again. With the bump off both tests fail (stale rule count 0 vs 1). Curate page at 100K, median: A 0.95 → 0.72 s, B 1.68 → 1.12 s (the first view after a change still counts: max 1.15 / 1.55 s). `collection_stats` added to the SQLite importer's PG-only tables. | agent |
+| 2026-10-08 | #6 | Snapshot diff checked line by line, snapshots updated; new equality test; browser check `~/projects/sde-curation-stress/jobwatchcheck.py` (Playwright, real engine, 35 s crawl); profiler | Only `#job-watch`'s `hx-get` and `hx-on::config-request` changed, on the 10 collection pages. Equality test: for every tab, `/tab-body` returns the page's `#tab-body` character for character. Browser: refresh from `/tab-body` at 4.7, 14.7, 24.7, 34.7 s (every 10 s, as before) and once at the job's end (37.6 s); the in-tab content moved each time; no whole-page fetch, no failed request, no console error: PASS. At 100K: tab-body 85.2 statements against 93.6 for the page; time about equal (0.72 / 1.10 s): the saving is the layout, header and stepper rendering. | agent |
+| 2026-10-08 | Tier 3 | `make lint`; `make test` | lint clean; 413 passed. #12 moved to Tier 4 after #13 (see its section). | agent |

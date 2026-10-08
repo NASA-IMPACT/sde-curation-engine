@@ -175,3 +175,19 @@ async def test_one_page_asks_for_the_latest_job_and_index_runs_once(crawler_clie
         # latest_job is list_jobs(limit=1) inside the Database, so it counts once under each name
         assert calls.get("latest_job", 0) <= 1, (path, calls)
         assert calls.get("last_index_run", 0) <= 2, (path, calls)  # test and prod
+
+
+async def test_the_job_watch_refresh_returns_exactly_the_pages_tab_body(crawler_client, tmp_path, fixed_elapsed_times):
+    """#job-watch asks /collections/<id>/tab-body for what it swaps in. For every tab, that response is
+    the page's own #tab-body element, character for character."""
+    c = crawler_client
+    await build_fixture(c)
+    for name, path in PAGES.items():
+        if not path.startswith("/collections/") or "?" not in path:
+            continue
+        cid_path, query = path.split("?", 1)
+        page = normalize((await c.get(path)).text, str(tmp_path))
+        r = await c.get(f"{cid_path}/tab-body?{query}")
+        assert r.status_code == 200, name
+        body = normalize(r.text, str(tmp_path)).strip()
+        assert body.startswith('<div id="tab-body"') and body in page, name

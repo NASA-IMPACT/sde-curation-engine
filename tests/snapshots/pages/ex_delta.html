@@ -35,8 +35,8 @@
   </header>
   <main>
 
-<div id="job-watch" hx-get="/collections/ex.org?tab=delta" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:drop"
-     hx-on::config-request="event.detail.path = location.pathname + location.search"
+<div id="job-watch" hx-get="/collections/ex.org/tab-body?tab=delta" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:drop"
+     hx-on::config-request="event.detail.path = '/collections/ex.org/tab-body' + location.search"
      hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded&quot;') || detail.data.includes('&quot;state&quot;: &quot;failed&quot;'))], every 2s [jobPollDue(this, 10000, 4000)], sseReopen from:body"></div>
 
 <div id="wb-header" hx-get="/collections/ex.org/header"

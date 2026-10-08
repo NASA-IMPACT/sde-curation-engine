@@ -8,6 +8,7 @@ import asyncio
 import contextvars
 import copy
 import functools
+import json
 import logging
 import sys
 import time
@@ -164,8 +165,40 @@ def _touches(fn):
             first = first[0] if first else None
         cid = first if isinstance(first, str) else getattr(first, "collection_id", None)
         if isinstance(cid, str):
-            self.touch(cid)
+            await self.changed(cid)
         return result
+
+    return wrapper
+
+
+def _stored(fn):
+    """A per-collection count a page shows, kept in `collection_stats` between changes.
+
+    Every write that changes what a page counts bumps the collection's `version` when it commits
+    (Database.changed, via _touches). A page read (the read scope) returns the count stored for the
+    current version; the first read after a change computes it once (shared through SingleFlight by
+    everyone asking meanwhile) and stores it, tagged with the version it read before counting. A
+    store is refused when the version moved meanwhile, so a stored count is never older than the
+    newest committed change. The writers only bump a number: no count runs on the write path (a
+    Suggest-metadata job writes every few seconds; the accept-all counts cost ~100 ms each at 100k).
+    Jobs and curator actions (the work scope) always count from the tables."""
+    name = fn.__name__
+
+    @functools.wraps(fn)
+    async def wrapper(self: Database, collection_id: str, *args: Any, **kwargs: Any):
+        if db_scope.get() != "read":
+            return await fn(self, collection_id, *args, **kwargs)
+        key = name + json.dumps([list(args), sorted(kwargs.items())], default=str)
+        version, stored = await self._stats_read(collection_id)
+        if key in stored:
+            return stored[key]
+        value = await self._flights.run(
+            (name, collection_id, key), lambda: self._gens.get(collection_id, 0),
+            lambda: fn(self, collection_id, *args, **kwargs),
+        )
+        self.stats_computed += 1
+        await self._stats_store(collection_id, version, key, value)
+        return copy.deepcopy(value)
 
     return wrapper
 
@@ -406,6 +439,7 @@ class Database:
         self._flights = SingleFlight()
         self._gens: dict[str, int] = {}  # collection_id → bumped by touch() on every change
         self._session_users: dict[int, tuple[float, User]] = {}  # user id → (expires, user): session_user
+        self.stats_computed = 0  # page counts computed (not served from collection_stats): see _stored
         # optional async hook(collection_id, old_status, new_status, note, actor) after every history row
         self.on_status_change = None
 
@@ -430,6 +464,48 @@ class Database:
         """Something about this collection changed: coalesced reads started before now are not
         handed to anyone who asks from now on (SingleFlight)."""
         self._gens[collection_id] = self._gens.get(collection_id, 0) + 1
+
+    async def changed(self, collection_id: str) -> None:
+        """A write to this collection committed: touch() and make its stored page counts out of date
+        (collection_stats.version, see _stored)."""
+        self.touch(collection_id)
+        try:
+            async with self._conn() as conn:
+                await conn.execute(
+                    "INSERT INTO collection_stats (collection_id, version) VALUES (%s, 1)"
+                    " ON CONFLICT (collection_id) DO UPDATE SET version = collection_stats.version + 1",
+                    (collection_id,),
+                )
+        except psycopg.errors.ForeignKeyViolation:
+            pass  # the collection is gone: nothing left to count
+
+    async def _stats_read(self, collection_id: str) -> tuple[int, dict[str, Any]]:
+        """(the version, the counts stored for it): {} when nothing is stored for the current version."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT version, computed_version, counts FROM collection_stats WHERE collection_id=%s",
+                (collection_id,),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            return 0, {}
+        return row["version"], (row["counts"] if row["computed_version"] == row["version"] else {})
+
+    async def _stats_store(self, collection_id: str, version: int, key: str, value: Any) -> None:
+        """Store one count for `version`, unless a change has moved the version since it was read."""
+        try:
+            async with self._conn() as conn:
+                await conn.execute(
+                    "INSERT INTO collection_stats AS s (collection_id, version, computed_version, counts)"
+                    " VALUES (%(cid)s, %(v)s, %(v)s, %(new)s)"
+                    " ON CONFLICT (collection_id) DO UPDATE SET"
+                    "  counts = CASE WHEN s.computed_version = %(v)s THEN s.counts || %(new)s ELSE %(new)s END,"
+                    "  computed_version = %(v)s, updated_at = now()"
+                    " WHERE s.version = %(v)s",
+                    {"cid": collection_id, "v": version, "new": Jsonb({key: value})},
+                )
+        except psycopg.errors.ForeignKeyViolation:
+            pass
 
     async def connect(self) -> Database:
         base = {"row_factory": dict_row}
@@ -1061,7 +1137,7 @@ class Database:
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
-    @_coalesced
+    @_stored
     async def count_deltas_by_kind(self, collection_id: str) -> dict[str, int]:
         """{total, new, modified, deleted, content_changed, renamed} in one pass over the collection's
         delta rows — the same numbers as list_deltas' totals for those filters, without its sort (it
@@ -1341,14 +1417,14 @@ class Database:
                 [(reason, collection_id, url) for url, reason in items],
             )
 
-    @_coalesced
+    @_stored
     async def count_curated_excluded(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
                 "SELECT COUNT(*) FROM curated_urls WHERE collection_id=%s AND excluded", (collection_id,)
             ))
 
-    @_coalesced
+    @_stored
     async def count_curated_unreachable(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
@@ -1491,7 +1567,7 @@ class Database:
             )
             return {r["collection_id"]: self._index_run(r) for r in await cur.fetchall()}
 
-    @_coalesced
+    @_stored
     async def curated_export_count(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
@@ -1557,6 +1633,7 @@ class Database:
             cur = await conn.execute(q, args)
             return list(await cur.fetchall())
 
+    @_stored
     async def pattern_suggestion_counts(self, collection_id: str) -> dict[str, Any]:
         """Pending suggestions: {"total": n, "by_type": {type: n}} without loading the rows."""
         async with self._conn() as conn:
@@ -1574,6 +1651,7 @@ class Database:
             )
             return await cur.fetchone()
 
+    @_touches
     async def set_pattern_suggestion_state(
         self, collection_id: str, sid: int, state: str, *, actor: str | None = None,
         accepted_as: str | None = None,
@@ -1625,7 +1703,7 @@ class Database:
             )
             return [(r["url"], r["scraped_title"]) for r in await cur.fetchall()]
 
-    @_coalesced
+    @_stored
     async def count_deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> int:
         q = (f"SELECT COUNT(*) FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id"
              f" AND u.url=d.url WHERE {self._LLM_WHERE}") + (self._LLM_MISSING if only_missing else "")
@@ -1787,7 +1865,7 @@ class Database:
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
-    @_coalesced
+    @_stored
     async def count_ai_suggestions(self, collection_id: str, *, field: str | None = None,
                                    conf: str | None = None, skip_human: bool = False) -> int:
         """Pending field-level AI suggestions for `field` (every field when None) of confidence `conf`
@@ -1806,6 +1884,7 @@ class Database:
                 [*args, collection_id],
             )) or 0
 
+    @_stored
     async def delta_ai_counts(self, collection_id: str) -> dict[str, Any]:
         """Pending AI suggestions per field, plus `by_conf`: suggestions (field-level) per confidence,
         `failed`: included URLs whose last Suggest metadata call failed, and `retitled`: pending AI
@@ -2086,7 +2165,7 @@ class Database:
             last = rows[-1]["id"]
             yield rows
 
-    @_coalesced
+    @_stored
     async def count_patterns(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(

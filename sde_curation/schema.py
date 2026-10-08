@@ -375,14 +375,44 @@ V15 = """
 ALTER TABLE collections ADD COLUMN review_round boolean NOT NULL DEFAULT false;
 """
 
+# Indexes for the filters and joins the busiest pages and the accept-all counts use. Measured on a
+# promoted, re-curated 100k collection (2026-10-08): the delta table's kind filter 15 → 1.6 ms, the
+# accept-all count (which looks up each row's winning rule by field) 189 → 103 ms. The partial index on
+# renamed_from serves the duplicate-title scan's second anti-join; `patterns (collection_id, id)` the
+# rule loads, which all read a collection's rules in id order.
+# Not added: expression indexes on the duplicate-title key. The scan reads every included row of both
+# tables and sorts by the key it computes, whatever indexes exist (EXPLAIN: sequential scans and a
+# sort), so they changed nothing (111–130 ms with, 109–134 ms without) and would only slow every write.
+V16 = """
+CREATE INDEX delta_urls_kind ON delta_urls (collection_id, kind, excluded);
+CREATE INDEX delta_urls_renamed_from ON delta_urls (collection_id, renamed_from) WHERE renamed_from IS NOT NULL;
+CREATE INDEX patterns_coll_id ON patterns (collection_id, id);
+CREATE INDEX pattern_effects_coll_field ON pattern_effects (collection_id, field);
+"""
+
+# Page counts kept between changes (db._stored): a write bumps `version`; the first page read after
+# it counts once and stores the result in `counts`, tagged `computed_version`. Before, every page view
+# re-ran every count (about 85 statements per Curate render at 100k URLs).
+V17 = """
+CREATE TABLE collection_stats (
+  collection_id text PRIMARY KEY REFERENCES collections(collection_id) ON DELETE CASCADE,
+  version bigint NOT NULL DEFAULT 0,
+  computed_version bigint,
+  counts jsonb NOT NULL DEFAULT '{}',
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+"""
+
 MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8),
-                                     (9, V9), (10, V10), (11, V11), (12, V12), (13, V13), (14, V14), (15, V15)]
+                                     (9, V9), (10, V10), (11, V11), (12, V12), (13, V13), (14, V14), (15, V15),
+                                     (16, V16), (17, V17)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).
 TABLES = (
     "collections", "status_history", "page_text", "dump_urls", "dump_failures", "delta_urls", "curated_urls",
     "patterns", "pattern_effects", "pattern_suggestions", "index_runs", "job_runs", "users", "audit_log",
+    "collection_stats",
 )
 
 _VERSION_TABLE = (

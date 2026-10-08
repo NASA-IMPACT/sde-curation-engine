@@ -1169,16 +1169,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await with_validation(request, c, job)
         return {"c": c, "job": job, "stats": stats}
 
-    @app.get("/collections/{collection_id}", response_class=HTMLResponse)
-    async def collection_page(request: Request, collection_id: str, tab: str = "overview", set: str | None = None,
-                              step: str | None = None):
+    async def collection_context(request: Request, collection_id: str, tab: str, set_: str | None,
+                                 step: str | None) -> dict[str, Any]:
+        """Everything collection.html shows: the header's context and the selected tab's."""
         c = await must_get(request, collection_id)
-        sel, tab = selected_step(c, step, norm_tab(tab, set))
+        sel, tab = selected_step(c, step, norm_tab(tab, set_))
         ctx = await header_context(request, c)
         ctx.update(await tab_context(request, c, tab, sel))
         if ctx["tabbed"] and "pattern_count" not in ctx["stats"]:  # the Rules tab's count; Overview/Curate have it
             ctx["stats"] = {**ctx["stats"], "pattern_count": await db(request).count_patterns(c.collection_id)}
+        return ctx
+
+    @app.get("/collections/{collection_id}", response_class=HTMLResponse)
+    async def collection_page(request: Request, collection_id: str, tab: str = "overview", set: str | None = None,
+                              step: str | None = None):
+        ctx = await collection_context(request, collection_id, tab, set, step)
         return templates.TemplateResponse(request, "collection.html", ctx)
+
+    @app.get("/collections/{collection_id}/tab-body", response_class=HTMLResponse)
+    async def collection_tab_body(request: Request, collection_id: str, tab: str = "overview", set: str | None = None,
+                                  step: str | None = None):
+        """The page's #tab-body alone, for #job-watch's refresh while a job runs: the same context
+        as the page (so the same HTML), without rendering the layout, header and stepper."""
+        ctx = await collection_context(request, collection_id, tab, set, step)
+        return templates.TemplateResponse(request, "partials/tab_body.html", ctx)
 
     @app.get("/collections/{collection_id}/header", response_class=HTMLResponse)
     async def collection_header(request: Request, collection_id: str):
