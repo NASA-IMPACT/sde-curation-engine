@@ -69,6 +69,7 @@ class EnvConfig:
     llm_service_tier: str | None = None
     llm_provider: str = "openai"  # "fake": canned answers, no API calls (load tests — see stress_config)
     llm_workers: int = 16
+    llm_workers_total: int = 32  # #24: LLM calls in flight across all jobs on one task
     llm_pattern_batch_urls: int = 1000
     # Override for notification links; default = the stack's CloudFront URL.
     public_base_url: str | None = None

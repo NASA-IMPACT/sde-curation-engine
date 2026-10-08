@@ -4,6 +4,7 @@ than fatal, progress throttled, cancellation clean. Pure asyncio, no provider kn
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -66,6 +67,7 @@ async def run_pool[I, R](
     retry_passes: int = 0,
     retry_delay_s: float = 0.0,
     retry_workers: int | None = None,
+    shared: asyncio.Semaphore | None = None,
 ) -> PoolStats:
     """Run `fn` over `items` with at most `workers` in flight.
 
@@ -82,12 +84,16 @@ async def run_pool[I, R](
     - Nothing succeeded and something failed → `LLMError`, so a job cannot "succeed" empty.
     - Cancellation cancels every worker, waits for them, then re-raises; whatever `on_result`
       already received stays with the caller.
+    - `shared`: a limit across pools (#24, LLM_WORKERS_TOTAL). Each call holds it while it is in
+      flight, so several jobs together never have more calls out than it allows; `inflight` counts
+      only the calls that hold it.
     """
     stats = PoolStats(total=total)
     last_emit = 0.0
     consecutive = 0
     emit_lock = asyncio.Lock()
     abort: asyncio.Event = asyncio.Event()
+    gate = shared if shared is not None else contextlib.nullcontext()
 
     async def emit(force: bool = False) -> None:
         nonlocal last_emit
@@ -128,9 +134,10 @@ async def run_pool[I, R](
                     stats.retrying -= 1
                 if abort.is_set():
                     continue  # drain so the producer can finish and every worker sees its _Stop
-                stats.inflight += 1
                 try:
-                    result = await fn(item)
+                    async with gate:
+                        stats.inflight += 1
+                        result = await fn(item)
                 except LLMError as e:
                     stats.inflight -= 1
                     stats.last_error = str(e)[:300]

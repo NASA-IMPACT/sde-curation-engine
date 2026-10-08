@@ -168,6 +168,9 @@ def test_task_role_can_drive_indexer_and_crawler(template):
                 "Resource": {"Fn::Join": ["", [Match.string_like_regexp(":task-definition/$"), {"Ref": Match.any_value()}, ":*"]]},
                 "Condition": {"ArnEquals": {"ecs:cluster": {"Fn::Join": Match.any_value()}}},
             }),
+            # the indexer's tasks only: described while a run is watched, stopped when a curator cancels it
+            Match.object_like({"Action": ["ecs:DescribeTasks", "ecs:StopTask"],
+                               "Resource": {"Fn::Join": ["", Match.array_with([Match.string_like_regexp(":task/$")])]}}),
             Match.object_like({"Action": "iam:PassRole", "Resource": [{"Ref": Match.any_value()}, {"Ref": Match.any_value()}]}),
             Match.object_like({"Action": "aoss:APIAccessAll"}),
         ])},
@@ -307,6 +310,19 @@ def test_alarms_notify_one_topic(template):
     unhealthy = by_metric["UnHealthyHostCount"]
     assert (unhealthy["Threshold"], unhealthy["EvaluationPeriods"],
             unhealthy["ComparisonOperator"]) == (1, 2, "GreaterThanOrEqualToThreshold")
+    memory = by_metric["FreeableMemory"]
+    assert (memory["Threshold"], memory["EvaluationPeriods"], memory["ComparisonOperator"]) == (
+        1_000_000_000, 5, "LessThanThreshold")
+    conns = by_metric["DatabaseConnections"]
+    assert (conns["Threshold"], conns["EvaluationPeriods"], conns["Namespace"]) == (80, 5, "AWS/RDS")
+    engine = by_metric["MemoryUtilization"]
+    assert (engine["Threshold"], engine["EvaluationPeriods"], engine["Namespace"]) == (85, 5, "AWS/ECS")
     for props in by_metric.values():
         assert props["AlarmActions"] == [{"Ref": topic_id}]
         assert props["TreatMissingData"] == "notBreaching"
+
+
+def test_the_task_carries_the_per_job_and_the_shared_llm_limits(template):
+    """#24: LLM_WORKERS limits one job; LLM_WORKERS_TOTAL limits every LLM job on the task together."""
+    env = _container_env(template)
+    assert (env["LLM_WORKERS"], env["LLM_WORKERS_TOTAL"]) == ("16", "32")

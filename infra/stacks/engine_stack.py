@@ -219,6 +219,7 @@ class CurationEngineStack(Stack):
             "LLM_PROVIDER": cfg.llm_provider,
             "OPENAI_MODEL": cfg.openai_model,
             "LLM_WORKERS": str(cfg.llm_workers),
+            "LLM_WORKERS_TOTAL": str(cfg.llm_workers_total),
             "LLM_PATTERN_BATCH_URLS": str(cfg.llm_pattern_batch_urls),
             "VALIDATION_DELAY_S": "30",
         }
@@ -309,7 +310,7 @@ class CurationEngineStack(Stack):
             "PUBLIC_BASE_URL", cfg.public_base_url or f"https://{distribution.distribution_domain_name}"
         )
 
-        self._alarms(db, alb, target_group)
+        self._alarms(db, alb, target_group, service)
 
         # ── outputs ────────────────────────────────────────────────────
         cdk.CfnOutput(self, "CloudFrontUrl", value=f"https://{distribution.distribution_domain_name}")
@@ -327,7 +328,7 @@ class CurationEngineStack(Stack):
     # ── pieces ─────────────────────────────────────────────────────────
 
     def _alarms(self, db: rds.DatabaseInstance, alb: elbv2.ApplicationLoadBalancer,
-                target_group: elbv2.ApplicationTargetGroup) -> sns.Topic:
+                target_group: elbv2.ApplicationTargetGroup, service: ecs.FargateService) -> sns.Topic:
         """The signals that would have shown the 2026-10-06 incident as it started instead of after
         the fact: database CPU, 5xx answers, slow answers and an unhealthy engine. They notify an SNS
         topic that has no subscription here; subscribe an email or chat endpoint to it by hand."""
@@ -345,6 +346,14 @@ class CurationEngineStack(Stack):
             ("UnhealthyEngine", "the engine failed its health check for 2 minutes",
              target_group.metrics.unhealthy_host_count(period=minute, statistic="Maximum"), 1, 2,
              cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD),
+            # resumed jobs (JobManager) must never run the database or the engine out of room
+            ("DbMemory", "database freeable memory below 1 GB for 5 minutes",
+             db.metric_freeable_memory(period=minute, statistic="Minimum"), 1_000_000_000, 5,
+             cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD),
+            ("DbConnections", "more than 80 database connections for 5 minutes",
+             db.metric_database_connections(period=minute, statistic="Maximum"), 80, 5, above),
+            ("EngineMemory", "engine task memory above 85 % for 5 minutes",
+             service.metric_memory_utilization(period=minute, statistic="Maximum"), 85, 5, above),
         ]
         for name, what, metric, threshold, periods, op in specs:
             alarm = cloudwatch.Alarm(
@@ -436,7 +445,8 @@ class CurationEngineStack(Stack):
             conditions={"ArnEquals": {"ecs:cluster": cluster_arn}},
         ))
         role.add_to_policy(iam.PolicyStatement(
-            sid="DescribeWebCosmosTasks", actions=["ecs:DescribeTasks"],
+            # StopTask: a curator's cancel stops the indexer task too (jobs.py, EcsDispatchIndexer.kill)
+            sid="DescribeWebCosmosTasks", actions=["ecs:DescribeTasks", "ecs:StopTask"],
             resources=[f"arn:aws:ecs:{r}:{a}:task/{p['indexing_cluster_name']}/*"],
         ))
         role.add_to_policy(iam.PolicyStatement(

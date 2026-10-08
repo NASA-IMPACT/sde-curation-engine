@@ -79,16 +79,16 @@ Read these before starting. They apply to every step.
 | 3 | #6 `#job-watch` fetches only the tab body | [x] | [x] |
 | 4 | #13 Scoped recompute for per-URL edits | [x] | [x] |
 | 4 | #12 Rules tab counts from the database (moved: needs #13's `canonical_key`) | [x] | [x] |
-| 5 | T5.0 Safe-resume foundation (tooling) | [ ] | [ ] |
-| 5 | #22 Index runs survive restarts; cancel stops them | [ ] | [ ] |
-| 5 | #33 Index to test resumes during export | [ ] | [ ] |
-| 5 | #32 Validate and validate-prod resume | [ ] | [ ] |
-| 5 | #31 Index to prod resumes | [ ] | [ ] |
-| 5 | #29 Suggest patterns resumes | [ ] | [ ] |
-| 5 | #30 Regenerate titles resumes | [ ] | [ ] |
-| 5 | #35 Suggest metadata resumes in place | [ ] | [ ] |
-| 5 | #34 Recompute, bulk accept, bulk suggestions resume | [ ] | [ ] |
-| 5 | #24 Shared limit on LLM calls across jobs | [ ] | [ ] |
+| 5 | T5.0 Safe-resume foundation (tooling) | [x] | [x] |
+| 5 | #22 Index runs survive restarts; cancel stops them | [x] | [x] |
+| 5 | #33 Index to test resumes during export | [x] | [x] |
+| 5 | #32 Validate and validate-prod resume | [x] | [x] |
+| 5 | #31 Index to prod resumes | [x] | [x] |
+| 5 | #29 Suggest patterns resumes | [x] | [x] |
+| 5 | #30 Regenerate titles resumes | [x] | [x] |
+| 5 | #35 Suggest metadata resumes in place | [x] | [x] |
+| 5 | #34 Recompute, bulk accept, bulk suggestions resume | [x] | [x] |
+| 5 | #24 Shared limit on LLM calls across jobs | [x] | [x] |
 | 6 | #17 Coordination in the database; safe migrations | [ ] | [ ] |
 | 6 | #23 Separate web and worker tasks, rolling deploys | [ ] | [ ] |
 
@@ -672,8 +672,13 @@ stored `canonical_key` column; with it the count is exact and indexed. Today's R
 
 ### T5.0 Safe-resume foundation (tooling for #22 and #29–#35)
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
+
+**As built (2026-10-08).** The 4 KB check is a guard in `tests/conftest.py` on every job write
+(insert, update, finish) in the whole test suite, plus a worst-case test of the Suggest-patterns
+checkpoint at 100K URLs. No resumable kind stores anything that grows with the URL count except
+`done_batches` (ranges).
 
 **Why.** Bernard's condition for the resume items: resuming must never cause an engine shutdown, a
 restart loop, or a memory or connection outage on RDS. Today all interrupted jobs would come back at
@@ -709,25 +714,29 @@ item builds one resume path with those limits, and every resume item uses it.
    5 minutes.
 
 **Validation.**
-- [ ] New test (restart storm): six interrupted jobs of different resumable kinds at startup. `/health`
+- [x] New test (restart storm): six interrupted jobs of different resumable kinds at startup. `/health`
       answers 200 at once and every second throughout. No more than `RESUME_CONCURRENCY` heavy phases
       run at the same time. Resume starts are at least `RESUME_STAGGER_S` apart.
-- [ ] New test (restart loop): a resumable fake job that raises on every start, with the engine
+- [x] New test (restart loop): a resumable fake job that raises on every start, with the engine
       restarted four times. It resumes three times, then fails with the limit message. The engine
       keeps serving throughout.
-- [ ] New test: for each resumable kind on a 100K-row fixture where possible, `len(json.dumps(progress))`
+- [x] New test: for each resumable kind on a 100K-row fixture where possible, `len(json.dumps(progress))`
       stays under 4,096 bytes during the run and after a resume.
-- [ ] New test: the peak number of work-pool connections in use during the restart-storm test is at
+- [x] New test: the peak number of work-pool connections in use during the restart-storm test is at
       most `RESUME_CONCURRENCY + 2`.
-- [ ] Local measurement on the 100K collection, recorded in the log: engine peak RSS and the
+- [x] Local measurement on the 100K collection, recorded in the log: engine peak RSS and the
       Postgres container's peak memory (`docker stats`) during a resumed export and a resumed prod
       publish, each within 10 % of the same job run without a restart.
-- [ ] `make infra-test` asserts the three new alarms.
+- [x] `make infra-test` asserts the three new alarms.
 
 ### #22 Index runs survive restarts; cancel stops them
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
+
+**As built (2026-10-08).** #33 was built with #22, so a restart before dispatch now resumes the
+export instead of failing. The "restart before dispatch fails" check therefore became the #33 test;
+run rows left `running` by a job that does not resume are still closed (tested).
 
 **Depends on.** T5.0. Use its resume registry, restart counter and staggered start.
 
@@ -754,19 +763,19 @@ instead of "failed" and a duplicate run on the next click. Cancel stops the inde
    run whose job is not resumed (for example, after the restart limit).
 
 **Validation.**
-- [ ] New test with `index_client` and a fake indexer: start an index run, stop the app during the
+- [x] New test with `index_client` and a fake indexer: start an index run, stop the app during the
       status wait, start a new app. The same job finishes, and the fake indexer was dispatched once.
-- [ ] Same, stopped during validation: it resumes at validation.
-- [ ] Cancel test: `kill` is called, the `index_runs` row is `failed`, the job is `failed` with the
+- [x] Same, stopped during validation: it resumes at validation.
+- [x] Cancel test: `kill` is called, the `index_runs` row is `failed`, the job is `failed` with the
       cancelling user.
-- [ ] Restart before dispatch: the job fails as today, the run row is closed.
-- [ ] `make infra-test` asserts the `ecs:StopTask` permission.
-- [ ] Snapshot guard: no change in the default fixture.
+- [x] Restart before dispatch: the job fails as today, the run row is closed.
+- [x] `make infra-test` asserts the `ecs:StopTask` permission.
+- [x] Snapshot guard: no change in the default fixture.
 
 ### #33 Index to test resumes during export
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **Depends on.** T5.0, #22.
 
@@ -782,15 +791,15 @@ finishes. The "exported" count goes back to 0 and counts up again. (Approved vis
 3. The export phase is a heavy phase under `RESUME_CONCURRENCY`.
 
 **Validation.**
-- [ ] New test with `index_client`: stop the app during export, start a new app. The same job and run
+- [x] New test with `index_client`: stop the app during export, start a new app. The same job and run
       finish, `manifest.json` exists once and matches the documents file, and the indexer was
       dispatched once.
-- [ ] T5.0 memory measurement for a resumed export recorded.
+- [x] T5.0 memory measurement for a resumed export recorded.
 
 ### #32 Validate and validate-prod resume
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **Depends on.** T5.0.
 
@@ -803,13 +812,13 @@ finishes. The "exported" count goes back to 0 and counts up again. (Approved vis
 2. The validation phase inside `index_test` is covered by #22, and the one inside `index_prod` by #31.
 
 **Validation.**
-- [ ] New test: stop the app during a fake validation, start a new app. The same job finishes with
+- [x] New test: stop the app during a fake validation, start a new app. The same job finishes with
       the same result a first run gives, and the `index_runs` row has one validation report.
 
 ### #31 Index to prod resumes
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **Depends on.** T5.0.
 
@@ -828,17 +837,17 @@ partly written for a few minutes longer, then completed. (Approved visible chang
 4. The pre-flight scan and the S3 reads are a heavy phase under `RESUME_CONCURRENCY`.
 
 **Validation.**
-- [ ] New test with fake prod and test indexes: stop the app after half the documents are written,
+- [x] New test with fake prod and test indexes: stop the app after half the documents are written,
       start a new app. The same job finishes, every document is in prod once with the right version,
       deletions happen once, and the reported `indexed` equals the number of changed documents.
-- [ ] New test: a resume where the deletion ratio is above the limit refuses exactly as a first run
+- [x] New test: a resume where the deletion ratio is above the limit refuses exactly as a first run
       does.
-- [ ] T5.0 memory measurement for a resumed publish recorded.
+- [x] T5.0 memory measurement for a resumed publish recorded.
 
 ### #29 Suggest patterns resumes
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **Depends on.** T5.0.
 
@@ -860,16 +869,16 @@ for a minute or two, then continues. (Approved visible change.)
    just before the crash is harmless if asked again.
 
 **Validation.**
-- [ ] New test with the fake LLM: stop the app after some batches, start a new app. The same job
+- [x] New test with the fake LLM: stop the app after some batches, start a new app. The same job
       finishes, the finished batches are not asked again (count fake-LLM calls), and the suggestions
       equal those of an uninterrupted run.
-- [ ] New test: batch building is identical across two calls on the same data.
-- [ ] Progress size under 4 KB at 100K URLs (T5.0 test).
+- [x] New test: batch building is identical across two calls on the same data.
+- [x] Progress size under 4 KB at 100K URLs (T5.0 test).
 
 ### #30 Regenerate titles resumes
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **Depends on.** T5.0.
 
@@ -886,14 +895,18 @@ for a minute or two, then continues. (Approved visible change.)
    disambiguation rounds.
 
 **Validation.**
-- [ ] New test with the fake LLM: stop the app after the first pass, start a new app. The same job
+- [x] New test with the fake LLM: stop the app after the first pass, start a new app. The same job
       finishes, groups fixed in the first pass are not asked again, and the total passes do not
       exceed the setting.
 
 ### #35 Suggest metadata resumes in place
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
+
+**As built (2026-10-08).** The old new-job path stays for a metadata job that an older engine failed
+with "engine restarted…", for the transition only. A resumed "redo all" run continues with the URLs
+still missing, as the old resume did.
 
 **Depends on.** T5.0.
 
@@ -912,15 +925,24 @@ change.)
    environment settings still work.
 
 **Validation.**
-- [ ] Update the existing test in `tests/test_llm.py` that checks the resume-as-new-job behaviour:
+- [x] Update the existing test in `tests/test_llm.py` that checks the resume-as-new-job behaviour:
       now the same job id finishes, and no URL is asked twice (count fake-LLM calls).
-- [ ] The existing test that a curator's own cancel stays cancelled still passes.
-- [ ] Progress counters after the resume equal those of an uninterrupted run.
+- [x] The existing test that a curator's own cancel stays cancelled still passes.
+- [x] Progress counters after the resume equal those of an uninterrupted run.
 
 ### #34 Recompute, bulk accept and bulk suggestions resume
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
+
+**As built (2026-10-08).** The three changes stay in `web/app.py` and are not moved into
+`CurationService`. Each is one function with plain arguments (`_recompute_work`,
+`_ai_bulk_work`, `_suggestions_work`), called by the route and by the resume. A resumed job has no
+request, so it gets a `JobCaller` that carries the app and the actor from the job row. The status
+rules (`_after_curation_change`) are unchanged and shared. The route stores its arguments in
+`progress.request` when the job starts. A job started by an older engine has no stored arguments and
+fails with "engine restarted while job was running", as before. After a resume, the job's "decided"
+count is what was left after the restart.
 
 **Depends on.** T5.0, #1.
 
@@ -949,15 +971,15 @@ visible change.)
 6. These are heavy phases under `RESUME_CONCURRENCY`.
 
 **Validation.**
-- [ ] New tests, one per kind: interrupt the job at each internal step (after the rule insert, after
+- [x] New tests, one per kind: interrupt the job at each internal step (after the rule insert, after
       the AI clear, before the recompute) with a test hook, restart, and check the final delta table,
       rules and AI columns equal an uninterrupted run.
-- [ ] Existing `tests/test_scale.py::test_bulk_changes_on_a_big_collection_run_as_jobs` passes.
-- [ ] Snapshot guard unchanged.
+- [x] Existing `tests/test_scale.py::test_bulk_changes_on_a_big_collection_run_as_jobs` passes.
+- [x] Snapshot guard unchanged.
 ### #24 Shared limit on LLM calls across jobs
 
-- [ ] Done
-- [ ] Validated locally
+- [x] Done
+- [x] Validated locally
 
 **What curators see.** When several Suggest-metadata jobs run at once, each shows slower progress,
 with fewer failed calls. (Approved visible change.)
@@ -971,10 +993,10 @@ with fewer failed calls. (Approved visible change.)
 4. CDK: set `LLM_WORKERS_TOTAL` on the task from `EnvConfig` (default 32).
 
 **Validation.**
-- [ ] New test: three fake-LLM metadata jobs on three collections with `LLM_WORKERS=16` and
+- [x] New test: three fake-LLM metadata jobs on three collections with `LLM_WORKERS=16` and
       `LLM_WORKERS_TOTAL=20`. The highest number of calls in flight observed is at most 20.
-- [ ] One job alone still reaches 16 in flight.
-- [ ] `make infra-test` passes.
+- [x] One job alone still reaches 16 in flight.
+- [x] `make infra-test` passes.
 
 ---
 
@@ -1186,3 +1208,14 @@ Add one line per validated item or sub-step. Do not edit earlier lines.
 | 2026-10-08 | #13 | New `tests/test_scoped_recompute.py`; six bugs planted one at a time in the scoped path; `SCOPED_SEQUENCES=300`; profiler `results/local-20261008T154153Z/` | V18: `canonical_key` + index on dump_urls, curated_urls, patterns (exact rules only); every writer fills it; a startup task backfills older rows (`backfill_keys`); `keyed()` gates the scoped path per collection. `CurationService._recompute_keys` runs the unchanged pure `recompute` over the page's rows and writes them with `replace_deltas_scoped`; `DeltaSet.whole` carries the collection's counts for the status rules and the API. Used by per-URL edits, ✗ / ✓, one row's AI accept and ✓ row, and the no-op edit; everything else keeps the full recompute. Test: every random collection is built twice from one seed (most via crawl → rules → promote → re-crawl with changes), one twin edits through the scoped path, the other is forced onto the full recompute; after each edit both hold identical delta rows (every column), effects, curated rows and counts, and a full recompute of the scoped twin changes nothing. 300 collections × 8 edits = 2,400 edits: all identical (129 s). Planted bugs caught: excluded count not moved, page's per-URL rules not loaded, review round forgotten (missed by the first, weaker version of the test; caught after the builds went through a real promote), crawl failures forgotten, page cap forgotten, collection division forgotten. Backfill test: rows without keys use the full path until filled. At 100K, per-URL title edit: A 2.66 → 0.09 s, B (≈300K rules) 5.63 → 0.13–0.15 s; worst loop freeze per edit 150 → 1–6 ms. Known limit: a ✓ include that deletes a per-URL exclude (or the reverse) falls back to the full recompute, because deleting an exclude/include rule makes the excluded count unknown (`delete_pattern`); correct, only slower. | agent |
 | 2026-10-08 | #12 | New `tests/test_rule_counts.py`; two bugs planted in the SQL counts; profiler `results/local-20261008T154938Z/` | `Database.rule_match_counts`: globs by LIKE (`glob_to_like`), exact rules by `canonical_key` (the delta set through its dump and curated rows); Python fallback when a collection is not keyed. Tests: SQL counts equal `engine.patterns.match_counts` for every rule and set on 30 random collections and on a collection with `%`, `_`, a backslash and a mixed-case host in its URLs; the Rules tab renders the same HTML with and without keys. Planted bugs (delta set without removals; LIKE wildcards unescaped) both fail the tests. Rules tab at 100K: A 0.04 → 0.01 s, B 0.15 → 0.10 s. | agent |
 | 2026-10-08 | Tier 4 | `make lint`; `make test` | lint clean; 418 passed. | agent |
+| 2026-10-08 | T5.0 | `tests/test_resume.py` (restart storm, restart loop, cancel while waiting, kinds not resumable); progress guard in `tests/conftest.py`; worst-case checkpoint test in `tests/test_resume_llm.py`; scratch bench outside the repo (throwaway Postgres container on its own port, moto S3, 100K-URL collection crawled, recomputed, ruled and promoted through the API) | Restart storm, six jobs: `/health` 200 throughout, no resume before the start delay, starts at least the stagger apart, at most 2 heavy phases at once, work-pool connections at most `RESUME_CONCURRENCY + 2`. Restart loop: resumed 3 times, then "stopped resuming after 3 engine restarts", engine serving each time. No job progress in the whole suite reached 4 KB (guard proven by a planted 6.2 KB progress). Patterns checkpoint at 100K, worst cases, under 4 KB. Memory at 100K (laptop): export normal, engine 188 MiB / Postgres 175 MiB; export resumed (same run id, restarts 1) 185 / 172 MiB. Prod publish normal 378 / 172 MiB; resumed after 50,000 documents 370 / 171 MiB. All within 10 %. Bench limit: the prod stub keeps no documents, so the resumed publish wrote all 100K again and its totals read 150K; with a real index the second attempt finds the first 50K (the #31 test checks the totals). Seen, outside Tier 5: the event loop froze for about 1 s once in every 100K prod publish, normal runs included. | agent |
+| 2026-10-08 | #22 | `tests/test_index_resume.py` (moto S3, gated fake indexer, dispatch log); 3 bugs planted | Restart while the indexer runs: the same job and run finish, the indexer was dispatched once. Restart during validation: validates again. Cancel: the backend's kill is called, the run is `failed` "cancelled by …". Runs left `running` by a job that does not resume are closed "engine restarted". `make infra-test` asserts `ecs:StopTask`. Snapshots unchanged. Planted bugs caught. | agent |
+| 2026-10-08 | #33 | `tests/test_index_resume.py`; T5.0 bench | Restart during export: the same job and run id, `manifest.json` matches the documents file, indexer dispatched once. Resumed export at 100K: see T5.0. | agent |
+| 2026-10-08 | #32 | `tests/test_index_resume.py`; bug planted | A revalidation interrupted by a restart checks the same run again and finishes. Without the registry entry the test fails. | agent |
+| 2026-10-08 | #31 | `tests/test_index_resume.py`; bugs planted; T5.0 bench | Interrupted after the first bulk request: the resumed job writes every page once at the test run's version, deletes the lost page once, and reports indexed = pages, deleted 1, attempts 2. A resume refuses a mass deletion as a first run does, with nothing written. Planted bugs caught: attempt accounting (5 instead of 7), registry entry. | agent |
+| 2026-10-08 | #29 | `tests/test_resume_llm.py`; bugs planted | Interrupted with the third batch in flight: finished batches are not asked again, the rest once each, and the suggestions equal an uninterrupted run. A batch size changed under the restart fails with "…changed while it was interrupted…". Two builds on the same data give the same batches. Planted bugs caught. | agent |
+| 2026-10-08 | #30 | `tests/test_resume_llm.py`; bug planted | Groups told apart before the restart are not asked again; every duplicate group is told apart at the end. Planted bug caught. | agent |
+| 2026-10-08 | #35 | `tests/test_llm.py` (resume test rewritten); bug planted | The same job id resumes in place: restarts 1, total = done = classified = 32, at most `LLM_WORKERS` pages asked twice; a curator's cancel stays cancelled. LLM suite 32 passed. Without the registry entry the test fails. Old new-job path kept for jobs failed by an older engine (see the section). | agent |
+| 2026-10-08 | #34 | New `tests/test_resume_curation.py`; 3 bugs planted | Twin collections, one run whole, the other stopped at one of 10 internal steps (recompute: in the delta write, before the review round, before the audit; AI accept: before the recompute, before any clear, after one field's clear, after all clears; suggestions: before the recompute, before marking accepted, after marking). After the restart, the same job finishes and the rules, delta rows (every column), rule effects, suggestions and collection state equal the twin's. A job from an older engine without stored arguments fails as before. Planted bugs caught: registry entry missing, shutdown failing the job, no final recompute when nothing is left. Existing bulk tests, `test_bulk_changes_on_a_big_collection_run_as_jobs` and the snapshots pass (148). | agent |
+| 2026-10-08 | #24 | New `tests/test_llm_shared_limit.py`; bug planted; `make infra-test` | Three Suggest-metadata jobs, `LLM_WORKERS=16`, `LLM_WORKERS_TOTAL=20`: peak 20 calls in flight, every page answered. One job alone: peak 16. Without the shared limit the peak is 48 and the test fails. The task carries `LLM_WORKERS_TOTAL=32`. | agent |
+| 2026-10-08 | Tier 5 | `make lint`; `make test`; `make infra-test` | lint clean; 449 passed (the #29 batch test was added during the run and passed on its own; 6 passed in its file); infra 23 passed. One older test built a partial `JobManager` by hand and needed the new pending-resume map. | agent |

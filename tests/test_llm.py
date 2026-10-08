@@ -614,47 +614,65 @@ async def test_openai_provider_records_cache_writes_and_alarms_when_page_text_is
     assert any("wrote 48000 prompt tokens to the cache" in r.getMessage() for r in caplog.records)
 
 
-async def test_metadata_job_resumes_after_an_engine_restart(tmp_path):
+async def test_metadata_job_resumes_after_an_engine_restart(tmp_path, monkeypatch):
     """A deploy restarts the engine under a Suggest-metadata job that runs for hours on a big
-    collection. The shutdown cancels it; the next start carries on with the URLs still missing
-    (answers are saved as they arrive, so nothing is asked twice). A curator's own cancel is final."""
+    collection. The shutdown leaves it running; the next start carries on as the SAME job with the
+    URLs still missing (answers are saved as they arrive, so nothing answered is asked again; only
+    the calls in flight when the engine went down are), its counters carrying on (#35). A curator's
+    own cancel is final."""
     import sys
     from pathlib import Path
 
     from httpx import ASGITransport, AsyncClient
 
+    import sde_curation.jobs as jobs_mod
     from sde_curation.web.app import create_app
     from tests.conftest import FAKE_RUN_PY
 
     root = tmp_path / "crawler"; root.mkdir(); (root / "run.py").write_text(FAKE_RUN_PY)
+    workers = 2
 
     def engine():
         return create_app(Settings(data_dir=tmp_path / "data", crawler_root=root, crawler_python=Path(sys.executable),
-                                   scrape_poll_interval_s=0.05, llm_provider="fake", llm_retry_delay_s=0, llm_workers=2))
+                                   scrape_poll_interval_s=0.05, llm_provider="fake", llm_retry_delay_s=0,
+                                   llm_workers=workers, resume_start_delay_s=0, resume_stagger_s=0))
 
     class Slow(FakeProvider):
         async def complete(self, **kw):
             await asyncio.sleep(0.08)
             return await super().complete(**kw)
 
+    asked: list[str] = []
+    original = jobs_mod.suggest_metadata_one
+
+    async def counting(llm, doc, **kw):
+        asked.append(doc["url"])
+        return await original(llm, doc, **kw)
+
+    monkeypatch.setattr(jobs_mod, "suggest_metadata_one", counting)
     app = engine()
     async with app.router.lifespan_context(app), AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         await setup(c, n=40)  # 32 docs
         app.state.jobs._llm = Slow()
-        assert (await c.post("/api/collections/ex.org/suggest/metadata")).status_code == 202
+        r = await c.post("/api/collections/ex.org/suggest/metadata")
+        assert r.status_code == 202
+        job_id = r.json()["id"]
         await asyncio.sleep(0.5)
     # ← the engine went down with the job running
+    asked_before = len(asked)
 
     app = engine()
     async with app.router.lifespan_context(app), AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        jobs = (await c.get("/api/collections/ex.org/jobs")).json()
-        assert [j["kind"] for j in jobs[:2]] == ["llm_metadata", "llm_metadata"]
-        assert jobs[1]["state"] == "failed" and jobs[1]["error"] == "cancelled by shutdown"
         job = await wait_job(c, "ex.org", timeout=30)
-        done_before = 32 - job["progress"]["total"]
-        assert job["state"] == "succeeded" and job["progress"]["resumed"] == 1 and 2 <= done_before < 32
+        jobs = (await c.get("/api/collections/ex.org/jobs")).json()
+        assert [j["kind"] for j in jobs] == ["llm_metadata", "scrape"]  # one job, carried on
+        assert job["id"] == job_id and job["state"] == "succeeded" and job["progress"]["restarts"] == 1
+        p = job["progress"]
+        assert p["total"] == p["done"] == 32 and p["classified"] == 32 and 2 <= asked_before < 32
         items = (await c.get("/api/collections/ex.org/delta?limit=100")).json()["items"]
         assert all(d["title_ai"] for d in items)
+        twice = {u for u in asked if asked.count(u) > 1}
+        assert len(twice) <= workers  # only the calls in flight when the engine went down
         # a job the curator cancelled stays cancelled across a restart
         app.state.jobs._llm = Slow()
         await c.post("/api/collections/ex.org/suggest/metadata?all=true")
@@ -665,7 +683,7 @@ async def test_metadata_job_resumes_after_an_engine_restart(tmp_path):
     async with app.router.lifespan_context(app), AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         await asyncio.sleep(0.2)
         jobs = (await c.get("/api/collections/ex.org/jobs")).json()
-        assert jobs[0]["state"] == "failed" and "cancelled by" in jobs[0]["error"] and len(jobs) == 4  # scrape + 3
+        assert jobs[0]["state"] == "failed" and "cancelled by" in jobs[0]["error"] and len(jobs) == 3  # scrape + 2
 
 
 async def test_openai_provider_asks_again_when_the_output_budget_runs_out(caplog):

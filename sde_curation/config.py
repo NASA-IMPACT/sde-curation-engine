@@ -164,6 +164,8 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 60.0  # per attempt
     llm_max_retries: int = Field(default=5, ge=0, le=10)  # SDK retries on 429 / 5xx / timeouts
     llm_workers: int = Field(default=16, ge=1, le=64)  # concurrent calls inside one LLM job
+    # #24: concurrent calls across every LLM job in the engine together (one limit, shared)
+    llm_workers_total: int = Field(default=32, ge=1, le=256)
     # Calls that still fail with a rate limit / 5xx / timeout after the SDK's own retries are run
     # again at the end of the job, this long after the main pass, with a quarter of the workers.
     llm_retry_passes: int = Field(default=1, ge=0, le=5)
@@ -175,6 +177,16 @@ class Settings(BaseSettings):
     # stays running and the next start watches the crawl again, up to this many restarts per job.
     # 0 = fail it on restart.
     scrape_resume_after_restart: int = Field(default=3, ge=0, le=20)
+    # Jobs that carry on after an engine restart (JobManager resume registry). They never start as
+    # part of startup: a background task starts them RESUME_START_DELAY_S after the engine serves,
+    # RESUME_STAGGER_S apart, and at most RESUME_CONCURRENCY of them run a heavy phase (export, prod
+    # publish pre-flight, recompute, bulk accept) at once — all interrupted jobs coming back at the
+    # same moment is the pile-up that took the test engine down on 2026-10-06. A job's restarts are
+    # counted before it starts again; after RESUME_MAX_RESTARTS it fails instead.
+    resume_start_delay_s: float = Field(default=15.0, ge=0)
+    resume_stagger_s: float = Field(default=10.0, ge=0)
+    resume_concurrency: int = Field(default=2, ge=1, le=16)
+    resume_max_restarts: int = Field(default=3, ge=0, le=20)
     llm_retry_delay_s: float = Field(default=30.0, ge=0)
     # Suggest metadata sends the full page text — cut from the end only when the call would pass
     # llm_max_input_tokens — one call per URL. Suggest patterns sends every crawled URL (+ title) in batches of this size.

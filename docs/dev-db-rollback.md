@@ -31,7 +31,9 @@ Facts that decide the options:
 
 State on 2026-10-08:
 - `origin/dev` and `origin/test` both define V1–V10.
-- V11–V17 exist only on `featuure/optimize-app`.
+- V11–V17 exist only on `featuure/optimize-app`. Its HEAD (`7324e2a`) also has a V18, which adds
+  `canonical_key` columns and indexes. This doc's examples say "V11–V17". In practice, include
+  every migration the merge brings.
 - From an earlier note, the dev **database** already ran V11 during the 2026-10-06 stress deploy,
   and then went back to V10 code. Check with the query in [Step 1](#step-1--find-the-restore-time)
   before you plan anything.
@@ -41,6 +43,7 @@ State on 2026-10-08:
 | If… | Do this |
 |---|---|
 | You only need dev to *behave* like test, and dev's data does not matter much | **Option A: revert the code, keep the schema.** Cheapest. This is what COSMOS does. |
+| You want dev's schema to match test's again, keep dev's data, and the unwanted migrations only *added* things | **Option E: compensating migration (roll forward).** Recommended for additive migrations. No AWS work. |
 | You need dev's database to *be* V10 again, so later work can reuse numbers 11+ | **Option B: point-in-time restore**, using the rename swap below. |
 | You took a manual snapshot before the merge | **Option C: restore that snapshot**, with the same rename swap. Simplest restore. |
 | You want dev's *data* to equal test's | **Option D: copy test into dev.** Most work: cross-account and encrypted. |
@@ -364,12 +367,146 @@ between. That is more work than the snapshot path.
 
 ---
 
+## Option E — compensating migration (roll forward)
+
+Undo the unwanted migrations with a **new** migration that has the next free number. The schema
+returns to the V10 shape. `schema_version` keeps counting up. This is the usual rollback for
+forward-only migration systems, and the engine already did it once: V12 cleared the counts that V11
+had left stale.
+
+Use it when the unwanted migrations only **added** things: tables, columns, indexes, settings. It
+cannot bring back data that a migration overwrote or deleted. For that, use Option B or C.
+
+Compared with a restore:
+- dev keeps all its data, including curation done after the merge.
+- There is no AWS work, no downtime beyond a normal deploy, and no CDK risk.
+- It works the same in every environment, because the migration runs on boot like any other.
+
+### Step 1 — keep the old numbers as no-ops
+
+In `sde_curation/schema.py`, **keep** V11–V17 (and V18, if present) in `MIGRATIONS`, but replace
+their SQL with a no-op and a comment. For example:
+
+```python
+# V11–V18 were reverted on 2026-10-xx (see V19). dev ran them; test never did. They stay in the
+# list as no-ops so the numbers are never reused and a fresh database skips straight to V19.
+V11 = V12 = V13 = V14 = V15 = V16 = V17 = V18 = "SELECT 1;"
+```
+
+Why keep them:
+- **dev** already ran the real V11–V18, so their bodies no longer matter there.
+- **test, local databases and CI** are at V10. They step through 11–18 doing nothing, then run V19.
+- The numbers stay visibly taken, so nobody writes a new "V11".
+
+Deleting them from the list also works with the `MAX(version)` check. But then the reason for the
+gap is lost, and the "never reuse" rule depends on memory.
+
+### Step 2 — write the compensating migration
+
+Every statement needs `IF EXISTS`. dev has the objects. test and fresh databases never had them, so
+the same SQL must be a no-op there. Undo in reverse order: indexes, then columns and tables, then
+settings.
+
+Example for the V11–V18 on `featuure/optimize-app`:
+
+```sql
+-- V19: undo V11–V18 (reverted). Safe where they never ran: every statement is IF EXISTS.
+DROP INDEX IF EXISTS delta_urls_kind, delta_urls_renamed_from, patterns_coll_id,
+  pattern_effects_coll_field, dump_urls_key, curated_urls_key, patterns_key;      -- V16, V18
+DROP TABLE IF EXISTS collection_stats;                                             -- V17
+ALTER TABLE collections DROP COLUMN IF EXISTS excluded_count,                      -- V11 (V12 only changed its values)
+                        DROP COLUMN IF EXISTS review_round;                        -- V15
+ALTER TABLE dump_urls    DROP COLUMN IF EXISTS canonical_key;                      -- V18
+ALTER TABLE curated_urls DROP COLUMN IF EXISTS canonical_key;
+ALTER TABLE patterns     DROP COLUMN IF EXISTS canonical_key;
+ALTER TABLE delta_urls      RESET (autovacuum_vacuum_scale_factor, autovacuum_analyze_scale_factor);  -- V14
+ALTER TABLE pattern_effects RESET (autovacuum_vacuum_scale_factor, autovacuum_analyze_scale_factor);
+ALTER TABLE patterns        RESET (autovacuum_vacuum_scale_factor, autovacuum_analyze_scale_factor);
+```
+
+Checked on 2026-10-08 against local Postgres 17, with the real V1–V18 SQL from `schema.py`:
+- **dev path** (V1–V18, then this SQL): runs without errors. Its `pg_dump --schema-only` equals a
+  plain V10 database, except for the `pg_stat_statements` extension.
+- **test path** (V1–V10, then this SQL): every statement skips with a NOTICE. Its schema equals V10
+  exactly.
+
+Notes:
+- **V13 (`pg_stat_statements`):** I would keep the extension. It is not part of the app schema, and
+  the parameter group loads the library anyway. For an exact match with test, add
+  `DROP EXTENSION IF EXISTS pg_stat_statements;`.
+- **V12** changed values only. There is nothing to undo once V11's column is gone.
+- **`RESET` on a setting that was never set is a no-op.** So test is safe.
+- **Dropping a column also drops the indexes on it.** The explicit `DROP INDEX` for the
+  `canonical_key` indexes is redundant, but harmless and clearer.
+- **The engine runs all pending migrations in one transaction** (`migrate_sync` / `migrate_async`),
+  and Postgres DDL is transactional. A failure leaves the database unchanged, and the task fails
+  to boot. You do not get a half-undone database.
+- **Data that is lost:**
+  - `excluded_count` and `collection_stats.counts` are caches. Losing them costs nothing.
+  - `canonical_key` can be computed again.
+  - **`review_round` is real state.** It records an open "Re-curate everything" round. Dropping it
+    loses which collections on dev had a round open.
+
+### Step 3 — revert the code, in the same commit
+
+The application code must go back to its V10 behaviour, and the migration list must change, in
+**one** commit:
+- `git revert -m 1 <merge-sha>` brings back the V10 code, but it also removes V11–V18 from
+  `schema.py`. Before you commit the revert, put V11–V18 back as no-ops (Step 1) and add V19
+  (Step 2).
+- Other code that names the dropped objects must also go back. One example is
+  `TABLES` in `schema.py`, which lists `collection_stats`. The revert handles this, but check it.
+
+### Step 4 — verify before deploying
+
+You can check locally, with no AWS access. The `make db-up` Postgres has `pg_dump`.
+
+1. **Database A, the target:** a fresh database migrated by the old V10 code
+   (`git checkout <commit-before-merge>`).
+2. **Database B, the dev path:** a fresh database migrated by the merged code (real V11–V18), then
+   by the new code (V19).
+3. **Database C, the test path:** a fresh database migrated by the new code only (no-op 11–18,
+   then V19).
+4. Run `pg_dump --schema-only` on all three. Remove the `schema_version` data and diff the dumps.
+   A, B and C must be the same.
+
+Also run the test suite. It builds fresh databases, so it exercises path C.
+
+### Step 5 — compare dev and test after the deploy
+
+This read-only query runs through ECS Exec, the same way as in Option B, Step 1. Run it on dev
+(`sde-dev`) and on test (`smce-test`). It prints one hash each for columns, indexes, table settings
+and extensions. Matching hashes mean matching schemas.
+
+```bash
+aws ecs execute-command --cluster $C --task "$T" --container engine --interactive --command \
+"python -c \"import os,psycopg,hashlib;c=psycopg.connect(host=os.environ['DB_HOST'],dbname=os.environ['DB_NAME'],user=os.environ['DB_USER'],password=os.environ['DB_PASSWORD'],sslmode='require');q=['select table_name,column_name,data_type,is_nullable,column_default from information_schema.columns where table_schema=current_schema()','select indexdef from pg_indexes where schemaname=current_schema()','select relname,reloptions from pg_class where relnamespace=current_schema()::regnamespace and relkind::text=chr(114)','select extname from pg_extension'];[print(hashlib.md5(repr(sorted(repr(r) for r in c.execute(s).fetchall())).encode()).hexdigest()) for s in q]\""
+```
+
+- Expect the fourth hash (extensions) to differ if you kept `pg_stat_statements` on dev.
+- `schema_version` itself shows up in the column and index hashes. It is the same table in both
+  environments, so it does not cause a difference.
+- I have not run this query. Check its output on one environment before you trust a comparison.
+
+### Afterward
+
+- **dev and test both end at version 19**, with the V10 schema shape. The number is only a
+  counter. It does not need to equal 10.
+- **When the reworked changes return, they get V20 and later**, with plain `CREATE` / `ADD`
+  statements. Never reuse 11–19.
+- **Git trap:** as in Option A, bringing the original commits back means reverting the revert, or
+  rebuilding them as new commits. Either way, the migrations they carry must be renumbered to V20
+  and later.
+
+---
+
 ## Not recommended: hand-written "down" SQL
 
-You could write SQL that drops V11–V17 and deletes their `schema_version` rows. All seven
-migrations only add things, so this is possible. But it is untested and easy to get partly wrong,
-for example the V13 extension or the V14 table settings. It gives the same result as Option B with
-more risk.
+You could run SQL by hand that drops V11–V17 and deletes their `schema_version` rows. All seven
+migrations only add things, so this is possible. But it is run outside the deploy, it is untested,
+and it is easy to get partly wrong, for example the V13 extension or the V14 table settings. Option E
+does the same schema work as a normal, reviewed, tested migration, and it keeps the version history
+honest. Use Option E.
 
 ---
 

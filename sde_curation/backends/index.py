@@ -7,6 +7,7 @@ Both backends only *dispatch*; completion is always read from S3
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -19,6 +20,9 @@ from ..models import Collection, IndexStatus, ValidationReport
 from .s3 import S3
 
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+log = logging.getLogger(__name__)
 
 
 class IndexError_(RuntimeError):
@@ -202,6 +206,15 @@ class EcsDispatchIndexer:
             d.detail["exit_code"] = (t.get("containers") or [{}])[0].get("exitCode")
             return False
         return True
+
+    async def kill(self, d: Dispatch) -> None:
+        """Stop the indexer task (a curator cancelled the run). Already stopped: nothing to do."""
+        ecs = self._client()
+        try:
+            await asyncio.to_thread(ecs.stop_task, cluster=self.s.indexing_ecs_cluster, task=d.external_ref,
+                                    reason="cancelled in the curation engine")
+        except Exception as e:  # noqa: BLE001 - the run is marked cancelled either way; say why the task may live on
+            log.warning("could not stop indexer task %s: %s", d.external_ref, e)
 
 
 def make_index_backend(settings: Settings) -> IndexBackend:

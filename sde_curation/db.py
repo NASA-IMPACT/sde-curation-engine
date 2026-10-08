@@ -1706,6 +1706,16 @@ class Database:
             )
             return [self._index_run(r) for r in await cur.fetchall()]
 
+    async def close_orphan_index_runs(self, *, keep: list[str]) -> int:
+        """At startup: every index run still 'running' whose job is not resuming (`keep`) failed with
+        the engine. Before this they stayed 'running' for good."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "UPDATE index_runs SET state='failed', error='engine restarted', finished_at=%s"
+                " WHERE state='running' AND NOT (run_id = ANY(%s))", (utcnow(), list(keep)),
+            )
+            return cur.rowcount
+
     async def get_index_run(self, run_id: str) -> IndexRun | None:
         async with self._conn() as conn:
             cur = await conn.execute("SELECT * FROM index_runs WHERE run_id=%s", (run_id,))

@@ -61,6 +61,33 @@ def database_url(pg_schema, monkeypatch) -> str:
     monkeypatch.setenv("DATABASE_URL", pg_schema)
     return pg_schema
 
+PROGRESS_MAX_BYTES = 4096
+
+
+@pytest.fixture(autouse=True)
+def progress_stays_small(monkeypatch):
+    """T5.0: a job's progress is its resume checkpoint, written every 3 s and sent to every browser.
+    It holds counters, batch numbers as ranges and phase names, never lists of URLs or ids. Every
+    progress any test writes must stay under PROGRESS_MAX_BYTES as JSON."""
+    import json
+
+    from sde_curation.db import Database
+
+    seen: list[tuple[int, str, str]] = []
+
+    def wrap(fn):
+        async def wrapped(self, j, *args, **kwargs):
+            seen.append((len(json.dumps(j.progress, default=str)), str(j.kind), ",".join(sorted(j.progress))))
+            return await fn(self, j, *args, **kwargs)
+        return wrapped
+
+    for name in ("insert_job", "update_job", "finish_job"):
+        monkeypatch.setattr(Database, name, wrap(getattr(Database, name)))
+    yield
+    big = [s for s in seen if s[0] >= PROGRESS_MAX_BYTES]
+    assert not big, f"job progress over {PROGRESS_MAX_BYTES} bytes: {max(big)}"
+
+
 # Login enabled: APP_PASSWORD seeds the bootstrap "admin" account with that password.
 SECURED = {"app_password": "s3cret", "session_secret": "unit-test-secret"}
 

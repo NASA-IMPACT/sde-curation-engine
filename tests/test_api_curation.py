@@ -255,6 +255,7 @@ def test_active_for_ends_when_job_state_is_final():
 
     jm = JobManager.__new__(JobManager)
     jm._tasks = {}
+    jm._pending_resume = {}  # jobs waiting to resume after a restart (none here)
     job = JobRun(collection_id="ex.org", kind=JobKind.SCRAPE, state=JobState.RUNNING)
     jm._tasks[1] = SimpleNamespace(job=job, done=lambda: False)  # task still alive
     assert jm.active_for("ex.org") is job

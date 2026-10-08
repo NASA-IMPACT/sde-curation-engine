@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, Any, Literal
 
 import psycopg
@@ -542,10 +543,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             publisher=lambda: make_prod_publisher(settings),
         )
         app.state.jobs = jobs
+        jobs.curation_work = curation_work  # #34: rebuilds a bulk change a restart interrupted
         app.state.existing_cache = {}
         app.state.curation = CurationService(db, lock_for=jobs.lock)
         app.state.patterns_file = PatternsFile(db, settings.collections_dir)
         await jobs.recover()
+        jobs.start_resumes()  # in the background, after a delay: never part of startup
         app.state.loop_lag = LoopLagProbe()
         app.state.loop_lag.start()
 
@@ -612,19 +615,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if j:
             raise HTTPException(409, f"{j.kind} job #{j.id} is running — wait for it or cancel it")
 
-    async def run_or_job(request: Request, c: Collection, kind: JobKind, what: str, work) -> Any:
+    async def run_or_job(request: Request, c: Collection, kind: JobKind, what: str, work,
+                         args: dict[str, Any] | None = None) -> Any:
         """A bulk curation change: awaited in the request on a small collection, a background job
         on a big one (settings.bulk_job_min_urls) — there it takes longer than the 60 s a request
         has behind CloudFront, and the curator gets progress instead of an error page. `work` is the
-        change itself and returns the payload; as a job the answer is 202 + the job."""
+        change itself and returns the payload; as a job the answer is 202 + the job. `args`: what
+        curation_work needs to build the same change again after an engine restart (#34)."""
         if c.dump_count < settings.bulk_job_min_urls:
             return htmx_done(request, await work())
         try:
-            job = await request.app.state.jobs.start_curation(c, kind, work, what, actor=actor(request))
+            job = await request.app.state.jobs.start_curation(c, kind, work, what, actor=actor(request), request=args)
         except JobConflict as e:
             raise HTTPException(409, str(e)) from e
         return JSONResponse(jsonable_encoder(job), status_code=202,
                             headers={"HX-Refresh": "true"} if _is_htmx(request) else None)
+
+    class JobCaller:
+        """What a bulk change uses of its request: the app and who asked. A job an engine restart
+        interrupted has no request; it gets one of these, built from the job row (#34)."""
+
+        def __init__(self, who: str | None):
+            self.app = app
+            self.state = SimpleNamespace(
+                user=SimpleNamespace(username=who) if who and who != ANONYMOUS_ACTOR else None)
+
+    def curation_work(kind: JobKind, c: Collection, args: dict[str, Any], who: str | None):
+        """The bulk change a job of `kind` runs, from the arguments the route stored (#34). Each one
+        can run again after an interruption at any step and gives the result of one whole run."""
+        r: Any = JobCaller(who)
+        if kind is JobKind.RECOMPUTE:
+            return lambda: _recompute_work(r, c, review_all=bool(args.get("all")))
+        if kind is JobKind.BULK_ACCEPT:
+            body = AiBulk(**args)
+            return lambda: _ai_bulk_work(r, c, body, resumed=True)
+        if kind is JobKind.BULK_SUGGESTIONS:
+            return lambda: _suggestions_work(r, c, args["decision"], args.get("type"))
+        raise ValueError(f"{kind} is not a bulk curation change")
 
     # ── identity (set by auth.AuthMiddleware; absent when login is off) ─
 
@@ -1572,18 +1599,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # whoever presses it is curating the collection now (the dashboard's Curator filter)
         await db(request).set_curated_by(collection_id, actor(request))
 
-        async def work() -> dict:
-            ds = await curation(request).recompute(c, review_all=all)
-            n = len(ds.deltas)
-            await _after_curation_change(
-                request, c, ds, note=f"re-curating: {n} delta URLs queued for review" if all else None)
-            if all and n:  # start the walk-through again, whatever stage the last one ended on
-                await _set_stage(request, collection_id, CurationStage.EXCLUSIONS)
-                await db(request).set_review_round(collection_id, True)  # later recomputes keep the queue
-            await audit(request, "recompute.all" if all else "recompute", collection_id, f"{n} delta URLs")
-            return ds.counts
+        return await run_or_job(request, c, JobKind.RECOMPUTE, f"comparing {c.dump_count:,} dump URLs with the curated URLs",
+                                lambda: _recompute_work(request, c, review_all=all), {"all": all})
 
-        return await run_or_job(request, c, JobKind.RECOMPUTE, f"comparing {c.dump_count:,} dump URLs with the curated URLs", work)
+    async def _recompute_work(request: Request, c: Collection, *, review_all: bool) -> dict:
+        """Recompute (or Re-curate everything). Safe to run twice: the same rules give the same deltas."""
+        collection_id = c.collection_id
+        ds = await curation(request).recompute(c, review_all=review_all)
+        n = len(ds.deltas)
+        await _after_curation_change(
+            request, c, ds, note=f"re-curating: {n} delta URLs queued for review" if review_all else None)
+        if review_all and n:  # start the walk-through again, whatever stage the last one ended on
+            await _set_stage(request, collection_id, CurationStage.EXCLUSIONS)
+            await db(request).set_review_round(collection_id, True)  # later recomputes keep the queue
+        await audit(request, "recompute.all" if review_all else "recompute", collection_id, f"{n} delta URLs")
+        return ds.counts
 
     @app.get("/api/collections/{collection_id}/patterns")
     async def api_patterns(request: Request, collection_id: str, exact_limit: int | None = Query(None, ge=0, le=5000),
@@ -1951,14 +1981,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if body.type is None or s["type"] == body.type]
         if not sugs:
             raise HTTPException(409, f"no pending {body.type or ''} suggestions".replace("  ", " "))
-        async def work() -> dict:
-            n = await _decide_suggestions(request, c, sugs, body.decision)
-            await audit(request, f"suggestion.bulk_{body.decision}", collection_id, f"{body.type or 'all'} × {n}")
-            return {"decided": n, "state": body.decision + "ed"}
+        def work():
+            return _suggestions_work(request, c, body.decision, body.type, sugs)
 
         if body.decision != "accept":  # a reject applies nothing: no recompute, nothing long
             return htmx_done(request, await work())
-        return await run_or_job(request, c, JobKind.BULK_SUGGESTIONS, f"applying {len(sugs)} suggested rules", work)
+        return await run_or_job(request, c, JobKind.BULK_SUGGESTIONS, f"applying {len(sugs)} suggested rules", work,
+                                {"decision": body.decision, "type": body.type})
+
+    async def _suggestions_work(request: Request, c: Collection, decision: str, type_: str | None,
+                                sugs: list[dict] | None = None) -> dict:
+        """Decide the pending pattern suggestions (of one type, or all). `sugs` None: a job resumed
+        after a restart takes what is still pending; the ones decided before it are done, and rules
+        already inserted for the rest are skipped as duplicates. The accept ends with a full recompute
+        either way, so the rules and deltas equal one whole run."""
+        if sugs is None:
+            sugs = [s for s in await db(request).list_pattern_suggestions(c.collection_id, "pending")
+                    if type_ is None or s["type"] == type_]
+            if not sugs:  # everything was decided before the restart; the recompute may not have run
+                if decision == "accept":
+                    await _after_curation_change(request, c, await curation(request).recompute(c))
+                return {"decided": 0, "state": decision + "ed"}
+        n = await _decide_suggestions(request, c, sugs, decision)
+        await audit(request, f"suggestion.bulk_{decision}", c.collection_id, f"{type_ or 'all'} × {n}")
+        return {"decided": n, "state": decision + "ed"}
 
     @app.post("/api/collections/{collection_id}/suggestions/{sid}/{decision}")
     async def api_decide_suggestion(
@@ -2012,26 +2058,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         d = db(request)
-        fields = [body.field] if body.field else list(AI_FIELDS)
-        kind = (f"{body.conf}-confidence " if body.conf else "") + (f"AI {body.field} suggestions" if body.field else "AI suggestions")
+        kind = _ai_kind(body)
         whole = body.url is None and body.decision == "accept"  # every URL's suggestions → rules: the long one
         if whole and not await d.count_ai_suggestions(collection_id, field=body.field, conf=body.conf):
             raise HTTPException(409, f"no {kind} to {body.decision}")
 
-        async def work() -> dict:
-            return await _decide_ai_bulk(request, c, body, fields, kind)
+        def work():
+            return _ai_bulk_work(request, c, body)
 
         if not whole:
             return htmx_done(request, await work())
-        return await run_or_job(request, c, JobKind.BULK_ACCEPT, f"accepting the {kind}", work)
+        return await run_or_job(request, c, JobKind.BULK_ACCEPT, f"accepting the {kind}", work,
+                                body.model_dump(mode="json"))
 
-    async def _decide_ai_bulk(request: Request, c: Collection, body: AiBulk, fields: list[str], kind: str) -> dict:
+    def _ai_kind(body: AiBulk) -> str:
+        return (f"{body.conf}-confidence " if body.conf else "") + (f"AI {body.field} suggestions" if body.field else "AI suggestions")
+
+    async def _ai_bulk_work(request: Request, c: Collection, body: AiBulk, *, resumed: bool = False) -> dict:
+        fields = [body.field] if body.field else list(AI_FIELDS)
+        return await _decide_ai_bulk(request, c, body, fields, _ai_kind(body), resumed=resumed)
+
+    async def _decide_ai_bulk(request: Request, c: Collection, body: AiBulk, fields: list[str], kind: str,
+                              *, resumed: bool = False) -> dict:
+        """`resumed`: a job an engine restart interrupted runs this again. The suggestions it cleared
+        before the restart are not there to accept again; the rules it wrote for the rest are replaced
+        by the same rules. If nothing is left, it ends with the full recompute the first run may not
+        have reached."""
         d, collection_id = db(request), c.collection_id
         # accept-all (no url) skips what an SME rule decides; a named row, and any reject, does not
         skip_human = body.decision == "accept" and body.url is None
         per_field = {f: await d.deltas_with_ai(collection_id, f, url=body.url, conf=body.conf,
                                                skip_human=skip_human) for f in fields}
         n = sum(len(v) for v in per_field.values())
+        if not n and resumed:
+            await _after_curation_change(request, c, await curation(request).recompute(c))
+            return {"decided": 0, "field": body.field, "url": body.url, "state": body.decision + "ed"}
         if not n:
             held = skip_human and await d.count_ai_suggestions(collection_id, field=body.field, conf=body.conf)
             raise HTTPException(409, f"no {kind} to {body.decision}" + (f" on {body.url}" if body.url else "")
