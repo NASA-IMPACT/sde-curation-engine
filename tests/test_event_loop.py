@@ -9,13 +9,16 @@ loop was blocked, and /health/db reports the worst since the previous read.
 from __future__ import annotations
 
 import asyncio
+import time
 
 from tests.conftest import seed_dump
 
 N = 100_000
-# Measured on a laptop for one per-URL edit on N URLs (2026-10-07): 338–359 ms before the loads and
-# COPY writes yielded, 86–94 ms after. The limit sits between the two, with room for a busy machine.
-MAX_FREEZE_MS = 200
+# The limit is the worst freeze as a share of the edit's own time, not milliseconds: both grow on a
+# slower machine (a CI runner froze 212 ms where the laptop froze 90), but their ratio does not.
+# Measured on a laptop for one per-URL edit on N URLs (2026-10-08): 0.143–0.150 before the loads and
+# COPY writes yielded (330–352 ms of a 2.2–2.3 s edit), 0.037–0.041 after (81–94 ms).
+MAX_FREEZE_SHARE = 0.09
 
 
 async def test_an_edit_on_a_big_collection_does_not_freeze_the_server(client):
@@ -28,9 +31,13 @@ async def test_an_edit_on_a_big_collection_does_not_freeze_the_server(client):
 
     await asyncio.sleep(0.25)
     (await c.get("/health/db")).json()  # reset the worst value
+    t0 = time.perf_counter()
     r = await c.post("/api/collections/big.org/urls",
                      json={"url": "https://big.org/p123", "type": "title", "value": "Edited by hand"})
+    edit_ms = (time.perf_counter() - t0) * 1000
     assert r.status_code == 200, r.text
     await asyncio.sleep(0.25)  # the probe wakes after the edit
     lag = (await c.get("/health/db")).json()["loop_lag_ms"]
-    assert lag["max"] < MAX_FREEZE_MS, f"the event loop was blocked for {lag['max']} ms during one edit"
+    assert lag["max"] / edit_ms < MAX_FREEZE_SHARE, (
+        f"the event loop was blocked for {lag['max']:.0f} ms of a {edit_ms:.0f} ms edit "
+        f"({lag['max'] / edit_ms:.1%}; limit {MAX_FREEZE_SHARE:.0%})")

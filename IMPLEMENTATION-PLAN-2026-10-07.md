@@ -315,8 +315,9 @@ All items in this tier are invisible to curators. Each one must leave the snapsh
 
 **Validation.**
 - [x] New test: seed a 100,000-URL collection through `seed_dump`, run one per-URL edit, and read
-      `loop_lag_ms.max` from `/health/db`. It is under 200 ms. (Changed from "20,000 URLs, under
-      250 ms", which the old code also passed; see the validation log.)
+      `loop_lag_ms.max` from `/health/db`. The worst freeze is under 9 % of the edit's own time.
+      (Changed twice: "20,000 URLs, under 250 ms" also passed on the old code; "100,000 URLs, under
+      200 ms" failed on a slower CI runner. See the validation log.)
 - [x] T0.2 measurement at 100K: worst freeze during a per-URL edit is at most 0.3 s. Record the
       before and after numbers. (The 2026-09-18 audit measured 2.8 s worst.)
 - [x] The per-URL edit's own server time is not worse than the baseline by more than 10 %.
@@ -1158,3 +1159,4 @@ Add one line per validated item or sub-step. Do not edit earlier lines.
 | 2026-10-07 | #9 | New test in `tests/test_scale.py`, also run without the guard; scratch timing test outside the repo, 100K curated rows | Curated upsert has `WHERE (…) IS DISTINCT FROM (…)`. Test: after a one-row edit and promote, only that row's `xmin` changes; without the guard every row changes and the test fails. Second promote after a one-row change at 100K: 1.72 → 1.33 s (laptop), and no 100K dead row versions. | agent |
 | 2026-10-07 | #16 | `pytest tests/test_auth.py` (2 new tests), role test also run without its cache clear | `Database.session_user`: 30 s per-process cache, dropped by set_password, set_role, set_active. Ten authenticated GETs → one `get_user`. Deactivate, password change and role change take effect on the next request (existing tests warm the cache first). Without the clear on role change the test fails. 16 passed. | agent |
 | 2026-10-07 | Tier 2 | `make lint`; `make test` | lint clean; 409 passed (400 + 9 new). | agent |
+| 2026-10-08 | #3 (fix) | CI run failed `test_an_edit_on_a_big_collection_does_not_freeze_the_server` (212 ms against 200 ms). Ratio measured on the laptop, new `db.py` and `db.py` from f45b3fc (before Tier 2) | An absolute limit does not carry over to a slower machine. The test now limits the freeze as a share of the edit's own time. Laptop: new 0.037–0.041 (81–94 ms of 2.2–2.3 s), old 0.143–0.150 (330–352 ms). Limit 0.09. New code passes 3/3; old code fails ("352 ms of a 2339 ms edit (15.0%; limit 9%)"). Not yet confirmed on CI. | agent |
