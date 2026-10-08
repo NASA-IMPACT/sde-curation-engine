@@ -83,18 +83,25 @@ def is_exact(match: str) -> bool:
     return "*" not in match
 
 
-def compile_patterns(patterns: Sequence[Pattern | Rule], urls: list[str]) -> list[Compiled]:
+def url_key_index(urls: list[str]) -> dict[str, list[str]]:
+    """{canonical key: the URLs of that page}: how an exact rule finds its matches."""
+    by_key: dict[str, list[str]] = {}
+    for u in urls:
+        by_key.setdefault(canonical_key(u), []).append(u)
+    return by_key
+
+
+def compile_patterns(patterns: Sequence[Pattern | Rule], urls: list[str], *,
+                     by_key: dict[str, list[str]] | None = None) -> list[Compiled]:
     """An exact match (no `*`) is a dict lookup by canonical key, not a regex scan: per-URL edits
     and accepted per-URL AI suggestions are exact patterns, and there can be as many of them as
-    URLs. It matches every spelling of its page that the dump has."""
-    by_key: dict[str, list[str]] | None = None  # built only when there is an exact rule to look up
+    URLs. It matches every spelling of its page that the dump has. `by_key`: url_key_index(urls),
+    when the caller counts against the same URLs many times (it is a pass over every URL)."""
     out = []
     for p in patterns:
         if is_exact(p.match):
             if by_key is None:
-                by_key = {}
-                for u in urls:
-                    by_key.setdefault(canonical_key(u), []).append(u)
+                by_key = url_key_index(urls)
             c = Compiled(p, None, set(by_key.get(canonical_key(p.match), ())))
         else:
             rx = glob_to_regex(p.match)
@@ -188,5 +195,6 @@ def resolve_all(
     return out
 
 
-def match_counts(patterns: Sequence[Pattern | Rule], urls: list[str]) -> dict[int, int]:
-    return {c.pattern.id: len(c.matches) for c in compile_patterns(patterns, urls)}  # type: ignore[misc]
+def match_counts(patterns: Sequence[Pattern | Rule], urls: list[str], *,
+                 by_key: dict[str, list[str]] | None = None) -> dict[int, int]:
+    return {c.pattern.id: len(c.matches) for c in compile_patterns(patterns, urls, by_key=by_key)}  # type: ignore[misc]

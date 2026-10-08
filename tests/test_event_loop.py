@@ -41,3 +41,31 @@ async def test_an_edit_on_a_big_collection_does_not_freeze_the_server(client):
     assert lag["max"] / edit_ms < MAX_FREEZE_SHARE, (
         f"the event loop was blocked for {lag['max']:.0f} ms of a {edit_ms:.0f} ms edit "
         f"({lag['max'] / edit_ms:.1%}; limit {MAX_FREEZE_SHARE:.0%})")
+
+
+async def test_suggest_patterns_on_a_big_collection_does_not_freeze_the_server(client):
+    """Suggest patterns starts by matching the global exclude globs against every URL and folding URL
+    variants (pure Python over the whole crawl). On the event loop that froze every curator's page
+    for about 1.2 s at 100K URLs (local stress run, 2026-10-08); it runs on a worker thread now."""
+    from tests.conftest import wait_job
+
+    c = client
+    r = await c.post("/api/collections", json={"seed_url": "https://big.org", "name": "big.org", "max_pages": N})
+    assert r.status_code == 201, r.text
+    await seed_dump(c, "big.org", n=N)
+    c.app.state.settings.bulk_job_min_urls = N + 1
+    assert (await c.post("/api/collections/big.org/recompute")).status_code == 200
+
+    await asyncio.sleep(0.25)
+    (await c.get("/health/db")).json()  # reset the worst value
+    t0 = time.perf_counter()
+    assert (await c.post("/api/collections/big.org/suggest/patterns")).status_code == 202
+    job = await wait_job(c, "big.org", timeout=120)
+    job_ms = (time.perf_counter() - t0) * 1000
+    assert job["state"] == "succeeded", job
+    await asyncio.sleep(0.25)
+    lag = (await c.get("/health/db")).json()["loop_lag_ms"]
+    print(f"\nSuggest patterns on {N:,} URLs: {job_ms:.0f} ms, worst freeze {lag['max']:.0f} ms")
+    assert lag["max"] / job_ms < MAX_FREEZE_SHARE, (
+        f"the event loop was blocked for {lag['max']:.0f} ms of a {job_ms:.0f} ms Suggest patterns job "
+        f"({lag['max'] / job_ms:.1%}; limit {MAX_FREEZE_SHARE:.0%})")

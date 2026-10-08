@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ctypes
+import functools
 import logging
 import tempfile
 import time
@@ -29,7 +30,7 @@ from .engine.export import (
     status_prefix,
     write_jsonl,
 )
-from .engine.patterns import match_counts
+from .engine.patterns import is_exact, match_counts, url_key_index
 from .engine.text import content_hash
 from .engine.urls import batches, dedupe_variants
 from .events import EventBus
@@ -610,7 +611,10 @@ class JobManager:
                 raise LLMError("no delta URLs to look at — Start curating first (or every delta URL is already excluded)")
             cand_urls = [u for u, _ in pending]
             titles = dict(pending)
-            gl = global_exclude_hits(load_global_excludes(self.s.global_excludes_path), cand_urls, count_over=all_urls)
+            # pure Python over every URL (the global globs over the candidates, then over the whole
+            # crawl): on a worker thread, or the event loop froze for ~1.2 s at 100K URLs
+            excludes = load_global_excludes(self.s.global_excludes_path)
+            gl = await asyncio.to_thread(global_exclude_hits, excludes, cand_urls, count_over=all_urls)
             if resume:  # #29: the suggestions so far are saved; only the batches not answered yet are asked
                 n_global = int(job.progress.get("global", 0))
             else:
@@ -621,9 +625,12 @@ class JobManager:
             examples = [g["match"] for g in sorted(gl, key=lambda g: (-g["matches"], g["match"]))]
             if not examples:  # nothing matched: still show the style
                 examples = [g.match for g in load_global_excludes(self.s.global_excludes_path).patterns[:10]]
-            unique = dedupe_variants(cand_urls)
-            chunks = batches([{"url": u, "scraped_title": titles.get(u)} for u in unique],
-                             self.s.llm_pattern_batch_urls)
+            def plan() -> tuple[list[str], list]:
+                unique = dedupe_variants(cand_urls)
+                return unique, batches([{"url": u, "scraped_title": titles.get(u)} for u in unique],
+                                       self.s.llm_pattern_batch_urls)
+
+            unique, chunks = await asyncio.to_thread(plan)  # also every URL: off the event loop
             answered: set[int] = set()
             progress = self._progress_cb(c, job)
             if resume:
@@ -643,6 +650,8 @@ class JobManager:
                                 "failed": base_failed + p.get("failed", 0)})
 
             llm = self.llm()
+            count_one_at_a_time = asyncio.Lock()
+            url_index: dict[str, list[str]] | None = None
 
             async def one(item):
                 i, chunk = item
@@ -650,11 +659,18 @@ class JobManager:
                                                     batches=len(chunks))
 
             async def on_result(item, result):
+                nonlocal url_index
                 kept, done = result
-                counts = await asyncio.to_thread(
-                    match_counts,
-                    [Pattern(id=i, collection_id=cid, type=s.type, match=s.match) for i, s in enumerate(kept)],
-                    all_urls)
+                # one batch's rules counted over the whole crawl, on a worker thread. One at a time:
+                # several threads of pure Python starved the event loop of the interpreter lock (a
+                # 0.3 s freeze at 100K URLs), and in parallel they are no faster
+                async with count_one_at_a_time:
+                    if url_index is None and any(is_exact(s.match) for s in kept):
+                        url_index = await asyncio.to_thread(url_key_index, all_urls)  # once per job
+                    counts = await asyncio.to_thread(functools.partial(
+                        match_counts,
+                        [Pattern(id=i, collection_id=cid, type=s.type, match=s.match) for i, s in enumerate(kept)],
+                        all_urls, by_key=url_index))
                 rows = [{"type": s.type, "match": s.match, "rationale": s.rationale, "matches": counts.get(i, 0)}
                         for i, s in enumerate(kept)]
                 added = await self.db.add_pattern_suggestions(cid, rows)
