@@ -75,6 +75,7 @@ PROGRESS_EVERY_S = 3.0
 _URGENT_PROGRESS = frozenset({"phase", "pid", "ssm_command", "external_ref"})
 AI_FLUSH_ROWS = 25
 AI_FLUSH_SECONDS = 2.0
+DISPATCH_WAIT_ON_CANCEL_S = 60  # a cancel during the indexer dispatch waits this long to stop the task it started
 # How often the crawl ingest reports the pages it has read. Each report is one job-row UPDATE and
 # one SSE event, so it is paced by the clock rather than by the read chunks: a small crawl
 # is over before the second report, a big one ticks steadily.
@@ -167,7 +168,8 @@ class JobManager:
             JobKind.INDEX_PROD: self._resume_publish_prod,  # #31
             JobKind.LLM_PATTERNS: lambda c, job: self._run_llm_patterns(c, job, resume=True),  # #29
             JobKind.LLM_TITLES: lambda c, job: self._run_llm_titles(c, job, resume=True),  # #30
-            JobKind.LLM_METADATA: lambda c, job: self._run_llm_metadata(c, job, True, resume=True),  # #35
+            JobKind.LLM_METADATA: lambda c, job: self._run_llm_metadata(  # #35; M5: a "redo all" stays one
+                c, job, bool(job.progress.get("only_missing", True)), resume=True),
             JobKind.RECOMPUTE: self._resume_curation,  # #34
             JobKind.BULK_ACCEPT: self._resume_curation,  # #34
             JobKind.BULK_SUGGESTIONS: self._resume_curation,  # #34
@@ -258,6 +260,7 @@ class JobManager:
         """Cancel the running job for a collection; waits until it has recorded 'failed'."""
         if (pending := self._pending_resume.pop(collection_id, None)) is not None:
             self._resume_queue = [j for j in self._resume_queue if j.id != pending.id]
+            await self._stop_index_task(pending, f"cancelled by {actor or 'shutdown'}")
             await self.db.finish_job(pending, JobState.FAILED, error=f"cancelled by {actor or 'shutdown'}")
             self._emit(collection_id, pending)
             return await self.db.get_job(pending.id)
@@ -335,6 +338,7 @@ class JobManager:
         # Suggest metadata keeps its own long-standing setting (same default)
         limit = self.s.llm_resume_after_restart if j.kind == JobKind.LLM_METADATA else self.s.resume_max_restarts
         if restarts >= limit:
+            await self._stop_index_task(j, f"stopped resuming after {restarts} engine restarts")
             await self.db.finish_job(j, JobState.FAILED,
                                      error=f"stopped resuming after {restarts} engine restarts")
             self._emit(c, j)
@@ -347,6 +351,20 @@ class JobManager:
         self._emit(c, j)
         return True
 
+    async def _stop_index_task(self, job: JobRun, reason: str) -> None:
+        """An index job that ends without running again (M2): stop the indexer task it started, by
+        its saved id, and close its run. Other kinds started nothing outside the engine."""
+        if job.kind != JobKind.INDEX_TEST or not job.run_id:
+            return
+        run = await self.db.get_index_run(job.run_id)
+        ref = (run.external_ref if run else None) or job.external_ref
+        backend = self.indexer()
+        if ref and hasattr(backend, "kill"):
+            await backend.kill(Dispatch(external_ref=ref, detail={}))
+        if run is not None and run.state == "running":
+            run.state, run.error, run.finished_at = "failed", reason, utcnow()
+            await self.db.update_index_run(run)
+
     def start_resumes(self) -> None:
         """Start the jobs recover() queued, in the background: called once the engine serves."""
         if self._resume_queue and self._resume_task is None:
@@ -358,18 +376,28 @@ class JobManager:
         resumers = self._resumers()
         while self._resume_queue:
             j = self._resume_queue.pop(0)
-            c = await self.db.get_collection(j.collection_id)
-            if self._pending_resume.get(j.collection_id) is not j:
-                continue  # cancelled meanwhile
-            if c is None:
+            try:
+                c = await self.db.get_collection(j.collection_id)
+                if self._pending_resume.get(j.collection_id) is not j:
+                    continue  # cancelled meanwhile
+                if c is None:
+                    self._pending_resume.pop(j.collection_id, None)
+                    await self.db.finish_job(j, JobState.FAILED, error="collection gone")
+                    continue
+                self._resumed.add(j.id)
+                await self._spawn(j, resumers[JobKind(j.kind)](c, j))
                 self._pending_resume.pop(j.collection_id, None)
-                await self.db.finish_job(j, JobState.FAILED, error="collection gone")
-                continue
-            self._resumed.add(j.id)
-            await self._spawn(j, resumers[JobKind(j.kind)](c, j))
-            self._pending_resume.pop(j.collection_id, None)
-            log.info("%s job %s for %s resumes after an engine restart (restart %s)",
-                     j.kind, j.id, j.collection_id, j.progress.get("restarts"))
+                log.info("%s job %s for %s resumes after an engine restart (restart %s)",
+                         j.kind, j.id, j.collection_id, j.progress.get("restarts"))
+            except Exception as e:  # one job's error must not strand the others (M3)
+                log.exception("job %s for %s could not resume", j.id, j.collection_id)
+                if self._pending_resume.get(j.collection_id) is j:
+                    self._pending_resume.pop(j.collection_id, None)
+                    self._resumed.discard(j.id)
+                    with contextlib.suppress(Exception):
+                        await self.db.finish_job(j, JobState.FAILED,
+                                                 error=f"could not resume: {type(e).__name__}: {e}"[:500])
+                        self._emit(j.collection_id, j)
             if self._resume_queue:
                 await asyncio.sleep(self.s.resume_stagger_s)
 
@@ -695,12 +723,15 @@ class JobManager:
         a re-run (only_missing) resumes with the rest. One bad URL never fails the job: calls the
         provider turned away are retried once at the end, and a URL that still fails gets its
         error recorded on the row (the next Suggest metadata picks it up again).
-        `resume` (#35): the same job carries on after an engine restart with the URLs still without an
-        answer (every answer is saved as it arrives, so nothing is asked twice); its counters carry
-        on from where they stopped and `total` stays the run's total."""
+        `resume` (#35): the same job carries on after an engine restart with the URLs it has not
+        answered or failed on yet (each row records the job that settled it, V19 ai_job, so nothing is
+        asked or counted twice, and a "redo all" run stays one); its counters carry on from where
+        they stopped and `total` stays the run's total. A run stopped during its duplicate-title
+        pass carries on with that pass, over every page the job titled."""
         async def body():
             cid = c.collection_id
-            total = await self.db.count_deltas_for_llm(cid, only_missing=only_missing)
+            skip = job.id if resume else None
+            total = await self.db.count_deltas_for_llm(cid, only_missing=only_missing, skip_job=skip)
             progress = self._progress_cb(c, job)
             if resume:
                 base_done, base_failed = int(job.progress.get("done", 0)), int(job.progress.get("failed", 0))
@@ -711,7 +742,8 @@ class JobManager:
                     raise LLMError("no delta URLs to classify — Start curating (recompute) first (or all already have suggestions)")
                 base_done = base_failed = base_classified = 0
                 whole = total
-                await progress({"llm": "metadata", "total": total, "done": 0, "failed": 0, "inflight": 0,
+                await progress({"llm": "metadata", "only_missing": only_missing, "total": total, "done": 0,
+                                "failed": 0, "inflight": 0,
                                 "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
                                 "tokens_cache_write": 0, "tokens_reasoning": 0})
 
@@ -729,12 +761,22 @@ class JobManager:
             async def flush() -> None:
                 nonlocal last_flush, written
                 last_flush = time.monotonic()
+                # A write the engine's shutdown interrupts hands its rows back, and the flush in the
+                # `finally` below writes them (L17): else the resume asks for them again, and pays.
                 if errs:
                     failed, errs[:] = list(errs), []
-                    await self.db.set_delta_ai_errors(cid, failed)
+                    try:
+                        await self.db.set_delta_ai_errors(cid, failed, job=job.id)
+                    except BaseException:
+                        errs[:0] = failed
+                        raise
                 if buf:
                     rows, buf[:] = list(buf), []
-                    n = await self.db.set_delta_ai(cid, rows)
+                    try:
+                        n = await self.db.set_delta_ai(cid, rows, job=job.id)
+                    except BaseException:
+                        buf[:0] = rows
+                        raise
                     written += n  # never `written += await …`: two flushes overlap and one is lost
                     job.progress["classified"] = base_classified + written  # what a resume carries on from
 
@@ -752,9 +794,9 @@ class JobManager:
                     await flush()
 
             try:
-                if total:  # a resume may find every URL answered already
+                if total and job.progress.get("llm_phase") != "titles":  # a resume may find every URL answered
                     await run_pool(
-                        self.db.iter_deltas_for_llm(cid, only_missing=only_missing),
+                        self.db.iter_deltas_for_llm(cid, only_missing=only_missing, skip_job=skip),
                         lambda d: suggest_metadata_one(llm, d, settings=self.s, collection=c),
                         workers=self.s.llm_workers, shared=self._llm_gate, on_result=on_result, on_error=on_error, on_progress=pool_progress,
                         total=total, **self._retry(),
@@ -762,9 +804,12 @@ class JobManager:
             finally:
                 await flush()  # a cancel still keeps every answer that arrived
             await progress({"classified": base_classified + written, "inflight": 0})
+            in_titles = resume and job.progress.get("llm_phase") == "titles"
+            if resume:  # M4: the pages titled before the restart are in the pass too
+                titled |= await self.db.urls_titled_by_job(cid, job.id)
             if self.s.llm_dedupe_titles and titled:
                 try:
-                    await self._retitle_duplicates(c, job, llm, touching=titled)
+                    await self._retitle_duplicates(c, job, llm, touching=titled, resume=in_titles)
                 except LLMError as e:  # the classification stands; the duplicates stay flagged
                     log.warning("titles %s: telling duplicate titles apart failed: %s", cid, e)
                     await progress({"titles_error": str(e)[:500]})
@@ -935,8 +980,12 @@ class JobManager:
                 if not plan:
                     break
                 await progress({"title_pass": attempt + 1, "title_groups": len(plan), "title_calls_done": 0})
-            await run_pool(plan, one, workers=self.s.llm_workers, shared=self._llm_gate, on_result=on_result, on_error=on_error,
-                           on_progress=pool_progress, total=len(plan), **self._retry())
+            try:
+                await run_pool(plan, one, workers=self.s.llm_workers, shared=self._llm_gate, on_result=on_result,
+                               on_error=on_error, on_progress=pool_progress, total=len(plan), **self._retry())
+            except LLMError as e:  # every call of this pass failed: the URLs below still tell the pages apart (N2)
+                log.warning("titles %s: pass %d failed: %s", cid, attempt + 1, e)
+                await progress({"titles_error": str(e)[:500]})
             await progress({"retitled": retitled, "title_calls": calls})
 
         # The floor: whatever the model could not tell apart, the URLs do. This is what makes one
@@ -1029,7 +1078,8 @@ class JobManager:
                     await self._validate(c, job, run, s3, backend, progress)
                     return
                 if not run.external_ref:
-                    d = await self._export_and_dispatch(c, job, run, s3, backend, progress, allow_high_deletion)
+                    d = await self._export_and_dispatch(c, job, run, s3, backend, progress, allow_high_deletion,
+                                                         resume=resume)
                 else:  # resumed after the dispatch: the indexer task kept going without us
                     d = Dispatch(external_ref=run.external_ref, detail={})
                     await progress({"phase": "indexing", "external_ref": run.external_ref, "resumed_watch": True})
@@ -1071,10 +1121,18 @@ class JobManager:
         await self._guarded(c, job, body)
 
     async def _export_and_dispatch(self, c: Collection, job: JobRun, run: IndexRun, s3: S3, backend: IndexBackend,
-                                   progress, allow_high_deletion: bool) -> Dispatch:
+                                   progress, allow_high_deletion: bool, *, resume: bool = False) -> Dispatch:
         """1. pin the OpenSearch collection this indexes as, then export: stream curated (non-excluded)
         rows — with the text they were approved with — to a temp jsonl, upload, THEN the manifest.
-        2. dispatch the indexer."""
+        2. dispatch the indexer, with the run id as its token (H2): an engine that stopped during the
+        dispatch cannot know whether the task started, so the resume dispatches again with the same
+        token, which starts nothing new, and does not export again (`run.exported` is saved only once
+        the manifest is up), so a task already reading the files is not given new ones."""
+        if resume and run.exported:
+            d = await self._dispatch(c, job, run, backend, allow_high_deletion)
+            await progress({"external_ref": d.external_ref, "phase": "indexing",
+                            **{k: v for k, v in d.detail.items() if k != "log"}})
+            return d
         async with self.heavy_phase(job):
             await self._pin_index_key(c, progress)
             # (a server-side cursor, a few hundred rows at a time: the approved text of 100k pages is
@@ -1097,11 +1155,30 @@ class JobManager:
         await self.db.update_index_run(run)
         await progress({"exported": n, "export": s3.url(prefix), "phase": "dispatch"})
 
-        d: Dispatch = await backend.dispatch(c, run.run_id, run.target, allow_high_deletion=allow_high_deletion)
+        d = await self._dispatch(c, job, run, backend, allow_high_deletion)
+        await progress({"external_ref": d.external_ref, "phase": "indexing", **{k: v for k, v in d.detail.items() if k != "log"}})
+        return d
+
+    async def _dispatch(self, c: Collection, job: JobRun, run: IndexRun, backend: IndexBackend,
+                        allow_high_deletion: bool) -> Dispatch:
+        """Start the indexer task and save its id. A curator's cancel during the dispatch waits for
+        it and stops the task it started; at shutdown the resume finds the task by its token (H2)."""
+        dispatching = asyncio.ensure_future(backend.dispatch(c, run.run_id, run.target,
+                                                             allow_high_deletion=allow_high_deletion, token=run.run_id))
+        try:
+            d: Dispatch = await asyncio.shield(dispatching)
+        except asyncio.CancelledError:
+            if self._leaving_running(job):
+                dispatching.cancel()  # the RunTask call goes on in its thread; the resume adopts the task
+            else:
+                with contextlib.suppress(Exception):
+                    d = await asyncio.wait_for(dispatching, DISPATCH_WAIT_ON_CANCEL_S)
+                    if hasattr(backend, "kill"):
+                        await backend.kill(d)
+            raise
         run.external_ref = d.external_ref
         job.external_ref = d.external_ref
         await self.db.update_index_run(run)
-        await progress({"external_ref": d.external_ref, "phase": "indexing", **{k: v for k, v in d.detail.items() if k != "log"}})
         return d
 
     async def _resume_index(self, c: Collection, job: JobRun) -> None:
@@ -1160,7 +1237,10 @@ class JobManager:
                     return
                 attempts = [*job.progress.get("attempts", []),
                             {"indexed": job.progress.get("indexed", 0), "failed": job.progress.get("failed", 0)}]
-                job.progress = {**job.progress, "attempts": attempts}
+                # the counters now belong to this attempt: a restart before it reports must not add
+                # the last one's again (L1)
+                job.progress = {**job.progress, "attempts": attempts, "indexed": 0, "failed": 0}
+                await self.db.update_job(job)
             else:
                 source = await self.db.last_index_run(c.collection_id, "test")
                 if not source or source.state != "succeeded" or not source.validation_passes(self.s.validation_title_match_threshold):
@@ -1260,7 +1340,7 @@ class JobManager:
             # would return the stale (pre-refresh) validation immediately
             prefix = status_prefix(c.collection_key, run.run_id)
             await s3.delete(f"{prefix}/status.json", f"{prefix}/validation.json")
-            d = await backend.dispatch(c, run.run_id, run.target)
+            d = await backend.dispatch(c, run.run_id, run.target, token=f"{run.run_id}:validate")
             status, validation = await wait_for_status(s3, self.s, c, run.run_id, backend, d, progress, target=run.target)
             if status.state != "succeeded" or validation is None:
                 raise IndexError_(f"second-pass validation failed: {status.error or 'no validation.json'}")

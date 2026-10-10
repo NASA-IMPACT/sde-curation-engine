@@ -85,7 +85,9 @@ class CurationService:
             review_all=review_all,
             keep_queued=c.review_round,
         )
-        await self.db.replace_deltas(c.collection_id, ds.deltas, ds.effects, excluded_count=ds.excluded)
+        await self.db.replace_deltas(c.collection_id, ds.deltas, ds.effects, excluded_count=ds.excluded, full=True)
+        if c.review_round and not ds.deltas:  # the round's queue is empty: the round is over (L7)
+            await self.db.set_review_round(c.collection_id, False)
         if ds.curated_edited_by:
             await self.db.set_curated_edited_by(c.collection_id, ds.curated_edited_by)
         if ds.curated_crawl_failure:
@@ -105,11 +107,12 @@ class CurationService:
         `excluded_before`: how many of these pages' dump URLs the rules kept out before the change —
         given by a caller that deletes exclude / include rules first (their effects go with them).
         None when the collection cannot be done this way (rows without a stored key, or an unknown
-        excluded count): the caller then runs the full recompute. The caller holds the lock."""
+        excluded count, or no full recompute since the last crawl): the caller then runs the full
+        recompute. The caller holds the lock."""
         cid = c.collection_id
         fresh = await self.db.get_collection(cid)
-        if fresh is None or fresh.excluded_count is None or not await self.db.keyed(cid):
-            return None
+        if fresh is None or not fresh.deltas_current or fresh.excluded_count is None or not await self.db.keyed(cid):
+            return None  # deltas_current: no full recompute since the crawl, so only it can queue the crawl (H1)
         keys = sorted(set(keys))
         dump = await self.db.load_dump(cid, keys=keys)
         curated = await self.db.load_curated(cid, keys=keys)
@@ -136,6 +139,8 @@ class CurationService:
         if ds.curated_excluded:
             await self.db.set_curated_excluded(cid, ds.curated_excluded)
         after = await self.db.get_collection(cid)
+        if after is not None and after.review_round and not after.delta_count:  # the round is over (L7)
+            await self.db.set_review_round(cid, False)
         ds.whole = {**(await self.db.count_deltas_by_kind(cid)),
                     "excluded": after.excluded_count if after and after.excluded_count is not None else 0,
                     "kept": await self.db.count_curated_unreachable(cid)}

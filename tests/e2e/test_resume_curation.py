@@ -76,7 +76,9 @@ async def snapshot(db: Database, cid: str) -> dict:
         "collection": (c.status, c.curation_stage, c.needs_recuration, c.dump_count, c.delta_count, coll[0]["review_round"]),
         "rules": rows([{"type": p.type, "match": p.match, "value": p.value, "source": p.source}
                        for p in await db.list_patterns(cid)]),
-        "deltas": rows(await db.fetch("SELECT * FROM delta_urls WHERE collection_id=%s", (cid,))),
+        # ai_job names the job that wrote the AI columns: an id, different in each twin
+        "deltas": rows(await db.fetch("SELECT * FROM delta_urls WHERE collection_id=%s", (cid,)),
+                       drop=("collection_id", "ai_job")),
         "effects": rows(await db.fetch(
             "SELECT e.url, e.field, p.type, p.match, p.value FROM pattern_effects e"
             " JOIN patterns p ON p.id=e.pattern_id WHERE e.collection_id=%s", (cid,))),

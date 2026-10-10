@@ -108,13 +108,20 @@ class Indexer:
         self.stopped: list[str] = []
         self.slow_first_answer = slow_first_answer
         self.dispatching = asyncio.Event()
+        self.answer = asyncio.Event()  # set: the slow first answer comes back
+        self.tokens: dict[str, str] = {}  # as ECS RunTask's clientToken: one task per token
 
-    async def dispatch(self, c, run_id, target, *, allow_high_deletion=False) -> Dispatch:
+    async def dispatch(self, c, run_id, target, *, allow_high_deletion=False, token=None) -> Dispatch:
+        if token is not None and token in self.tokens:
+            return Dispatch(self.tokens[token], {})
         self.started.append(run_id)  # the task is running from here on
+        ref = f"task/{len(self.started)}"
+        if token is not None:
+            self.tokens[token] = ref
         if self.slow_first_answer and len(self.started) == 1:
             self.dispatching.set()
-            await asyncio.Event().wait()
-        return Dispatch(f"task/{len(self.started)}", {})
+            await self.answer.wait()
+        return Dispatch(ref, {})
 
     async def still_running(self, d) -> bool:
         return True
@@ -194,10 +201,10 @@ class StatusIndexer(Indexer):
         super().__init__()
         self.state, self.error, self.validation = state, error, validation
 
-    async def dispatch(self, c, run_id, target, *, allow_high_deletion=False) -> Dispatch:
+    async def dispatch(self, c, run_id, target, *, allow_high_deletion=False, token=None) -> Dispatch:
         import boto3
 
-        d = await super().dispatch(c, run_id, target, allow_high_deletion=allow_high_deletion)
+        d = await super().dispatch(c, run_id, target, allow_high_deletion=allow_high_deletion, token=token)
         s3, prefix = boto3.client("s3", region_name="us-east-1"), status_prefix(c.collection_key, run_id)
         status = {"run_id": run_id, "collection_key": c.collection_key, "target": target, "state": self.state,
                   "error": self.error, "indexed": c.curated_count, "deleted": 0}

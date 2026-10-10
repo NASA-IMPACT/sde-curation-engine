@@ -90,7 +90,7 @@ _INSERTED_COLLECTION_COLS = ("collection_id", "name", "seed_url", "division", "d
 _COLLECTION_DEFAULTS: dict[str, Any] = {
     "curation_stage": None, "recuration_reason": None, "last_scraped_at": None, "last_crawl_capped": False,
     "last_run_id": None, "curated_by": None, "index_key": None, "index_name": None, "curated_rows": 0,
-    "excluded_count": None, "review_round": False, "curated_changed_at": None,
+    "excluded_count": None, "review_round": False, "curated_changed_at": None, "deltas_current": True,
 }
 _INDEX_RUN_COLS = ("run_id", "collection_id", "target", "state", "exported", "external_ref", "status",
                    "validation", "validated_by", "error", "started_at", "finished_at", "started_by")
@@ -227,7 +227,7 @@ class FakeDatabase:
         return types
 
     def _delta_row(self, d: DeltaUrl) -> dict[str, Any]:
-        return {c: _t(getattr(d, c)) for c in _DELTA_COLS}
+        return {**{c: _t(getattr(d, c)) for c in _DELTA_COLS}, "ai_job": None}
 
     def _upsert_deltas(self, collection_id: str, deltas: list[DeltaUrl]) -> None:
         """INSERT … ON CONFLICT DO UPDATE of the non-AI columns (a new row takes every column)."""
@@ -284,12 +284,15 @@ class FakeDatabase:
             n[r["k"]] = n.get(r["k"], 0) + 1
         return [{**r, "n": n[r["k"]]} for r in rows if n[r["k"]] > 1]
 
-    def _llm_rows(self, collection_id: str, *, only_missing: bool) -> list[tuple[dict, dict | None]]:
+    def _llm_rows(self, collection_id: str, *, only_missing: bool,
+                  skip_job: int | None = None) -> list[tuple[dict, dict | None]]:
         """(delta row, its dump row or None) for Database._LLM_WHERE (+ _LLM_MISSING)."""
         dump = self._dump.get(collection_id, {})
         out = []
         for d in self._deltas.get(collection_id, {}).values():
             if d["kind"] == "deleted" or d["excluded"]:
+                continue
+            if skip_job is not None and d["ai_job"] == skip_job:
                 continue
             u = dump.get(d["url"])
             if only_missing and not self._llm_missing(d, u):
@@ -433,7 +436,8 @@ class FakeDatabase:
         self._dump_failures[collection_id] = new_failures
         self._gc_page_text(collection_id)
         n = len(self._dump[collection_id])
-        self._coll_update(collection_id, dump_count=n, excluded_count=None, review_round=False, updated_at=utcnow())
+        self._coll_update(collection_id, dump_count=n, excluded_count=None, review_round=False, deltas_current=False,
+                          updated_at=utcnow())
         return n
 
     async def load_dump(self, collection_id: str, *, keys: list[str] | None = None) -> list[DumpUrl]:
@@ -483,7 +487,7 @@ class FakeDatabase:
 
     async def replace_deltas(
         self, collection_id: str, deltas: list[DeltaUrl], effects: list[tuple[int, str, str]],
-        *, keep_effects: bool = False, excluded_count: int | None = None,
+        *, keep_effects: bool = False, excluded_count: int | None = None, full: bool = False,
     ) -> None:
         if deltas:
             self._require(collection_id)
@@ -503,7 +507,8 @@ class FakeDatabase:
                 self._effects.setdefault((pid, url, field), collection_id)
             self._coll_update(collection_id, delta_count=len(deltas), updated_at=utcnow(),
                               excluded_count=excluded_count if excluded_count is not None
-                              else (None if effects else 0))
+                              else (None if effects else 0),
+                              deltas_current=self._collections.get(collection_id, {}).get("deltas_current", True) or full)
         else:
             self._coll_update(collection_id, delta_count=len(deltas), updated_at=utcnow())
 
@@ -597,7 +602,7 @@ class FakeDatabase:
         for key in [k for k, cid in self._effects.items() if cid == collection_id and k[1] in wanted]:
             del self._effects[key]
 
-    async def set_delta_ai(self, collection_id: str, items: list[dict[str, Any]]) -> int:
+    async def set_delta_ai(self, collection_id: str, items: list[dict[str, Any]], *, job: int | None = None) -> int:
         if not items:
             return 0
         table = self._deltas.get(collection_id, {})
@@ -610,11 +615,12 @@ class FakeDatabase:
                 document_type_ai=_t(i.get("document_type")), title_ai_conf=_t(i.get("title_conf")),
                 division_ai_conf=_t(i.get("division_conf")), document_type_ai_conf=_t(i.get("document_type_conf")),
                 ai_model=i.get("model"), ai_content_hash=i.get("content_hash"), ai_error=None, ai_failures=0,
-                title_ai_before=None, division_skipped=bool(i.get("division_skipped")),
+                title_ai_before=None, division_skipped=bool(i.get("division_skipped")), ai_job=job,
             )
         return len(items)
 
-    async def set_delta_ai_errors(self, collection_id: str, items: list[tuple[str, str]]) -> int:
+    async def set_delta_ai_errors(self, collection_id: str, items: list[tuple[str, str]], *,
+                                  job: int | None = None) -> int:
         if not items:
             return 0
         table = self._deltas.get(collection_id, {})
@@ -623,6 +629,7 @@ class FakeDatabase:
             if row is not None:
                 row["ai_error"] = err[:1000]
                 row["ai_failures"] += 1
+                row["ai_job"] = job
         return len(items)
 
     async def set_delta_ai_titles(self, collection_id: str, items: list[dict[str, Any]]) -> int:
@@ -783,15 +790,16 @@ class FakeDatabase:
         return [(d["url"], d["scraped_title"]) for d, _u in
                 sorted(self._llm_rows(collection_id, only_missing=False), key=lambda x: x[0]["url"])]
 
-    async def count_deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> int:
-        return len(self._llm_rows(collection_id, only_missing=only_missing))
+    async def count_deltas_for_llm(self, collection_id: str, *, only_missing: bool = True,
+                                   skip_job: int | None = None) -> int:
+        return len(self._llm_rows(collection_id, only_missing=only_missing, skip_job=skip_job))
 
     async def iter_deltas_for_llm(
-        self, collection_id: str, *, only_missing: bool = True, chunk: int = 200
+        self, collection_id: str, *, only_missing: bool = True, chunk: int = 200, skip_job: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         last = ""
         while True:
-            rows = sorted((x for x in self._llm_rows(collection_id, only_missing=only_missing)
+            rows = sorted((x for x in self._llm_rows(collection_id, only_missing=only_missing, skip_job=skip_job)
                            if x[0]["url"] > last), key=lambda x: x[0]["url"])[:chunk]
             if not rows:
                 return
@@ -799,6 +807,10 @@ class FakeDatabase:
                 yield {"url": d["url"], "title": d["scraped_title"], "text": self._text_of(collection_id, u),
                        "content_hash": u["content_hash"] if u is not None else None}
             last = rows[-1][0]["url"]
+
+    async def urls_titled_by_job(self, collection_id: str, job: int) -> set[str]:
+        return {d["url"] for d in self._deltas.get(collection_id, {}).values()
+                if d["ai_job"] == job and d["title_ai"] is not None and d["ai_error"] is None}
 
     async def incomplete_counts(self, collection_id: str, urls: list[str] | None = None) -> dict[str, int]:
         dup = {r["url"] for r in self._duplicates(collection_id, pending=False) if r["delta"]}
@@ -952,7 +964,9 @@ class FakeDatabase:
         p = self._patterns.get(pattern_id)
         if p is None or p["collection_id"] != collection_id:
             return False
-        self._forget_excluded_count(collection_id, self._delete_pattern_rows([pattern_id]))
+        types = self._delete_pattern_rows([pattern_id])
+        if "*" in p["match"]:  # a per-URL rule keeps the stored count (Database.delete_pattern)
+            self._forget_excluded_count(collection_id, types)
         return True
 
     # ── jobs ───────────────────────────────────────────────────────────

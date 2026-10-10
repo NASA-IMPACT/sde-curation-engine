@@ -1,7 +1,6 @@
 """CurationService decisions, on the in-memory FakeDatabase (tests/support/fake_db.py): which
 recompute a change takes, what it queues, and when a review round ends."""
 
-import pytest
 
 from sde_curation.curation import CurationService
 from sde_curation.models import (
@@ -52,10 +51,9 @@ def recorded(service: CurationService) -> list[str]:
     return calls
 
 
-# ── Known bugs from REVIEW-SINCE-DEV-MERGE-2026-10-08.md (expected failures until fixed) ──────────
+# ── Bugs from REVIEW-SINCE-DEV-MERGE-2026-10-08.md: each test failed before its fix ──────────────────
 
 
-@pytest.mark.xfail(strict=True, reason="H1: an edit after a crawl and before Start curating queues only that page")
 async def test_an_edit_before_start_curating_queues_the_whole_crawl():
     """The per-page recompute is only right once a full recompute has built the delta set for the
     current crawl. Before that, an edit must queue every page of the crawl, as Start curating does."""
@@ -68,7 +66,6 @@ async def test_an_edit_before_start_curating_queues_the_whole_crawl():
     assert sorted(d.url for d in await db.load_deltas(CID)) == sorted(URLS)
 
 
-@pytest.mark.xfail(strict=True, reason="L4: a ✓ that removes a per-page exclude rule takes the full recompute")
 async def test_including_a_page_again_recomputes_only_that_page():
     db, c = await crawled()
     service = CurationService(db)
@@ -81,7 +78,6 @@ async def test_including_a_page_again_recomputes_only_that_page():
     assert calls == ["scoped"]
 
 
-@pytest.mark.xfail(strict=True, reason="L7: a review round stays open after its queue empties without a full promote")
 async def test_a_review_round_ends_when_its_queue_is_empty():
     """Re-curate everything queues every curated page and opens a review round. When the queue
     empties (here: all but one page promoted, the last one excluded), the round is over."""

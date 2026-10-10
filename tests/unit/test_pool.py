@@ -148,7 +148,6 @@ async def test_per_item_errors_after_a_success_do_not_abort_early():
 # ── Found while writing the unit tests (2026-10-09), not in the 2026-10-08 review ──────────────────
 
 
-@pytest.mark.xfail(strict=True, reason="N1: an unexpected error in a model call or its result handler hangs the pool forever")
 async def test_an_unexpected_error_fails_the_pool_instead_of_hanging():
     """Only LLMError is an expected failure of one item. Anything else (a bug, or a database error
     while saving an answer) must end the pool with that error. Today the producer is cancelled once

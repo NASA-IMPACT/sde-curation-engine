@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from sde_curation.db import db_scope
 from tests.support.flows import classify, wait_job
 
@@ -125,10 +123,9 @@ async def test_a_page_seen_again_without_a_change_counts_nothing(crawler_client)
     assert db.stats_computed > before  # a write: counted again
 
 
-# ── Known bugs from REVIEW-SINCE-DEV-MERGE-2026-10-08.md (expected failures until fixed) ──────────
+# ── Bugs from REVIEW-SINCE-DEV-MERGE-2026-10-08.md: each test failed before its fix ──────────────────
 
 
-@pytest.mark.xfail(strict=True, reason="M9: a write that commits but fails to mark the change leaves stale page counts")
 async def test_a_write_whose_change_mark_fails_does_not_leave_stale_counts(crawler_client, monkeypatch):
     """A write and its change mark must succeed or fail together. Here the mark (a second
     transaction today) fails once, the way a pool timeout makes it fail, during the first recompute
@@ -170,7 +167,6 @@ async def test_a_write_whose_change_mark_fails_does_not_leave_stale_counts(crawl
     await assert_stats_match(c)
 
 
-@pytest.mark.xfail(strict=True, reason="M10: a page view during a ✓ makes the excluded count go negative")
 async def test_the_excluded_count_stays_exact_when_a_page_view_lands_during_an_include(crawler_client, monkeypatch):
     """✗ excludes a page; ✓ brings it back. The ✓ deletes the exclude rule (the stored excluded count
     becomes unknown) and then recomputes the page. A page view in between counts and stores the

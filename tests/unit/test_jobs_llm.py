@@ -181,7 +181,6 @@ async def test_regenerate_titles_leaves_no_delta_url_sharing_a_title(tmp_path, m
     assert (await db.duplicate_title_counts(CID))["delta_urls"] == 0
 
 
-@pytest.mark.xfail(strict=True, reason="NEW: a group the model fails on in a re-ask pass fails Regenerate titles before the URL floor")
 async def test_a_group_the_model_keeps_failing_on_is_told_apart_by_its_urls(tmp_path, monkeypatch):
     """_retitle_duplicates promises no duplicate survives: what the model cannot do, the URLs do. On
     the second pass only the failed group is left, run_pool raises "all 1 calls failed", and the

@@ -215,6 +215,8 @@ def recompute(
             if c.crawl_failure:  # fetched again: the flag comes down
                 curated_crawl_failure.append((u, None))
             continue
+        if c is not None and c.crawl_failure:  # fetched again, and changed: the flag comes down too (L10)
+            curated_crawl_failure.append((cu, None))  # type: ignore[arg-type]
         prev = prev_by.get(u)
         deltas.append(
             DeltaUrl(

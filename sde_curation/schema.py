@@ -418,9 +418,21 @@ CREATE INDEX curated_urls_key ON curated_urls (collection_id, canonical_key);
 CREATE INDEX patterns_key ON patterns (collection_id, canonical_key);
 """
 
+# The Suggest-metadata job that last answered a row, or recorded its failure. A job resumed after an
+# engine restart skips the rows it settled itself (M5, L2: a "redo all" run asks the rest, a failed
+# page is not asked and counted again) and finds the pages it titled for its duplicate-title pass
+# (M4). Nullable, no default: adding it changes no row.
+# `deltas_current`: the delta set was built by a full recompute over the current crawl. A crawl
+# ingest clears it and the next full recompute (Start curating) sets it; until then a per-URL edit
+# takes the full recompute too, so it queues the whole crawl and not only its own page (H1).
+V19 = """
+ALTER TABLE delta_urls ADD COLUMN ai_job integer;
+ALTER TABLE collections ADD COLUMN deltas_current boolean NOT NULL DEFAULT true;
+"""
+
 MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8),
                                      (9, V9), (10, V10), (11, V11), (12, V12), (13, V13), (14, V14), (15, V15),
-                                     (16, V16), (17, V17), (18, V18)]
+                                     (16, V16), (17, V17), (18, V18), (19, V19)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).

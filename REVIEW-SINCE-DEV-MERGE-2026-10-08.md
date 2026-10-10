@@ -27,6 +27,9 @@ HEAD. The reproduction tests and scripts are kept outside the repo, in
 and M7), 1 measured and found negligible (M8), and 1 not reproducible locally (M1, needs AWS).
 Finding IDs are kept from the first version of this review; M4 and M8 moved to Low.
 
+**Status (2026-10-09):** every code finding is fixed in the working tree, not committed (section 8).
+The infrastructure, runbook and documentation findings, and the decisions, are pending (section 9).
+
 ---
 
 ## 1. Verdict
@@ -356,3 +359,140 @@ the 2026-10-06 crash (`0361da2`).
   job fails after 3 deploys even if it was moving.
 - A resumed job that follows a local or long-finished ECS indexer waits the full stall timeout
   before deciding. Is that acceptable?
+
+---
+
+## 8. Fixes (2026-10-09)
+
+**Status:** all 19 code findings are fixed in the working tree. Nothing is committed. The 11
+infrastructure, runbook and documentation findings are still open (section 9).
+
+**How each fix was checked.** Every code finding had a test that failed before the fix. The test
+was marked `xfail(strict=True)` until the fix, then the mark was removed and the test passed. For
+three fixes without a test of their own (the cancel half of H2, the restart-limit half of M2, and
+the job marker of M4/M5/L2), a new test was added and shown to fail with the fix taken out, or the
+contract test was extended to check the real and fake databases against each other.
+
+**Results after the fixes:**
+
+| Level | Result | Time | Gate |
+|---|---|---|---|
+| Unit | 511 passed | 12 s | under 20 s: met |
+| Integration | 209 passed | 99 s | under 90 s: **9 s over** |
+| E2E | 56 passed | 111 s | under 4 min: met |
+
+Lint (`ruff`) is clean. The L5 deadlock test depends on timing; it passed on 3 separate runs.
+
+### 8.1 What was fixed
+
+| # | Problem | Fix | Where |
+|---|---|---|---|
+| H1 | An edit before Start curating queues only that page. | New column `collections.deltas_current` (V19). A crawl ingest sets it to false; a full recompute sets it to true. The per-page recompute refuses while it is false, so the edit takes the full recompute and the whole crawl is queued. | `schema.py` V19; `db.py` `replace_dump`, `replace_deltas(full=)`; `curation.py` `_recompute_keys` |
+| H2 | An interrupted dispatch starts a second ECS indexer. | The dispatch sends the run ID as the ECS `RunTask` `clientToken`. A repeat request with the same token starts no new task. A resumed job dispatches again and gets the same task, and does not export again once `run.exported` is saved. A curator's cancel during the dispatch waits for it (up to 60 s) and stops the task it started. | `backends/index.py`; `jobs.py` `_dispatch`, `_export_and_dispatch` |
+| M2 | Cancelling an index job that waits to resume leaves its ECS task running. | A cancel of a waiting job, and the restart limit, stop the task by its saved ID and close the index run. | `jobs.py` `_stop_index_task` |
+| M3 | One error in the resume loop strands every queued resume. | An error while resuming one job fails that job, with the reason; the loop goes on with the others. | `jobs.py` `_run_resumes` |
+| M4 | A restart during the duplicate-title pass leaves duplicates (`LLM_DEDUPE_TITLES=true` only). | A resumed Suggest metadata job finds the pages it titled before the restart (by `ai_job`) and continues its duplicate-title pass. | `jobs.py` `_run_llm_metadata` |
+| M5 | A resumed "redo all" Suggest metadata finishes as "missing only". | New column `delta_urls.ai_job` (V19): the job that last answered or failed on the row. The job stores its "missing only" choice in its progress. A resume keeps the choice and skips only the rows its own job settled. | `schema.py` V19; `db.py` `set_delta_ai`, `set_delta_ai_errors`, `count_deltas_for_llm`, `iter_deltas_for_llm`, `urls_titled_by_job`; `jobs.py` |
+| L2 | A resumed metadata job asks a failed page again and counts it twice. | Same column: a page the job failed on is not asked again by that job. | as M5 |
+| L17 | Answers being saved at shutdown are lost and asked again (paid twice). | A write that the shutdown interrupts puts its rows back in the buffer; the final flush writes them. | `jobs.py` `flush` |
+| L1 | A prod publish resumed twice counts the first attempt twice. | When a resume records an attempt, it resets the attempt counters. | `jobs.py` `_run_publish_prod` |
+| M9 | A lost change mark leaves stored page counts stale. | The change mark is now the last statement of the write's own transaction. The write and its mark commit or fail together. | `db.py` `_touches`, `_conn`, `changed` |
+| M10 | The excluded count can be subtracted twice and go negative. | Deleting a per-URL exclude or include rule keeps the stored excluded count; the recompute that follows corrects it. A page view during a ✓ therefore cannot store a count in between. Deleting a glob rule still clears the count. | `db.py` `delete_pattern` |
+| L4 | A ✓ that removes a per-URL exclude rule takes the full recompute. | Same change as M10: the count stays known, so the per-page recompute runs. | as M10 |
+| L5 | The key backfill can deadlock a promote (the curator gets a 500). | The backfill selects each batch with `FOR UPDATE SKIP LOCKED` in the transaction that updates it. It never waits for a row a curator's write holds; skipped rows are taken by a later batch. | `db.py` `backfill_keys`, `_fill_keys` |
+| L6 | An unused writer does not mark the change. | `replace_pattern_suggestions` is deleted. | `db.py` |
+| L7 | A review round stays open after its queue empties. | A recompute that leaves an open round with no delta URLs ends the round. | `curation.py` `_recompute`, `_recompute_keys` |
+| L8 | The login cache keeps a demoted user's old role for up to 30 s. | A lookup does not store a row it read before a role change cleared the cache entry. | `db.py` `session_user`, `_forget_session_user` |
+| L10 | A changed page crawled again keeps its crawl-failure flag. | The diff clears the flag on a changed page too, not only on an unchanged one. | `engine/diff.py` |
+| N1 | An unexpected error in an LLM call hangs the job forever. | A cancelled producer no longer waits to hand over its stop markers; the error fails the job. | `llm/pool.py` |
+| N2 | Regenerate titles fails before the URL step and leaves duplicates. | A failed re-ask pass is reported in the progress (`titles_error`), and the job goes on to the URL step. | `jobs.py` `_retitle_duplicates` |
+
+### 8.2 Test changes that go with the fixes
+
+- The 19 `xfail` marks are removed; the section headers now say each test failed before its fix.
+- New tests: a cancel during the dispatch stops the task (H2); an index job past its restart limit
+  stops its task (M2); the contract test checks `ai_job`, `skip_job` and `urls_titled_by_job` on
+  the real and the fake database.
+- The fake indexer honours the dispatch token, as ECS does (`tests/support/engine.py`).
+- Two test wrappers of `set_delta_ai` pass the new `job` keyword through.
+- The e2e resume test leaves `ai_job` out when it compares the twins: it is a job ID, different in
+  each run.
+- The writer check exempts `_fill_keys` (it writes only `canonical_key`) instead of `backfill_keys`.
+
+### 8.3 Behaviour to know about
+
+- **Migration V19** adds two columns, both cheap: `delta_urls.ai_job` (nullable) and
+  `collections.deltas_current` (default true). A collection that is crawled but not yet recomputed
+  when V19 lands keeps the old H1 behaviour until its next Start curating.
+- **ECS token window:** ECS keeps a `clientToken` for a limited time. How long is not verified. A
+  resume after a longer outage could still start a second task.
+- **Regenerate titles with a broken model:** when every model call fails, the job now ends with
+  titles made from the URLs and records the error in `titles_error`. Before, the job failed.
+- **Suggest metadata jobs started before this deploy** have no `ai_job` marks and no stored
+  "missing only" choice. If one of them resumes after the deploy, it behaves as before the fix.
+- **Contract test finding:** the first version of `urls_titled_by_job` also returned pages the job
+  failed on, which keep an older title. The contract test caught it; both databases now leave those
+  pages out.
+
+---
+
+## 9. Pending
+
+### 9.1 Findings not fixed: infrastructure, runbooks and documents
+
+| # | What to do | Before |
+|---|---|---|
+| M1 | Correct the reboot comment in `infra/stacks/engine_stack.py` and the deploy notes: the first deploy that attaches the parameter group reboots the database (about 1–2 minutes). Deploy when no jobs run. After the deploy, check that the `pg_stat_statements` extension exists. | the merge to dev |
+| M6 | Subscribe the alarm topic. **Needs an email or chat address from Bernard.** | the first deploy to test |
+| M7 | Add `HealthyHostCount < 1` for 3 minutes (missing data as breaching) and an alarm on `HTTPCode_ELB_5XX_Count`. | the first deploy to test |
+| M11 | Correct `docs/dev-db-rollback.md:187` and `infra/README.md:91`: a restored database resumes its running jobs, including Index to prod. Tell the operator to mark them failed before starting the engine. | the first deploy to test |
+| L9 | Correct `docs/rds-cutover.md:23` and `docs/rds-migration.md:127`: `/health` has no `"db"` field. | the first deploy to test |
+| L13 | Correct `docs/dev-db-rollback.md:212, :308`: storage flag values; reverting removes the parameter group and reboots again. | the first deploy to test |
+| L11 | Set a retention on the RDS log group. Decide whether the 2 s slow-statement log may contain bind parameters. | soon after |
+| L12 | Remove or lower the `DbConnections > 80` alarm (the engine opens at most 28). | soon after |
+| L14 | Scope `ecs:StopTask` to the engine's tasks (depends on the open question about the cluster). | soon after |
+| L15 | Update stale documents: `docs/architecture.md:368, 425, 447, 461`; `README.md:394–395, 449` (add `LLM_WORKERS_TOTAL` and the `RESUME_*` settings); `CHANGELOG-2026-10-06.md:147`; `.github/workflows/deploy.yml:9`. | soon after |
+| L16 | Move Suggest metadata's per-page token count off the event loop (0.2–0.4 s freezes at 100K). This is code, but not a regression. | soon after |
+
+### 9.2 Decisions for Bernard
+
+- **Promote vs Regenerate titles:** promote refuses some duplicate titles that Regenerate titles
+  does not change (pages whose AI title is held back as pending). Align them, or accept it.
+- **Access rules:** a curator can index to prod and read `/api/audit` and `/docs`. Keep, or make
+  admin-only.
+- **Unreachable code:** the last-admin lockout guard has a branch no request can reach. Remove it, or
+  leave it as a safety net.
+- **The open questions in section 7:** `/health/db` behind login; whether the indexer cluster is
+  shared; resetting the restart count on progress; the stall-timeout wait after a finished indexer.
+- **The `SMOKE_APP_PASSWORD_DEV` secret:** optional; add it or not.
+
+### 9.3 Test strategy (TEST-STRATEGY-2026-10-09.md, step P5)
+
+- **Integration time:** the level takes 99 s against its 90 s gate. The largest tests are the
+  per-URL twin test (25 s) and the L5 deadlock test (18 s).
+- **Faster integration level (Bernard's decision):** let the app run on the in-memory fake
+  database, so most page and route tests move to the unit level.
+- **CI timing:** measure the three levels in GitHub Actions and CircleCI.
+- **Docs:** describe the test layout in the README and docs.
+- **Recurring check:** run the mutation test on a schedule (last result: 195 of 250 mutants caught,
+  78 %).
+
+### 9.4 After the next deploy
+
+- Confirm that `pg_stat_statements` exists (M1).
+- Confirm that migration V19 ran and that the key backfill finished.
+- Watch the first index run after a restart: one ECS task per run (H2).
+
+### 9.5 Not started
+
+- **A new assessment** of the current code: what is regressing and what is failing (Bernard's
+  request).
+
+### 9.6 Housekeeping
+
+- **Commit:** nothing is committed. Old test files are deleted in the working tree only; run
+  `git add -A tests` before the commit.
+- **Local containers:** `mut-pg` (port 55480, used by the mutation runs) and `sde-prof` are still
+  running. Remove or keep. The Postgres on port 5432 was not touched.
+- **Backup:** a copy of `tests/` from before the old tests were deleted is in the session
+  scratchpad (`tests-before-p4`). It is lost when the session's temporary files are cleared.

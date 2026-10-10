@@ -118,11 +118,12 @@ async def run_pool[I, R](
                     if abort.is_set():
                         break
                     await queue.put(item)
+            except asyncio.CancelledError:
+                raise  # the workers are cancelled too: waiting to hand them a stop marker would hang (N1)
             except Exception as e:  # noqa: BLE001 — a failing source must not leave workers waiting forever
                 producer_error = e
-            finally:
-                for _ in range(n):
-                    await queue.put(_Stop)
+            for _ in range(n):
+                await queue.put(_Stop)
 
         async def worker() -> None:
             nonlocal consecutive

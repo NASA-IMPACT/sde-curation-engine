@@ -1,6 +1,5 @@
 """Login with local accounts: off by default; APP_PASSWORD seeds the bootstrap admin; sessions
 die when a user is disabled or changes password; admins manage users, curators cannot."""
-import pytest
 
 from sde_curation.web import auth
 
@@ -21,7 +20,6 @@ def test_hash_verify_password():
     assert not auth.verify_password("garbage", "x") and not auth.verify_password("", "x")
 
 
-@pytest.mark.xfail(strict=True, reason="L8: a role change during a login lookup leaves the old role cached for 30 s")
 async def test_a_role_change_during_a_login_lookup_is_seen_at_once():
     """The login check caches the user row for 30 s, and a role change clears the cache entry. A
     lookup that read the row just before the change must not put the old row back in the cache."""

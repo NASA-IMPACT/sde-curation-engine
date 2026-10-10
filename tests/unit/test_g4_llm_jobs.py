@@ -290,9 +290,9 @@ async def test_the_classified_count_equals_the_answers_written_when_saves_overla
     monkeypatch.setattr(jobs_mod, "AI_FLUSH_ROWS", 1)
     save = db.set_delta_ai
 
-    async def a_save_that_waits_on_the_database(cid, rows):
+    async def a_save_that_waits_on_the_database(cid, rows, **kw):
         await asyncio.sleep(0.005)
-        return await save(cid, rows)
+        return await save(cid, rows, **kw)
 
     db.set_delta_ai = a_save_that_waits_on_the_database
     engine = make_engine(db, tmp_path, llm_workers=8)

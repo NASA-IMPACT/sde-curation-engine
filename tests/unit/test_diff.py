@@ -2,8 +2,6 @@
 
 import time
 
-import pytest
-
 from sde_curation.engine.diff import promote, recompute
 from sde_curation.models import CuratedUrl, DeltaKind, DumpUrl, Pattern, PatternType
 
@@ -142,7 +140,6 @@ def test_new_rows_are_never_content_changed_and_promote_carries_the_dump_hash():
     assert out["https://x/b"].content_hash == "hb"
 
 
-@pytest.mark.xfail(strict=True, reason="L10: a re-crawled page that changed keeps its old crawl-failure flag")
 def test_a_changed_page_crawled_again_clears_its_crawl_failure_flag():
     """A curated page the last crawl could not reach is flagged (`crawl_failure`). When a later crawl
     fetches it again, the flag comes down, whether the page is unchanged or changed."""

@@ -615,6 +615,15 @@ async def test_llm_queries_and_ai_writes(store, same):
     assert (rows[u("d")].title_ai, rows[u("d")].title_ai_conf, rows[u("d")].title_ai_before, rows[u("d")].ai_model) \
         == ("D3", None, "Shared", None)
     same("count after", await store.count_deltas_for_llm(CID))
+    # the job that settled a row (V19 ai_job): a resumed job skips its own rows, finds what it titled
+    assert await store.set_delta_ai(CID, [{"url": u("a"), "title": "By 7", "model": "m"},
+                                          {"url": u("f"), "model": "m"}], job=7) == 2
+    assert await store.set_delta_ai_errors(CID, [(u("g"), "failed in 7")], job=7) == 1
+    assert same("titled by 7", await store.urls_titled_by_job(CID, 7)) == {u("a")}
+    assert await store.urls_titled_by_job(CID, 8) == set()
+    left = same("iter skip 7", [r["url"] async for r in store.iter_deltas_for_llm(CID, only_missing=False, skip_job=7)])
+    assert u("a") not in left and u("f") not in left and u("g") not in left and u("b") in left
+    assert same("count skip 7", await store.count_deltas_for_llm(CID, only_missing=False, skip_job=7)) == len(left)
     same.done()
 
 

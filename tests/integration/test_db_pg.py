@@ -216,7 +216,6 @@ def test_v2_backfills_curated_text_from_the_dump(pg_url):
             conn.execute("DROP SCHEMA mig CASCADE")
 
 
-@pytest.mark.xfail(strict=True, reason="L5: the canonical-key backfill can deadlock a promote's write (the curator gets a 500)")
 async def test_a_promote_and_the_key_backfill_running_together_both_succeed(client):
     """After the V18 deploy, the key backfill updates curated rows while a curator may promote. The
     two must not deadlock. A test-only trigger slows every curated-row update by 1 ms so the two

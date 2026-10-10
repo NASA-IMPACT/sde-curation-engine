@@ -7,8 +7,6 @@ it started and stopped, and wrappers around the model calls that count and can h
 
 import asyncio
 
-import pytest
-
 import sde_curation.jobs as jobs_mod
 from sde_curation.jobs import JobManager
 from sde_curation.models import (
@@ -30,14 +28,14 @@ from tests.support.engine import (
     collection,
     finished,
     make_engine,
+    promoted,
     restart,
 )
 from tests.support.fake_db import FakeDatabase
 
-# ── Known bugs from REVIEW-SINCE-DEV-MERGE-2026-10-08.md (expected failures until fixed) ──────────
+# ── Bugs from REVIEW-SINCE-DEV-MERGE-2026-10-08.md: each test failed before its fix ──────────────────
 
 
-@pytest.mark.xfail(strict=True, reason="H2: a restart during the indexer dispatch starts a second task for the same run")
 async def test_a_restart_during_the_dispatch_starts_no_second_indexer_task(tmp_path, aws):
     import boto3
 
@@ -59,7 +57,26 @@ async def test_a_restart_during_the_dispatch_starts_no_second_indexer_task(tmp_p
     assert indexer.started == [run.run_id]  # one task for the run: the resume adopts it
 
 
-@pytest.mark.xfail(strict=True, reason="M2: cancelling an index job that waits to resume leaves its ECS task running")
+async def test_a_cancel_during_the_dispatch_stops_the_task_it_started(tmp_path, aws):
+    import boto3
+
+    boto3.client("s3", region_name="us-east-1").create_bucket(Bucket=BUCKET)
+    db = FakeDatabase()
+    c = await promoted(db, titles=["A", "B"])
+    indexer = Indexer(slow_first_answer=True)
+    engine = make_engine(db, tmp_path, indexer=indexer)
+    await engine.start_index(c, "test")
+    await asyncio.wait_for(indexer.dispatching.wait(), 10)
+
+    cancelling = asyncio.create_task(engine.cancel(CID, actor="alice"))
+    await asyncio.sleep(0.05)
+    indexer.answer.set()  # RunTask answers after the cancel
+    job = await asyncio.wait_for(cancelling, 10)
+
+    assert (job.state, job.error) == (JobState.FAILED, "cancelled by alice")
+    assert indexer.stopped == ["task/1"]
+
+
 async def test_cancelling_an_index_job_waiting_to_resume_stops_its_task(tmp_path):
     db = FakeDatabase()
     c = await collection(db, titles=["A"])
@@ -78,7 +95,22 @@ async def test_cancelling_an_index_job_waiting_to_resume_stops_its_task(tmp_path
     assert (await db.get_index_run("r-1")).state == "failed"
 
 
-@pytest.mark.xfail(strict=True, reason="M3: one error in the resume loop strands every queued resume")
+async def test_an_index_job_past_its_restart_limit_stops_its_task(tmp_path):
+    db = FakeDatabase()
+    await collection(db, titles=["A"])
+    await db.insert_index_run(IndexRun(run_id="r-1", collection_id=CID, target="test", external_ref="task/1"))
+    job = await db.insert_job(JobRun(collection_id=CID, kind=JobKind.INDEX_TEST, state=JobState.RUNNING, run_id="r-1",
+                                     external_ref="task/1", progress={"phase": "indexing", "restarts": 3}))
+    indexer = Indexer()
+    engine = make_engine(db, tmp_path, indexer=indexer, resume_max_restarts=3)
+
+    await engine.recover()
+
+    assert (await db.get_job(job.id)).error == "stopped resuming after 3 engine restarts"
+    assert indexer.stopped == ["task/1"]
+    assert (await db.get_index_run("r-1")).state == "failed"
+
+
 async def test_one_failing_resume_does_not_strand_the_others(tmp_path, monkeypatch):
     from psycopg_pool import PoolTimeout
 
@@ -114,7 +146,6 @@ async def test_one_failing_resume_does_not_strand_the_others(tmp_path, monkeypat
     await engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="M5: a resumed 'redo all' Suggest metadata asks nothing and reports success")
 async def test_a_resumed_redo_all_metadata_run_asks_every_page(tmp_path, monkeypatch):
     db = FakeDatabase()
     titles = [f"Page {i}" for i in range(1, 9)]
@@ -138,7 +169,6 @@ async def test_a_resumed_redo_all_metadata_run_asks_every_page(tmp_path, monkeyp
     assert set(first_calls.asked[:3]) | set(second_calls.asked) == set(urls)
 
 
-@pytest.mark.xfail(strict=True, reason="L2: a resumed metadata run asks a failed page again and counts it twice")
 async def test_a_page_that_fails_is_counted_once_across_a_restart(tmp_path, monkeypatch):
     db = FakeDatabase()
     c = await collection(db, titles=[f"Page {i}" for i in range(1, 9)])
@@ -159,7 +189,6 @@ async def test_a_page_that_fails_is_counted_once_across_a_restart(tmp_path, monk
     assert (p["failed"], p["done"] + p["failed"]) == (1, len(urls))
 
 
-@pytest.mark.xfail(strict=True, reason="L17: answers being saved when the engine stops are lost and asked again")
 async def test_answers_being_saved_at_shutdown_are_not_asked_again(tmp_path, monkeypatch):
     db = FakeDatabase()
     c = await collection(db, titles=[f"Page {i}" for i in range(1, 31)])  # more than one batch of answers
@@ -167,11 +196,11 @@ async def test_answers_being_saved_at_shutdown_are_not_asked_again(tmp_path, mon
     monkeypatch.setattr(jobs_mod, "suggest_metadata_one", calls)
     set_delta_ai, saving = db.set_delta_ai, asyncio.Event()
 
-    async def slow_first_save(cid, items):
+    async def slow_first_save(cid, items, **kw):
         if not saving.is_set():
             saving.set()
             await asyncio.Event().wait()  # the engine goes down during this write
-        return await set_delta_ai(cid, items)
+        return await set_delta_ai(cid, items, **kw)
 
     db.set_delta_ai = slow_first_save
     first = make_engine(db, tmp_path)
@@ -186,7 +215,6 @@ async def test_answers_being_saved_at_shutdown_are_not_asked_again(tmp_path, mon
     assert twice == []
 
 
-@pytest.mark.xfail(strict=True, reason="M4: a restart during the duplicate-title pass leaves duplicates (LLM_DEDUPE_TITLES=true)")
 async def test_a_restart_during_the_duplicate_title_pass_still_tells_every_group_apart(tmp_path, monkeypatch):
     db = FakeDatabase()
     c = await collection(db, titles=["Alpha", "Alpha", "Beta", "Beta", "Solo"])
@@ -210,7 +238,6 @@ async def test_a_restart_during_the_duplicate_title_pass_still_tells_every_group
     assert (await db.duplicate_title_counts(CID))["delta_urls"] == 0
 
 
-@pytest.mark.xfail(strict=True, reason="L1: a second restart before the resumed publish reports progress counts attempt one twice")
 async def test_a_prod_publish_resumed_twice_counts_every_document_once(tmp_path, monkeypatch):
     """The publisher writes 2 of 7 documents and the engine restarts; the resumed attempt is
     interrupted before it reports anything; the third attempt finds those 2 already in prod and
