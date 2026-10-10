@@ -30,3 +30,10 @@ def no_outside_world(monkeypatch):
         return original_connect(self, address)
 
     monkeypatch.setattr(socket.socket, "connect", connect)
+    # A boto3 client resolves credentials when it is created. With none set (a CI runner) botocore
+    # asks the instance metadata service, a network call; with a developer's own set it could reach
+    # AWS. Fake ones, and no metadata lookup, make every machine behave the same.
+    for name, value in (("AWS_ACCESS_KEY_ID", "testing"), ("AWS_SECRET_ACCESS_KEY", "testing"),
+                        ("AWS_SESSION_TOKEN", "testing"), ("AWS_EC2_METADATA_DISABLED", "true")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
