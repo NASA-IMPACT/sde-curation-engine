@@ -19,9 +19,13 @@ WEB_COSMOS test indexing, validation gate, prod indexing, notifications.
 cp .env.example .env      # sibling repo paths, AWS values, OPENAI_API_KEY (or LLM_PROVIDER=fake)
 make install              # uv sync if uv is installed, else python3.13 venv + pip -r requirements-dev.txt
 make run                  # http://localhost:8080   (8000 is taken by sde-elastic-wrapper)
-make test                 # 315 tests, incl. a state-matrix that fires every action in every status
+make test                 # all tests in three levels, fastest first (see tests/conftest.py):
+make test-unit            #   unit: no database or Docker, about 10 s
+make test-integration     #   integration: API, database layer, jobs against PostgreSQL
+make test-e2e             #   end-to-end: real crawler/indexer subprocesses, S3 (moto), restarts, browser
 make lint
 ```
+The browser journeys (`tests/e2e/test_browser.py`) need Chromium once: `.venv/bin/python -m playwright install chromium`.
 
 Crawler prerequisite (one-off): the local scrape backend runs `run.py` from
 `../sde-crawl4ai-scraper` with its own Python 3.11 venv:
@@ -545,7 +549,9 @@ sde_curation/
   jobs.py          JobManager: background tasks, cancel, recovery, SSE events
   events.py        in-process event bus → SSE
   web/             FastAPI app, auth.py (local users, roles, signed sessions), Jinja templates, vendored htmx (+sse, json-enc)
-tests/             pytest; fake crawler fixture, moto for AWS, state-matrix
+tests/             pytest in three levels: unit/ (no database), integration/ (PostgreSQL, in-process fake
+                   crawler), e2e/ (subprocess crawler and indexer, moto S3, restarts); support/ = shared
+                   fixtures, flows, fakes
 infra/             AWS CDK (Python): Fargate + EFS + ALB + CloudFront/WAF; bootstrap/ = GitHub deploy role
 .github/workflows/ deploy.yml (push to dev|test|prod → cdk deploy), test.yml (PRs)
 Dockerfile         python:3.13-slim + pip -r requirements.txt (exported from uv.lock), non-root, uvicorn on 8080

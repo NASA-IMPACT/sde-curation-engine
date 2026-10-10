@@ -42,10 +42,17 @@ jobs:
         run: |
           pip install -q uv
           make requirements-check
-      - name: App tests + lint
-        run: |
-          python -m pytest -q
-          python -m ruff check sde_curation tests
+      - name: Lint
+        run: python -m ruff check sde_curation tests
+      # The testing pyramid, fastest first: a failing level stops the later, slower ones.
+      - name: Unit tests (no database)
+        run: python -m pytest -q tests/unit
+      - name: Integration tests (PostgreSQL)
+        run: python -m pytest -q tests/integration
+      - name: Chromium for the browser journeys (tests/e2e/test_browser.py)
+        run: python -m playwright install --with-deps chromium
+      - name: End-to-end tests (subprocesses, S3, restarts)
+        run: python -m pytest -q tests/e2e
       - name: Infra synth assertions
         working-directory: infra
         run: |

@@ -326,3 +326,52 @@ def test_the_task_carries_the_per_job_and_the_shared_llm_limits(template):
     """#24: LLM_WORKERS limits one job; LLM_WORKERS_TOTAL limits every LLM job on the task together."""
     env = _container_env(template)
     assert (env["LLM_WORKERS"], env["LLM_WORKERS_TOTAL"]) == ("16", "32")
+
+
+# ── Known bugs from REVIEW-SINCE-DEV-MERGE-2026-10-08.md (expected failures until fixed) ──────────
+# Each test states the correct behaviour. While the bug exists it fails and is reported as XFAIL;
+# once fixed it passes, and strict=True fails the run until the marker is removed.
+
+# The engine's own maximum: DB_POOL_SIZE (16) + DB_READ_POOL_SIZE (12), sde_curation/config.py defaults.
+ENGINE_MAX_DB_CONNECTIONS = 28
+
+
+@pytest.mark.xfail(strict=True, reason="M6: the alarm topic has no subscription, so no one is notified")
+def test_the_alarm_topic_notifies_someone(template):
+    subs = template.find_resources("AWS::SNS::Subscription")
+    (topic,) = template.find_resources("AWS::SNS::Topic").values()
+    assert subs or topic["Properties"].get("Subscription")
+
+
+@pytest.mark.xfail(strict=True, reason="M7: no alarm fires when the engine has no healthy target (fast crash loop)")
+def test_an_alarm_fires_when_no_engine_is_healthy(template):
+    alarms = [a["Properties"] for a in template.find_resources("AWS::CloudWatch::Alarm").values()]
+    healthy = [a for a in alarms if a.get("MetricName") == "HealthyHostCount"]
+    assert healthy and healthy[0]["ComparisonOperator"] == "LessThanThreshold" and healthy[0]["Threshold"] == 1
+    assert healthy[0]["TreatMissingData"] == "breaching"
+    assert any(a.get("MetricName") == "HTTPCode_ELB_5XX_Count" for a in alarms)
+
+
+@pytest.mark.xfail(strict=True, reason="L12: the database-connections alarm (80) cannot fire from the engine (max 28)")
+def test_the_connections_alarm_can_fire_from_the_engine(template):
+    alarms = [a["Properties"] for a in template.find_resources("AWS::CloudWatch::Alarm").values()]
+    (conns,) = [a for a in alarms if a.get("MetricName") == "DatabaseConnections"]
+    assert conns["Threshold"] < ENGINE_MAX_DB_CONNECTIONS
+
+
+@pytest.mark.xfail(strict=True, reason="L14: ecs:StopTask covers every task in the indexer cluster, not only the engine's")
+def test_the_engine_can_stop_only_its_own_indexer_tasks(template):
+    (stop,) = [s for s in _policy_statements(template)
+               if "ecs:StopTask" in (s["Action"] if isinstance(s["Action"], list) else [s["Action"]])]
+    assert "Condition" in stop
+
+
+@pytest.mark.xfail(strict=True, reason="L11: the slow-statement log writes full bind parameters, kept forever")
+def test_the_slow_statement_log_is_bounded(template):
+    """log_min_duration_statement logs each slow statement with its parameters (5,000-URL arrays).
+    The parameters are cut to a short prefix, and the exported database log expires."""
+    (params,) = template.find_resources("AWS::RDS::DBParameterGroup").values()
+    assert int(params["Properties"]["Parameters"].get("log_parameter_max_length", -1)) in range(1025)
+    assert any(r["Properties"].get("LogGroupName", {}) and "postgresql" in json.dumps(r["Properties"]["LogGroupName"])
+               for r in template.find_resources("AWS::Logs::LogGroup").values()) or \
+        template.find_resources("Custom::LogRetention")

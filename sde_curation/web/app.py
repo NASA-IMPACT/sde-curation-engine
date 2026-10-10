@@ -28,6 +28,7 @@ from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sse_starlette.sse import EventSourceResponse
 
+from .. import rules
 from ..backends.index import IndexError_, make_index_backend
 from ..backends.publish import make_prod_publisher
 from ..backends.scrape import make_scrape_backend
@@ -204,16 +205,13 @@ def next_action(c: Collection, job) -> dict:
     return {"label": "Live ✓", "kind": "done", "hint": "Re-scrape to start a new cycle"}
 
 
-def status_invariant_problem(c: Collection, new: Status) -> str | None:
-    """Even a forced/manual status change must not contradict the data."""
-    if new in (Status.SCRAPED, Status.CURATING) and c.dump_count == 0:
-        return f"cannot be '{new}': no crawl dump yet — scrape first"
-    if new in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE):
-        if c.curated_rows == 0:
-            return f"cannot be '{new}': nothing has been promoted to the curated set"
-        if c.delta_count and c.status is not new:
-            return f"cannot be '{new}': {c.delta_count} delta URLs are waiting — promote (or discard) them first"
-    return None
+status_invariant_problem = rules.status_invariant_problem  # moved to sde_curation.rules
+
+
+def refuse(problem: str | None) -> None:
+    """A rule's refusal (sde_curation.rules) as the 409 the route sends; None lets the action go on."""
+    if problem:
+        raise HTTPException(409, problem)
 
 
 def pipeline_steps(c: Collection) -> list[dict]:
@@ -611,9 +609,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def ensure_idle(request: Request, c: Collection) -> None:
         """Mutating actions are refused while a job runs on the collection (409)."""
-        j = request.app.state.jobs.active_for(c.collection_id)
-        if j:
-            raise HTTPException(409, f"{j.kind} job #{j.id} is running — wait for it or cancel it")
+        refuse(rules.busy_refusal(request.app.state.jobs.active_for(c.collection_id)))
 
     async def run_or_job(request: Request, c: Collection, kind: JobKind, what: str, work,
                          args: dict[str, Any] | None = None) -> Any:
@@ -1421,9 +1417,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_set_status(request: Request, collection_id: str, body: StatusChange):
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        problem = status_invariant_problem(c, body.status)
-        if problem:
-            raise HTTPException(409, problem)
+        refuse(rules.status_invariant_problem(c, body.status))
         try:
             c = await db(request).set_status(
                 collection_id, body.status, body.note, force=body.force, actor=actor(request)
@@ -1549,34 +1543,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         'curating'. A recompute with nothing to review never demotes a curated/live
         collection (otherwise it would be stuck: nothing to promote, no way forward).
         `note`: what happened, for the status history (default: a recompute)."""
-        n = ds.total  # the whole queue, also after a recompute of one page (DeltaSet.whole)
-        pre = c.status in (Status.BACKLOG, Status.SCRAPED)
-        if pre and n == 0 and c.curated_rows:
-            # re-crawl identical to the curated set: nothing to review
-            await db(request).set_flag(c.collection_id, False)
+        # ds.total: the whole queue, also after a recompute of one page (DeltaSet.whole)
+        move = rules.status_after_curation_change(
+            c, ds.total, len(getattr(ds, "curated_excluded", None) or ()), note)
+        if move:
+            if move.clear_flag:
+                await db(request).set_flag(c.collection_id, False)
             c = await db(request).set_status(
-                c.collection_id, Status.CURATED, note="re-crawl matches the curated URLs: no changes",
-                force=True, actor=actor(request),
-            )
-        elif (pre and n) or (
-            n and c.status in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE)
-        ):
-            c = await db(request).set_status(
-                c.collection_id, Status.CURATING, note=note or f"delta URLs recomputed: {n}", force=True,
-                actor=actor(request),
-            )
-        elif getattr(ds, "curated_excluded", None) and c.status in (Status.CONFIG_GENERATED, Status.LIVE):
-            # an exclude rule took curated URLs out in place (no delta): the index is behind again
-            k = len(ds.curated_excluded)
-            c = await db(request).set_status(
-                c.collection_id, Status.CURATED, force=True, actor=actor(request),
-                note=f"{k} curated URL{'s' if k != 1 else ''} excluded by rules: re-index to apply",
-            )
-        elif n == 0 and c.status is Status.CURATING and c.curated_rows:
-            # nothing left to review on an already-promoted set → it is curated
-            c = await db(request).set_status(
-                c.collection_id, Status.CURATED, note=note or "recomputed: no delta URLs", force=True,
-                actor=actor(request),
+                c.collection_id, move.status, note=move.note, force=move.force, actor=actor(request),
             )
         c = await must_get(request, c.collection_id)
         await request.app.state.patterns_file.changed(c.collection_id)
@@ -1594,8 +1568,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         so a re-curate can be abandoned by promoting the queue back as it stands."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.dump_count == 0:
-            raise HTTPException(409, "no dump ingested yet — scrape first")
+        refuse(rules.recompute_refusal(c))
         # whoever presses it is curating the collection now (the dashboard's Curator filter)
         await db(request).set_curated_by(collection_id, actor(request))
 
@@ -1607,9 +1580,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         collection_id = c.collection_id
         ds = await curation(request).recompute(c, review_all=review_all)
         n = len(ds.deltas)
-        await _after_curation_change(
-            request, c, ds, note=f"re-curating: {n} delta URLs queued for review" if review_all else None)
-        if review_all and n:  # start the walk-through again, whatever stage the last one ended on
+        await _after_curation_change(request, c, ds, note=rules.recompute_note(review_all, n))
+        if rules.restarts_review_round(review_all, n):  # start the walk-through again, whatever stage the last one ended on
             await _set_stage(request, collection_id, CurationStage.EXCLUSIONS)
             await db(request).set_review_round(collection_id, True)  # later recomputes keep the queue
         await audit(request, "recompute.all" if review_all else "recompute", collection_id, f"{n} delta URLs")
@@ -1693,15 +1665,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pattern suggestion having been decided."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.status is not Status.CURATING:
-            raise HTTPException(409, f"stages only apply while curating (status is {c.status})")
+        refuse(rules.stage_refusal(c))
         if body.stage is CurationStage.METADATA:
-            pending = (await db(request).pattern_suggestion_counts(collection_id))["total"]
-            if pending:
-                raise HTTPException(
-                    409, f"{pending} pattern suggestion{'s are' if pending != 1 else ' is'} pending"
-                         " — accept or reject them first"
-                )
+            refuse(rules.metadata_stage_refusal((await db(request).pattern_suggestion_counts(collection_id))["total"]))
         await _set_stage(request, collection_id, body.stage)
         await audit(request, "stage.set", collection_id, f"→ {body.stage}")
         return htmx_done(request, {"stage": body.stage})
@@ -1716,8 +1682,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_promote(request: Request, collection_id: str):
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.status is not Status.CURATING:
-            raise HTTPException(409, f"promote requires status 'curating' (is {c.status})")
+        refuse(rules.promote_refusal(c))
         try:
             n = await curation(request).promote(c, actor=actor(request))
         except IncompleteMetadata as e:
@@ -1735,13 +1700,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         row goes with it (it lives on the delta row) — the table warns before sending."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.status is not Status.CURATING:
-            raise HTTPException(409, f"promote requires status 'curating' (is {c.status})")
-        found = await db(request).urls_with_deltas(collection_id, body.urls)
-        stale = [u for u in body.urls if u not in found]
-        if stale:
-            raise HTTPException(409, f"{len(stale)} of the selected URLs are no longer delta URLs"
-                                     f" (e.g. {stale[0]}) — reload the page and pick again")
+        refuse(rules.promote_refusal(c))
+        refuse(rules.stale_selection_refusal(body.urls, await db(request).urls_with_deltas(collection_id, body.urls)))
         try:
             n, ds = await curation(request).promote_urls(c, body.urls)
         except IncompleteMetadata as e:
@@ -1773,16 +1733,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         prod: publish the latest validated test run's vectors to the production index."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.status not in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE):
-            raise HTTPException(409, f"indexing requires a promoted (curated) set — status is '{c.status}'")
-        if c.delta_count:
-            raise HTTPException(409, f"{c.delta_count} delta URLs are waiting — promote them first")
-        if await db(request).curated_export_count(collection_id) == 0:
-            raise HTTPException(409, "nothing to export: every curated URL is excluded")
+        refuse(rules.index_refusal(c))
+        refuse(rules.export_refusal(await db(request).curated_export_count(collection_id)))
         if target == "prod":
-            last = await db(request).last_index_run(collection_id, "test")
-            if not last or last.state != "succeeded" or not last.validation_passes(settings.validation_title_match_threshold):
-                raise HTTPException(409, "prod indexing requires a successful, validated test run first")
+            refuse(rules.prod_index_refusal(await db(request).last_index_run(collection_id, "test"),
+                                            settings.validation_title_match_threshold))
         jobs: JobManager = request.app.state.jobs
         try:
             job, run = await jobs.start_index(
@@ -1801,8 +1756,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         last = await db(request).last_index_run(collection_id, target)
-        if not last or last.state != "succeeded":
-            raise HTTPException(409, f"no successful {target} index run to validate")
+        refuse(rules.revalidate_refusal(last, target))
         jobs: JobManager = request.app.state.jobs
         try:
             job = await jobs.start_revalidate(c, last, actor=actor(request))
@@ -1834,15 +1788,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         deltas to promote."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.last_run_id:
-            raise HTTPException(409, f"'{c.name}' has been indexed (as '{c.collection_key}'), so its name can no"
-                                     " longer change: it has to match the collection key and name it was indexed with")
+        refuse(rules.rename_refusal(c))
         if body.name == c.name:
             return htmx_done(request, c)
         old = c.name
         await db(request).set_name(collection_id, body.name)
         c = await must_get(request, collection_id)
-        if (c.delta_count or c.curated_rows) and await db(request).title_rules_use_collection_name(collection_id):
+        if rules.has_urls_to_recompute(c) and await db(request).title_rules_use_collection_name(collection_id):
             ds = await curation(request).recompute(c)
             await _after_curation_change(request, c, ds)
             c = await must_get(request, collection_id)
@@ -1862,9 +1814,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         index already carries the division the collection was indexed with."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.last_run_id:
-            raise HTTPException(409, f"'{c.name}' has been indexed (as '{c.collection_key}') with division"
-                                     f" '{c.division}', so its division can no longer change")
+        refuse(rules.division_refusal(c))
         if body.division == c.division:
             return htmx_done(request, c)
         old = c.division
@@ -1874,7 +1824,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # is the curator's now, so there is nothing to review and nothing accept-all could apply
             await db(request).clear_delta_ai_field(collection_id, "division")
         c = await must_get(request, collection_id)
-        if c.delta_count or c.curated_rows:  # apply it to the URLs the collection already has
+        if rules.has_urls_to_recompute(c):  # apply it to the URLs the collection already has
             ds = await curation(request).recompute(c)
             await _after_curation_change(request, c, ds)
             c = await must_get(request, collection_id)
@@ -1906,10 +1856,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_suggest_patterns(request: Request, collection_id: str):
         """LLM drafts patterns from a sample of crawled URLs → pending suggestions (accept/reject)."""
         c = await must_get(request, collection_id)
-        if c.dump_count == 0:
-            raise HTTPException(409, "no crawl dump yet — scrape first")
-        if c.delta_count == 0:
-            raise HTTPException(409, "no delta URLs — Start curating first, then suggest exclusions for the delta URLs")
+        refuse(rules.suggest_patterns_refusal(c))
         return await _start_llm(request, collection_id, "suggest.patterns",
                                 lambda j, c, who: j.start_llm_patterns(c, actor=who))
 
@@ -1917,22 +1864,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_suggest_metadata(request: Request, collection_id: str, all: bool = False):
         """LLM suggests title/division/doc type per delta URL → *_ai fields (never the effective values)."""
         c = await must_get(request, collection_id)
-        if c.delta_count == 0:
-            raise HTTPException(409, "no delta URLs — Start curating (recompute) first")
-        pending = await db(request).list_pattern_suggestions(collection_id, "pending")
-        if pending:  # exclusions first: excluded URLs are never classified, and titles depend on them
-            raise HTTPException(
-                409, f"{len(pending)} pattern suggestion{'s are' if len(pending) != 1 else ' is'} pending"
-                     " — accept or reject them before suggesting metadata",
-            )
-        if not await db(request).count_deltas_for_llm(collection_id, only_missing=not all):
-            raise HTTPException(
-                409, "nothing to classify: every included delta URL already has suggestions"
-                     " — use ?all=true to redo them",
-            )
+        refuse(rules.suggest_metadata_refusal(c))
+        # exclusions first: excluded URLs are never classified, and titles depend on them
+        refuse(rules.suggest_metadata_pending_refusal(len(await db(request).list_pattern_suggestions(collection_id, "pending"))))
+        refuse(rules.nothing_to_classify_refusal(await db(request).count_deltas_for_llm(collection_id, only_missing=not all)))
         resp = await _start_llm(request, collection_id, "suggest.metadata",
                                 lambda j, c, who: j.start_llm_metadata(c, only_missing=not all, actor=who))
-        if c.status is Status.CURATING and c.curation_stage is not CurationStage.METADATA:
+        if rules.moves_to_metadata_stage(c):
             await _set_stage(request, collection_id, CurationStage.METADATA)
         return resp
 
