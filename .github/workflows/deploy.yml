@@ -78,6 +78,10 @@ jobs:
         run: pip install -r requirements-dev.txt -e .
       - name: Lint
         run: python -m ruff check sde_curation tests
+      # The tokenizer file tiktoken downloads on first use (the Dockerfile fetches it at build too).
+      # Fetched here, outside the unit tests, which must not open a network connection.
+      - name: Tokenizer for the LLM token counts
+        run: python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
       - name: Unit tests
         run: python -m pytest -q tests/unit
       - name: Integration tests
