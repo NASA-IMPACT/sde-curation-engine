@@ -328,14 +328,118 @@ UPDATE collections c SET curated_by = a.actor FROM (
 ) a WHERE a.collection_id = c.collection_id;
 """
 
+# How many dump URLs the rules keep out, stored by every recompute (it was counted on every page
+# view: a 7 s join on a 100k collection after an exclude accept, which the stepper and the tabs
+# re-ran on every job event until the pool ran dry — test, 2026-10-06). NULL = not known yet: the
+# engine counts it the first time it is wanted and stores it, so this migration does no backfill.
+V11 = """
+ALTER TABLE collections ADD COLUMN excluded_count integer;
+"""
+
+# Forget every stored excluded count once. Dev ran V11 (the 2026-10-06 stress deploy) and then went
+# back to code that does not keep the column up to date, so its counts may be stale; an environment
+# that gets V11 and V12 together has nothing to forget. The engine recounts each one when first wanted.
+V12 = """
+UPDATE collections SET excluded_count = NULL;
+"""
+
+# Query statistics for diagnosing database load (which statements, how often, how long). Before
+# this, every incident had to be reconstructed from Performance Insights after the fact. Collecting
+# needs `shared_preload_libraries = pg_stat_statements` on the server (the RDS parameter group in
+# infra/stacks/engine_stack.py); the extension itself is created here. Where the extension is not
+# installed or the role may not create it, the migration does nothing instead of failing.
+V13 = """
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+EXCEPTION WHEN undefined_file OR insufficient_privilege OR feature_not_supported THEN
+  RAISE NOTICE 'pg_stat_statements not available: %', SQLERRM;
+END
+$$;
+"""
+
+# Autovacuum on the tables every recompute rewrites. With the default scale factor (20 % of the
+# table) delta_urls reached nine times its live size in the 2026-09-18 audit before autovacuum came
+# round; 2 % keeps dead row versions and stale planner statistics small on 100k-row collections.
+V14 = """
+ALTER TABLE delta_urls SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.02);
+ALTER TABLE pattern_effects SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.02);
+ALTER TABLE patterns SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.02);
+"""
+
+# "Re-curate everything" queues every included page for review. That was a property of the one
+# recompute that did it, so the next ordinary edit's recompute dropped every unchanged page from the
+# queue again, with its AI suggestions. The collection now remembers that a review round is open:
+# every recompute keeps the pages already queued, until the queue is promoted or a new crawl arrives.
+V15 = """
+ALTER TABLE collections ADD COLUMN review_round boolean NOT NULL DEFAULT false;
+"""
+
+# Indexes for the filters and joins the busiest pages and the accept-all counts use. Measured on a
+# promoted, re-curated 100k collection (2026-10-08): the delta table's kind filter 15 → 1.6 ms, the
+# accept-all count (which looks up each row's winning rule by field) 189 → 103 ms. The partial index on
+# renamed_from serves the duplicate-title scan's second anti-join; `patterns (collection_id, id)` the
+# rule loads, which all read a collection's rules in id order.
+# Not added: expression indexes on the duplicate-title key. The scan reads every included row of both
+# tables and sorts by the key it computes, whatever indexes exist (EXPLAIN: sequential scans and a
+# sort), so they changed nothing (111–130 ms with, 109–134 ms without) and would only slow every write.
+V16 = """
+CREATE INDEX delta_urls_kind ON delta_urls (collection_id, kind, excluded);
+CREATE INDEX delta_urls_renamed_from ON delta_urls (collection_id, renamed_from) WHERE renamed_from IS NOT NULL;
+CREATE INDEX patterns_coll_id ON patterns (collection_id, id);
+CREATE INDEX pattern_effects_coll_field ON pattern_effects (collection_id, field);
+"""
+
+# Page counts kept between changes (db._stored): a write bumps `version`; the first page read after
+# it counts once and stores the result in `counts`, tagged `computed_version`. Before, every page view
+# re-ran every count (about 85 statements per Curate render at 100k URLs).
+V17 = """
+CREATE TABLE collection_stats (
+  collection_id text PRIMARY KEY REFERENCES collections(collection_id) ON DELETE CASCADE,
+  version bigint NOT NULL DEFAULT 0,
+  computed_version bigint,
+  counts jsonb NOT NULL DEFAULT '{}',
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+"""
+
+# The page each row belongs to (engine.urls.canonical_key: host without www., path, query; no scheme,
+# fragment or trailing slash), stored so a per-URL edit can find exactly the rows of its page with an
+# index probe instead of loading the whole collection (CurationService.recompute_keys), and an
+# exact-URL rule can be looked up by its page. Only Python computes the key, so the column starts
+# empty: every writer fills it from now on, and Database.backfill_keys fills the rows written before.
+# A rule's key is set only for an exact rule (a glob has no page).
+V18 = """
+ALTER TABLE dump_urls ADD COLUMN canonical_key text;
+ALTER TABLE curated_urls ADD COLUMN canonical_key text;
+ALTER TABLE patterns ADD COLUMN canonical_key text;
+CREATE INDEX dump_urls_key ON dump_urls (collection_id, canonical_key);
+CREATE INDEX curated_urls_key ON curated_urls (collection_id, canonical_key);
+CREATE INDEX patterns_key ON patterns (collection_id, canonical_key);
+"""
+
+# The Suggest-metadata job that last answered a row, or recorded its failure. A job resumed after an
+# engine restart skips the rows it settled itself (M5, L2: a "redo all" run asks the rest, a failed
+# page is not asked and counted again) and finds the pages it titled for its duplicate-title pass
+# (M4). Nullable, no default: adding it changes no row.
+# `deltas_current`: the delta set was built by a full recompute over the current crawl. A crawl
+# ingest clears it and the next full recompute (Start curating) sets it; until then a per-URL edit
+# takes the full recompute too, so it queues the whole crawl and not only its own page (H1).
+V19 = """
+ALTER TABLE delta_urls ADD COLUMN ai_job integer;
+ALTER TABLE collections ADD COLUMN deltas_current boolean NOT NULL DEFAULT true;
+"""
+
 MIGRATIONS: list[tuple[int, str]] = [(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8),
-                                     (9, V9), (10, V10)]
+                                     (9, V9), (10, V10), (11, V11), (12, V12), (13, V13), (14, V14), (15, V15),
+                                     (16, V16), (17, V17), (18, V18), (19, V19)]
 
 # Every application table, parents before children (the order the importer copies them in, and
 # the order TRUNCATE ... CASCADE does not care about).
 TABLES = (
     "collections", "status_history", "page_text", "dump_urls", "dump_failures", "delta_urls", "curated_urls",
     "patterns", "pattern_effects", "pattern_suggestions", "index_runs", "job_runs", "users", "audit_log",
+    "collection_stats",
 )
 
 _VERSION_TABLE = (

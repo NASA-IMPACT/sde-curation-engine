@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import functools
 import hashlib
 import logging
@@ -13,16 +15,20 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, Any, Literal
 
+import psycopg
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sse_starlette.sse import EventSourceResponse
 
+from .. import rules
 from ..backends.index import IndexError_, make_index_backend
 from ..backends.publish import make_prod_publisher
 from ..backends.scrape import make_scrape_backend
@@ -36,12 +42,15 @@ from ..db import (
     SOURCE_LABEL,
     ConflictError,
     Database,
+    db_scope,
+    work_context,
 )
 from ..events import EventBus, sse_format
 from ..jobs import JobConflict, JobManager
 from ..llm.base import LLMError, make_llm
 from ..llm.global_excludes import load_global_excludes
 from ..llm.tasks import PATTERN_SYSTEM, TITLE_SIBLINGS, TITLES_SYSTEM, metadata_system
+from ..looplag import LoopLagProbe
 from ..models import (
     ANONYMOUS_ACTOR,
     CURATION_DIVISIONS,
@@ -196,16 +205,13 @@ def next_action(c: Collection, job) -> dict:
     return {"label": "Live ✓", "kind": "done", "hint": "Re-scrape to start a new cycle"}
 
 
-def status_invariant_problem(c: Collection, new: Status) -> str | None:
-    """Even a forced/manual status change must not contradict the data."""
-    if new in (Status.SCRAPED, Status.CURATING) and c.dump_count == 0:
-        return f"cannot be '{new}': no crawl dump yet — scrape first"
-    if new in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE):
-        if c.curated_rows == 0:
-            return f"cannot be '{new}': nothing has been promoted to the curated set"
-        if c.delta_count and c.status is not new:
-            return f"cannot be '{new}': {c.delta_count} delta URLs are waiting — promote (or discard) them first"
-    return None
+status_invariant_problem = rules.status_invariant_problem  # moved to sde_curation.rules
+
+
+def refuse(problem: str | None) -> None:
+    """A rule's refusal (sde_curation.rules) as the 409 the route sends; None lets the action go on."""
+    if problem:
+        raise HTTPException(409, problem)
 
 
 def pipeline_steps(c: Collection) -> list[dict]:
@@ -392,12 +398,113 @@ def htmx_done(request: Request, payload, *, then: str | None = None):
     return JSONResponse(jsonable_encoder(payload), headers=headers)
 
 
+_COLLECTION_PATH = re.compile(r"^/(?:api/)?collections/([^/?#]+)")
+_BUSY = (psycopg.errors.QueryCanceled, PoolTimeout)
+
+
+def database_busy(method: str, path: str, exc: Exception) -> JSONResponse:
+    """A request whose query outran the read pool's statement timeout, or found no free connection
+    in time: 503 + Retry-After, not a stack trace. An htmx fragment keeps what it showed (htmx does
+    not swap error responses) and the next refresh tries again."""
+    what = "took too long" if isinstance(exc, psycopg.errors.QueryCanceled) else "found no free database connection"
+    log.warning("503 %s %s: %s", method, path, what)
+    return JSONResponse({"detail": f"The server is busy (this request {what}). Try again in a few seconds."},
+                        status_code=503, headers={"Retry-After": "5"})
+
+
+class DbScope:
+    """ASGI middleware, outermost: which database pool a request uses (see db.db_scope). A browser
+    fetching something (GET/HEAD) reads on the read pool, under its statement timeout; anything that
+    changes something works on the work pool. When a change to a collection is over, its coalesced
+    reads are marked stale (Database.touch), so the refresh that follows counts afresh."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        reading = scope["method"] in ("GET", "HEAD")
+        token = db_scope.set("read" if reading else "work")
+        started = False
+
+        async def send_started(message):
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_started)
+        except _BUSY as e:  # raised outside the routes (auth's session lookup): same 503 as theirs
+            if started:
+                raise
+            await database_busy(scope["method"], scope["path"], e)(scope, receive, send)
+        finally:
+            db_scope.reset(token)
+            if not reading and (m := _COLLECTION_PATH.match(scope["path"])):
+                database = getattr(scope["app"].state, "db", None)
+                if database is not None:
+                    database.touch(m.group(1))
+
+
+# Libraries that log every HTTP call at INFO: one line per LLM call, per S3 or AOSS request.
+_CHATTY_LOGGERS = ("httpx", "httpcore", "openai", "botocore", "boto3", "urllib3", "s3transfer", "opensearch")
+
+
+def configure_logging() -> None:
+    """The engine's own INFO lines (job starts, resumes, index keys) reach the container log. Nothing
+    configured logging before, so only WARNING and above came out, through Python's last-resort
+    handler. Leaves an existing configuration alone (pytest's, or a deployment's --log-config), and
+    uvicorn keeps its own loggers, which do not propagate to the root."""
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for name in _CHATTY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+class RequestMemo:
+    """One page render asks the database for the same few things several times: the header, the
+    stepper, the tab and the validation chips each want the latest job and the latest index runs. A
+    Curate page asked for the latest job three times and the last index run four times. Within one
+    page request (the read scope only, see `db`) each of `MEMOIZED` runs once per set of arguments
+    and the answer is reused; every other attribute is the Database's own. An action or a job never
+    goes through this: it may write between two reads and must see its own write."""
+
+    MEMOIZED = frozenset({"latest_job", "last_index_run", "list_jobs", "list_index_runs", "latest_job_of_kind",
+                          "count_deltas_for_llm", "job_exists"})
+
+    def __init__(self, database: Database):
+        self._db = database
+        self._results: dict[Any, Any] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._db, name)
+        if name not in self.MEMOIZED:
+            return attr
+
+        async def memoized(*args: Any, **kwargs: Any) -> Any:
+            key = (name, args, tuple(sorted(kwargs.items())))
+            if key not in self._results:
+                self._results[key] = await attr(*args, **kwargs)
+            value = self._results[key]
+            return copy.copy(value) if isinstance(value, (list, dict)) else value  # each caller its own list
+
+        return memoized
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    configure_logging()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        db = await Database(settings.resolved_database_url, pool_size=settings.db_pool_size).connect()
+        db = await Database(
+            settings.resolved_database_url, pool_size=settings.db_pool_size,
+            read_pool_size=settings.db_read_pool_size, read_statement_timeout_s=settings.db_read_statement_timeout_s,
+            read_wait_s=settings.db_read_wait_s,
+        ).connect()
         app.state.settings = settings
         app.state.db = db
         app.state.notifier = Notifier(settings.notify_webhook_url, base_url=settings.public_base_url)
@@ -416,6 +523,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # first start with login enabled: APP_PASSWORD seeds the bootstrap admin account
             await db.create_user("admin", auth.hash_password(settings.app_password), Role.ADMIN)
         app.state.bus = EventBus()
+        # A curator's change or a finished job makes the collection's coalesced reads stale for whoever
+        # asks next. A running job's progress event changes nothing a page counts and does not: the
+        # job's writes mark the collection themselves when they commit (db._touches).
+        def touch_collection(_event: str, data: dict) -> None:
+            job = data.get("job")
+            if isinstance(job, dict) and job.get("state") not in ("succeeded", "failed"):
+                return
+            if isinstance(cid := data.get("collection_id"), str):
+                db.touch(cid)
+
+        app.state.bus.listeners.append(touch_collection)
         jobs = JobManager(
             settings, db, app.state.bus, scraper=make_scrape_backend(settings),
             llm=lambda: make_llm(settings),  # lazy: a missing API key only fails the LLM job
@@ -423,13 +541,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             publisher=lambda: make_prod_publisher(settings),
         )
         app.state.jobs = jobs
+        jobs.curation_work = curation_work  # #34: rebuilds a bulk change a restart interrupted
         app.state.existing_cache = {}
         app.state.curation = CurationService(db, lock_for=jobs.lock)
         app.state.patterns_file = PatternsFile(db, settings.collections_dir)
         await jobs.recover()
+        jobs.start_resumes()  # in the background, after a delay: never part of startup
+        app.state.loop_lag = LoopLagProbe()
+        app.state.loop_lag.start()
+
+        async def backfill_keys() -> None:
+            """Rows written before schema V18 get their canonical key, in the background: until a
+            collection has them all, its per-URL edits use the full recompute (CurationService.keyed)."""
+            try:
+                n = await db.backfill_keys()
+                if n:
+                    log.info("canonical keys filled in on %d rows written before schema V18", n)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # the full recompute keeps working without it
+                log.exception("filling in canonical keys failed; per-URL edits use the full recompute")
+
+        app.state.key_backfill = asyncio.create_task(backfill_keys(), name="key-backfill", context=work_context())
         try:
             yield
         finally:
+            app.state.key_backfill.cancel()
+            await asyncio.gather(app.state.key_backfill, return_exceptions=True)
+            await app.state.loop_lag.stop()
             await jobs.shutdown()
             await app.state.patterns_file.flush()
             await db.close()
@@ -451,7 +590,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ── helpers ────────────────────────────────────────────────────────
 
     def db(request: Request) -> Database:
-        return request.app.state.db
+        """The database, through a per-request memo for page reads (RequestMemo)."""
+        if db_scope.get() != "read":
+            return request.app.state.db
+        memo = getattr(request.state, "db_memo", None)
+        if memo is None:
+            memo = request.state.db_memo = RequestMemo(request.app.state.db)
+        return memo  # type: ignore[return-value]
 
     def bus(request: Request) -> EventBus:
         return request.app.state.bus
@@ -464,23 +609,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def ensure_idle(request: Request, c: Collection) -> None:
         """Mutating actions are refused while a job runs on the collection (409)."""
-        j = request.app.state.jobs.active_for(c.collection_id)
-        if j:
-            raise HTTPException(409, f"{j.kind} job #{j.id} is running — wait for it or cancel it")
+        refuse(rules.busy_refusal(request.app.state.jobs.active_for(c.collection_id)))
 
-    async def run_or_job(request: Request, c: Collection, kind: JobKind, what: str, work) -> Any:
+    async def run_or_job(request: Request, c: Collection, kind: JobKind, what: str, work,
+                         args: dict[str, Any] | None = None) -> Any:
         """A bulk curation change: awaited in the request on a small collection, a background job
         on a big one (settings.bulk_job_min_urls) — there it takes longer than the 60 s a request
         has behind CloudFront, and the curator gets progress instead of an error page. `work` is the
-        change itself and returns the payload; as a job the answer is 202 + the job."""
+        change itself and returns the payload; as a job the answer is 202 + the job. `args`: what
+        curation_work needs to build the same change again after an engine restart (#34)."""
         if c.dump_count < settings.bulk_job_min_urls:
             return htmx_done(request, await work())
         try:
-            job = await request.app.state.jobs.start_curation(c, kind, work, what, actor=actor(request))
+            job = await request.app.state.jobs.start_curation(c, kind, work, what, actor=actor(request), request=args)
         except JobConflict as e:
             raise HTTPException(409, str(e)) from e
         return JSONResponse(jsonable_encoder(job), status_code=202,
                             headers={"HX-Refresh": "true"} if _is_htmx(request) else None)
+
+    class JobCaller:
+        """What a bulk change uses of its request: the app and who asked. A job an engine restart
+        interrupted has no request; it gets one of these, built from the job row (#34)."""
+
+        def __init__(self, who: str | None):
+            self.app = app
+            self.state = SimpleNamespace(
+                user=SimpleNamespace(username=who) if who and who != ANONYMOUS_ACTOR else None)
+
+    def curation_work(kind: JobKind, c: Collection, args: dict[str, Any], who: str | None):
+        """The bulk change a job of `kind` runs, from the arguments the route stored (#34). Each one
+        can run again after an interruption at any step and gives the result of one whole run."""
+        r: Any = JobCaller(who)
+        if kind is JobKind.RECOMPUTE:
+            return lambda: _recompute_work(r, c, review_all=bool(args.get("all")))
+        if kind is JobKind.BULK_ACCEPT:
+            body = AiBulk(**args)
+            return lambda: _ai_bulk_work(r, c, body, resumed=True)
+        if kind is JobKind.BULK_SUGGESTIONS:
+            return lambda: _suggestions_work(r, c, args["decision"], args.get("type"))
+        raise ValueError(f"{kind} is not a bulk curation change")
 
     # ── identity (set by auth.AuthMiddleware; absent when login is off) ─
 
@@ -565,15 +732,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health(request: Request) -> dict:
+        """Liveness, for the ALB: the process answers. No database: when the database is busy the
+        engine is still alive, and replacing it only drops every curator's page and running job (a
+        restart does nothing for the database — test, 2026-10-06). /health/db says how it is."""
+        return {"ok": True, "sse_clients": bus(request).subscriber_count}
+
+    @app.get("/health/db")
+    async def health_db(request: Request) -> JSONResponse:
+        """Readiness of the database, for monitoring and load tests: a page-request (read pool)
+        connection answers within health_db_timeout_s. 503 when it does not. `loop_lag_ms`: the
+        event loop's latest lag and its worst since the previous call (sde_curation.looplag)."""
+        stats: dict = {}
+        lag = request.app.state.loop_lag.read()
         try:
-            ok = await db(request).ping()
+            stats = db(request).pool_stats()
+            ok = await asyncio.wait_for(db(request).ping(), timeout=settings.health_db_timeout_s)
         except Exception as e:  # noqa: BLE001 - surfaced to the caller, not hidden
-            return {"ok": False, "db": f"error: {e}"}
-        return {
-            "ok": ok,
-            "db": "ok" if ok else "error",
-            "sse_clients": bus(request).subscriber_count,
-        }
+            reason = "timed out" if isinstance(e, TimeoutError) else f"{type(e).__name__}: {e}"
+            return JSONResponse({"ok": False, "db": f"error: {reason}", "pools": stats, "loop_lag_ms": lag},
+                                status_code=503)
+        return JSONResponse({"ok": ok, "db": "ok" if ok else "error", "pools": stats, "loop_lag_ms": lag},
+                            status_code=200 if ok else 503)
 
     # ── pages ──────────────────────────────────────────────────────────
 
@@ -1030,16 +1209,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await with_validation(request, c, job)
         return {"c": c, "job": job, "stats": stats}
 
-    @app.get("/collections/{collection_id}", response_class=HTMLResponse)
-    async def collection_page(request: Request, collection_id: str, tab: str = "overview", set: str | None = None,
-                              step: str | None = None):
+    async def collection_context(request: Request, collection_id: str, tab: str, set_: str | None,
+                                 step: str | None) -> dict[str, Any]:
+        """Everything collection.html shows: the header's context and the selected tab's."""
         c = await must_get(request, collection_id)
-        sel, tab = selected_step(c, step, norm_tab(tab, set))
+        sel, tab = selected_step(c, step, norm_tab(tab, set_))
         ctx = await header_context(request, c)
         ctx.update(await tab_context(request, c, tab, sel))
         if ctx["tabbed"] and "pattern_count" not in ctx["stats"]:  # the Rules tab's count; Overview/Curate have it
             ctx["stats"] = {**ctx["stats"], "pattern_count": await db(request).count_patterns(c.collection_id)}
+        return ctx
+
+    @app.get("/collections/{collection_id}", response_class=HTMLResponse)
+    async def collection_page(request: Request, collection_id: str, tab: str = "overview", set: str | None = None,
+                              step: str | None = None):
+        ctx = await collection_context(request, collection_id, tab, set, step)
         return templates.TemplateResponse(request, "collection.html", ctx)
+
+    @app.get("/collections/{collection_id}/tab-body", response_class=HTMLResponse)
+    async def collection_tab_body(request: Request, collection_id: str, tab: str = "overview", set: str | None = None,
+                                  step: str | None = None):
+        """The page's #tab-body alone, for #job-watch's refresh while a job runs: the same context
+        as the page (so the same HTML), without rendering the layout, header and stepper."""
+        ctx = await collection_context(request, collection_id, tab, set, step)
+        return templates.TemplateResponse(request, "partials/tab_body.html", ctx)
 
     @app.get("/collections/{collection_id}/header", response_class=HTMLResponse)
     async def collection_header(request: Request, collection_id: str):
@@ -1110,7 +1303,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         jobs = await d.list_jobs(c.collection_id, limit=20)
         counts = await d.count_deltas_by_kind(c.collection_id)
         del counts["total"]
-        counts["excluded"] = await d.count_excluded_by_rules(c.collection_id)  # rules, not deltas
+        # rules, not deltas; stored by the recompute — counting it is a multi-second join on 100k URLs
+        counts["excluded"] = c.excluded_count if c.excluded_count is not None else await d.excluded_count(c.collection_id)
         counts["kept"] = await d.count_curated_unreachable(c.collection_id) if c.curated_rows else 0
         runs = await d.list_index_runs(c.collection_id, limit=5)
         failed = jobs[0] if jobs and jobs[0].state == "failed" else None
@@ -1223,9 +1417,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_set_status(request: Request, collection_id: str, body: StatusChange):
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        problem = status_invariant_problem(c, body.status)
-        if problem:
-            raise HTTPException(409, problem)
+        refuse(rules.status_invariant_problem(c, body.status))
         try:
             c = await db(request).set_status(
                 collection_id, body.status, body.note, force=body.force, actor=actor(request)
@@ -1351,34 +1543,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         'curating'. A recompute with nothing to review never demotes a curated/live
         collection (otherwise it would be stuck: nothing to promote, no way forward).
         `note`: what happened, for the status history (default: a recompute)."""
-        n = len(ds.deltas)
-        pre = c.status in (Status.BACKLOG, Status.SCRAPED)
-        if pre and n == 0 and c.curated_rows:
-            # re-crawl identical to the curated set: nothing to review
-            await db(request).set_flag(c.collection_id, False)
+        # ds.total: the whole queue, also after a recompute of one page (DeltaSet.whole)
+        move = rules.status_after_curation_change(
+            c, ds.total, len(getattr(ds, "curated_excluded", None) or ()), note)
+        if move:
+            if move.clear_flag:
+                await db(request).set_flag(c.collection_id, False)
             c = await db(request).set_status(
-                c.collection_id, Status.CURATED, note="re-crawl matches the curated URLs: no changes",
-                force=True, actor=actor(request),
-            )
-        elif (pre and n) or (
-            n and c.status in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE)
-        ):
-            c = await db(request).set_status(
-                c.collection_id, Status.CURATING, note=note or f"delta URLs recomputed: {n}", force=True,
-                actor=actor(request),
-            )
-        elif getattr(ds, "curated_excluded", None) and c.status in (Status.CONFIG_GENERATED, Status.LIVE):
-            # an exclude rule took curated URLs out in place (no delta): the index is behind again
-            k = len(ds.curated_excluded)
-            c = await db(request).set_status(
-                c.collection_id, Status.CURATED, force=True, actor=actor(request),
-                note=f"{k} curated URL{'s' if k != 1 else ''} excluded by rules: re-index to apply",
-            )
-        elif n == 0 and c.status is Status.CURATING and c.curated_rows:
-            # nothing left to review on an already-promoted set → it is curated
-            c = await db(request).set_status(
-                c.collection_id, Status.CURATED, note=note or "recomputed: no delta URLs", force=True,
-                actor=actor(request),
+                c.collection_id, move.status, note=move.note, force=move.force, actor=actor(request),
             )
         c = await must_get(request, c.collection_id)
         await request.app.state.patterns_file.changed(c.collection_id)
@@ -1396,22 +1568,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         so a re-curate can be abandoned by promoting the queue back as it stands."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.dump_count == 0:
-            raise HTTPException(409, "no dump ingested yet — scrape first")
+        refuse(rules.recompute_refusal(c))
         # whoever presses it is curating the collection now (the dashboard's Curator filter)
         await db(request).set_curated_by(collection_id, actor(request))
 
-        async def work() -> dict:
-            ds = await curation(request).recompute(c, review_all=all)
-            n = len(ds.deltas)
-            await _after_curation_change(
-                request, c, ds, note=f"re-curating: {n} delta URLs queued for review" if all else None)
-            if all and n:  # start the walk-through again, whatever stage the last one ended on
-                await _set_stage(request, collection_id, CurationStage.EXCLUSIONS)
-            await audit(request, "recompute.all" if all else "recompute", collection_id, f"{n} delta URLs")
-            return ds.counts
+        return await run_or_job(request, c, JobKind.RECOMPUTE, f"comparing {c.dump_count:,} dump URLs with the curated URLs",
+                                lambda: _recompute_work(request, c, review_all=all), {"all": all})
 
-        return await run_or_job(request, c, JobKind.RECOMPUTE, f"comparing {c.dump_count:,} dump URLs with the curated URLs", work)
+    async def _recompute_work(request: Request, c: Collection, *, review_all: bool) -> dict:
+        """Recompute (or Re-curate everything). Safe to run twice: the same rules give the same deltas."""
+        collection_id = c.collection_id
+        ds = await curation(request).recompute(c, review_all=review_all)
+        n = len(ds.deltas)
+        await _after_curation_change(request, c, ds, note=rules.recompute_note(review_all, n))
+        if rules.restarts_review_round(review_all, n):  # start the walk-through again, whatever stage the last one ended on
+            await _set_stage(request, collection_id, CurationStage.EXCLUSIONS)
+            await db(request).set_review_round(collection_id, True)  # later recomputes keep the queue
+        await audit(request, "recompute.all" if review_all else "recompute", collection_id, f"{n} delta URLs")
+        return ds.counts
 
     @app.get("/api/collections/{collection_id}/patterns")
     async def api_patterns(request: Request, collection_id: str, exact_limit: int | None = Query(None, ge=0, le=5000),
@@ -1459,7 +1633,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # an exact rule matches every spelling of its page, so find it under any spelling
         existing = await db(request).exact_patterns_for(collection_id, body.url, str(body.type))
         if existing and existing[0].value == body.value:
-            ds = await curation(request).recompute(c)  # no-op edit
+            ds = await curation(request).recompute_page(c, body.url)  # no-op edit
         else:
             ds = await curation(request).replace_exact_pattern(
                 c, PatternCreate(type=body.type, match=body.url, value=body.value),
@@ -1491,15 +1665,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pattern suggestion having been decided."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.status is not Status.CURATING:
-            raise HTTPException(409, f"stages only apply while curating (status is {c.status})")
+        refuse(rules.stage_refusal(c))
         if body.stage is CurationStage.METADATA:
-            pending = (await db(request).pattern_suggestion_counts(collection_id))["total"]
-            if pending:
-                raise HTTPException(
-                    409, f"{pending} pattern suggestion{'s are' if pending != 1 else ' is'} pending"
-                         " — accept or reject them first"
-                )
+            refuse(rules.metadata_stage_refusal((await db(request).pattern_suggestion_counts(collection_id))["total"]))
         await _set_stage(request, collection_id, body.stage)
         await audit(request, "stage.set", collection_id, f"→ {body.stage}")
         return htmx_done(request, {"stage": body.stage})
@@ -1514,8 +1682,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_promote(request: Request, collection_id: str):
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.status is not Status.CURATING:
-            raise HTTPException(409, f"promote requires status 'curating' (is {c.status})")
+        refuse(rules.promote_refusal(c))
         try:
             n = await curation(request).promote(c, actor=actor(request))
         except IncompleteMetadata as e:
@@ -1533,13 +1700,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         row goes with it (it lives on the delta row) — the table warns before sending."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.status is not Status.CURATING:
-            raise HTTPException(409, f"promote requires status 'curating' (is {c.status})")
-        found = await db(request).urls_with_deltas(collection_id, body.urls)
-        stale = [u for u in body.urls if u not in found]
-        if stale:
-            raise HTTPException(409, f"{len(stale)} of the selected URLs are no longer delta URLs"
-                                     f" (e.g. {stale[0]}) — reload the page and pick again")
+        refuse(rules.promote_refusal(c))
+        refuse(rules.stale_selection_refusal(body.urls, await db(request).urls_with_deltas(collection_id, body.urls)))
         try:
             n, ds = await curation(request).promote_urls(c, body.urls)
         except IncompleteMetadata as e:
@@ -1571,16 +1733,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         prod: publish the latest validated test run's vectors to the production index."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.status not in (Status.CURATED, Status.CONFIG_GENERATED, Status.LIVE):
-            raise HTTPException(409, f"indexing requires a promoted (curated) set — status is '{c.status}'")
-        if c.delta_count:
-            raise HTTPException(409, f"{c.delta_count} delta URLs are waiting — promote them first")
-        if await db(request).curated_export_count(collection_id) == 0:
-            raise HTTPException(409, "nothing to export: every curated URL is excluded")
+        refuse(rules.index_refusal(c))
+        refuse(rules.export_refusal(await db(request).curated_export_count(collection_id)))
         if target == "prod":
-            last = await db(request).last_index_run(collection_id, "test")
-            if not last or last.state != "succeeded" or not last.validation_passes(settings.validation_title_match_threshold):
-                raise HTTPException(409, "prod indexing requires a successful, validated test run first")
+            refuse(rules.prod_index_refusal(await db(request).last_index_run(collection_id, "test"),
+                                            settings.validation_title_match_threshold))
         jobs: JobManager = request.app.state.jobs
         try:
             job, run = await jobs.start_index(
@@ -1599,8 +1756,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         last = await db(request).last_index_run(collection_id, target)
-        if not last or last.state != "succeeded":
-            raise HTTPException(409, f"no successful {target} index run to validate")
+        refuse(rules.revalidate_refusal(last, target))
         jobs: JobManager = request.app.state.jobs
         try:
             job = await jobs.start_revalidate(c, last, actor=actor(request))
@@ -1632,15 +1788,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         deltas to promote."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.last_run_id:
-            raise HTTPException(409, f"'{c.name}' has been indexed (as '{c.collection_key}'), so its name can no"
-                                     " longer change: it has to match the collection key and name it was indexed with")
+        refuse(rules.rename_refusal(c))
         if body.name == c.name:
             return htmx_done(request, c)
         old = c.name
         await db(request).set_name(collection_id, body.name)
         c = await must_get(request, collection_id)
-        if (c.delta_count or c.curated_rows) and await db(request).title_rules_use_collection_name(collection_id):
+        if rules.has_urls_to_recompute(c) and await db(request).title_rules_use_collection_name(collection_id):
             ds = await curation(request).recompute(c)
             await _after_curation_change(request, c, ds)
             c = await must_get(request, collection_id)
@@ -1660,9 +1814,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         index already carries the division the collection was indexed with."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
-        if c.last_run_id:
-            raise HTTPException(409, f"'{c.name}' has been indexed (as '{c.collection_key}') with division"
-                                     f" '{c.division}', so its division can no longer change")
+        refuse(rules.division_refusal(c))
         if body.division == c.division:
             return htmx_done(request, c)
         old = c.division
@@ -1672,7 +1824,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # is the curator's now, so there is nothing to review and nothing accept-all could apply
             await db(request).clear_delta_ai_field(collection_id, "division")
         c = await must_get(request, collection_id)
-        if c.delta_count or c.curated_rows:  # apply it to the URLs the collection already has
+        if rules.has_urls_to_recompute(c):  # apply it to the URLs the collection already has
             ds = await curation(request).recompute(c)
             await _after_curation_change(request, c, ds)
             c = await must_get(request, collection_id)
@@ -1704,10 +1856,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_suggest_patterns(request: Request, collection_id: str):
         """LLM drafts patterns from a sample of crawled URLs → pending suggestions (accept/reject)."""
         c = await must_get(request, collection_id)
-        if c.dump_count == 0:
-            raise HTTPException(409, "no crawl dump yet — scrape first")
-        if c.delta_count == 0:
-            raise HTTPException(409, "no delta URLs — Start curating first, then suggest exclusions for the delta URLs")
+        refuse(rules.suggest_patterns_refusal(c))
         return await _start_llm(request, collection_id, "suggest.patterns",
                                 lambda j, c, who: j.start_llm_patterns(c, actor=who))
 
@@ -1715,22 +1864,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_suggest_metadata(request: Request, collection_id: str, all: bool = False):
         """LLM suggests title/division/doc type per delta URL → *_ai fields (never the effective values)."""
         c = await must_get(request, collection_id)
-        if c.delta_count == 0:
-            raise HTTPException(409, "no delta URLs — Start curating (recompute) first")
-        pending = await db(request).list_pattern_suggestions(collection_id, "pending")
-        if pending:  # exclusions first: excluded URLs are never classified, and titles depend on them
-            raise HTTPException(
-                409, f"{len(pending)} pattern suggestion{'s are' if len(pending) != 1 else ' is'} pending"
-                     " — accept or reject them before suggesting metadata",
-            )
-        if not await db(request).count_deltas_for_llm(collection_id, only_missing=not all):
-            raise HTTPException(
-                409, "nothing to classify: every included delta URL already has suggestions"
-                     " — use ?all=true to redo them",
-            )
+        refuse(rules.suggest_metadata_refusal(c))
+        # exclusions first: excluded URLs are never classified, and titles depend on them
+        refuse(rules.suggest_metadata_pending_refusal(len(await db(request).list_pattern_suggestions(collection_id, "pending"))))
+        refuse(rules.nothing_to_classify_refusal(await db(request).count_deltas_for_llm(collection_id, only_missing=not all)))
         resp = await _start_llm(request, collection_id, "suggest.metadata",
                                 lambda j, c, who: j.start_llm_metadata(c, only_missing=not all, actor=who))
-        if c.status is Status.CURATING and c.curation_stage is not CurationStage.METADATA:
+        if rules.moves_to_metadata_stage(c):
             await _set_stage(request, collection_id, CurationStage.METADATA)
         return resp
 
@@ -1779,14 +1919,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if body.type is None or s["type"] == body.type]
         if not sugs:
             raise HTTPException(409, f"no pending {body.type or ''} suggestions".replace("  ", " "))
-        async def work() -> dict:
-            n = await _decide_suggestions(request, c, sugs, body.decision)
-            await audit(request, f"suggestion.bulk_{body.decision}", collection_id, f"{body.type or 'all'} × {n}")
-            return {"decided": n, "state": body.decision + "ed"}
+        def work():
+            return _suggestions_work(request, c, body.decision, body.type, sugs)
 
         if body.decision != "accept":  # a reject applies nothing: no recompute, nothing long
             return htmx_done(request, await work())
-        return await run_or_job(request, c, JobKind.BULK_SUGGESTIONS, f"applying {len(sugs)} suggested rules", work)
+        return await run_or_job(request, c, JobKind.BULK_SUGGESTIONS, f"applying {len(sugs)} suggested rules", work,
+                                {"decision": body.decision, "type": body.type})
+
+    async def _suggestions_work(request: Request, c: Collection, decision: str, type_: str | None,
+                                sugs: list[dict] | None = None) -> dict:
+        """Decide the pending pattern suggestions (of one type, or all). `sugs` None: a job resumed
+        after a restart takes what is still pending; the ones decided before it are done, and rules
+        already inserted for the rest are skipped as duplicates. The accept ends with a full recompute
+        either way, so the rules and deltas equal one whole run."""
+        if sugs is None:
+            sugs = [s for s in await db(request).list_pattern_suggestions(c.collection_id, "pending")
+                    if type_ is None or s["type"] == type_]
+            if not sugs:  # everything was decided before the restart; the recompute may not have run
+                if decision == "accept":
+                    await _after_curation_change(request, c, await curation(request).recompute(c))
+                return {"decided": 0, "state": decision + "ed"}
+        n = await _decide_suggestions(request, c, sugs, decision)
+        await audit(request, f"suggestion.bulk_{decision}", c.collection_id, f"{type_ or 'all'} × {n}")
+        return {"decided": n, "state": decision + "ed"}
 
     @app.post("/api/collections/{collection_id}/suggestions/{sid}/{decision}")
     async def api_decide_suggestion(
@@ -1840,26 +1996,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         d = db(request)
-        fields = [body.field] if body.field else list(AI_FIELDS)
-        kind = (f"{body.conf}-confidence " if body.conf else "") + (f"AI {body.field} suggestions" if body.field else "AI suggestions")
+        kind = _ai_kind(body)
         whole = body.url is None and body.decision == "accept"  # every URL's suggestions → rules: the long one
         if whole and not await d.count_ai_suggestions(collection_id, field=body.field, conf=body.conf):
             raise HTTPException(409, f"no {kind} to {body.decision}")
 
-        async def work() -> dict:
-            return await _decide_ai_bulk(request, c, body, fields, kind)
+        def work():
+            return _ai_bulk_work(request, c, body)
 
         if not whole:
             return htmx_done(request, await work())
-        return await run_or_job(request, c, JobKind.BULK_ACCEPT, f"accepting the {kind}", work)
+        return await run_or_job(request, c, JobKind.BULK_ACCEPT, f"accepting the {kind}", work,
+                                body.model_dump(mode="json"))
 
-    async def _decide_ai_bulk(request: Request, c: Collection, body: AiBulk, fields: list[str], kind: str) -> dict:
+    def _ai_kind(body: AiBulk) -> str:
+        return (f"{body.conf}-confidence " if body.conf else "") + (f"AI {body.field} suggestions" if body.field else "AI suggestions")
+
+    async def _ai_bulk_work(request: Request, c: Collection, body: AiBulk, *, resumed: bool = False) -> dict:
+        fields = [body.field] if body.field else list(AI_FIELDS)
+        return await _decide_ai_bulk(request, c, body, fields, _ai_kind(body), resumed=resumed)
+
+    async def _decide_ai_bulk(request: Request, c: Collection, body: AiBulk, fields: list[str], kind: str,
+                              *, resumed: bool = False) -> dict:
+        """`resumed`: a job an engine restart interrupted runs this again. The suggestions it cleared
+        before the restart are not there to accept again; the rules it wrote for the rest are replaced
+        by the same rules. If nothing is left, it ends with the full recompute the first run may not
+        have reached."""
         d, collection_id = db(request), c.collection_id
         # accept-all (no url) skips what an SME rule decides; a named row, and any reject, does not
         skip_human = body.decision == "accept" and body.url is None
         per_field = {f: await d.deltas_with_ai(collection_id, f, url=body.url, conf=body.conf,
                                                skip_human=skip_human) for f in fields}
         n = sum(len(v) for v in per_field.values())
+        if not n and resumed:
+            await _after_curation_change(request, c, await curation(request).recompute(c))
+            return {"decided": 0, "field": body.field, "url": body.url, "state": body.decision + "ed"}
         if not n:
             held = skip_human and await d.count_ai_suggestions(collection_id, field=body.field, conf=body.conf)
             raise HTTPException(409, f"no {kind} to {body.decision}" + (f" on {body.url}" if body.url else "")
@@ -2070,6 +2241,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if me and me.id == u.id:  # our own session_version just changed: keep this session alive
                 set_session_cookie(resp, await db(request).get_user(u.id))
             return resp
+
+    # ── a busy database ────────────────────────────────────────────────
+
+    async def busy_handler(request: Request, exc: Exception) -> Response:
+        return database_busy(request.method, request.url.path, exc)
+
+    for exc_type in _BUSY:
+        app.add_exception_handler(exc_type, busy_handler)
+
+    # outermost (added last): auth's session lookups run in the request's scope too
+    app.add_middleware(DbScope)
 
     # ── SSE ────────────────────────────────────────────────────────────
 

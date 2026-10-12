@@ -1,0 +1,37 @@
+
+<ol class="pipeline">
+
+  <li class="done " title="Registered">
+    <a href="/collections/run.org?step=backlog" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">1</span> Backlog</a></li>
+
+  <li class="done " title="Crawl ingested">
+    <a href="/collections/run.org?step=scraped" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">2</span> Scraped</a></li>
+
+  <li class="current selected" title="Settle the exclusions, set metadata, then promote.">
+    <a href="/collections/run.org?step=curating" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">3</span> Curating <small class="stage">· exclusions</small></a></li>
+
+  <li class="todo " title="Index the curated set to the test index.">
+    <a href="/collections/run.org?step=curated" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">4</span> Curated</a></li>
+
+  <li class="todo " title="Check the validation result, then index to production.">
+    <a href="/collections/run.org?step=config_generated" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">5</span> Test index</a></li>
+
+  <li class="todo " title="Live. Re-scrape to start a new cycle.">
+    <a href="/collections/run.org?step=live" hx-boost="true" hx-push-url="true" hx-target="global #tab-body" hx-select="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:replace"
+       hx-on::after-request="this.closest('.pipeline').querySelectorAll('li').forEach(e=>e.classList.remove('selected')); this.closest('li').classList.add('selected')">
+      <span class="n">6</span> Live</a></li>
+
+
+
+
+</ol>

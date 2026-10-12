@@ -4,6 +4,7 @@ before anything is written. Suggestions never touch effective fields — only *_
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Iterable
@@ -428,7 +429,7 @@ async def suggest_distinct_titles(
     if previous := [p for p in previous if p]:
         header["previous_titles"] = sorted(set(previous))
     texts = [d.get("text") or "" for d in docs]
-    sizes = [page_tokens(t) for t in texts]
+    sizes: list[int] = []
 
     def build(budget: int) -> str:
         """The prompt with the pages' texts cut to share `budget` tokens between them."""
@@ -442,13 +443,23 @@ async def suggest_distinct_titles(
         )
         return "Group:\n" + json.dumps(header, ensure_ascii=False) + "\n\n" + pages
 
-    # everything but the texts, counted with every page marked cut (the longest header it can have)
-    frame = build(0)
-    budget = settings.llm_max_input_tokens - fixed_tokens(TITLES_SYSTEM, DistinctTitles) - count_tokens(frame)
+    def prepare() -> tuple[int, str]:
+        """The texts' token budget and the prompt. A token is at least one byte: when the texts fit
+        by their bytes, nothing is cut and nothing needs counting (most groups)."""
+        sizes[:] = [0] * len(texts)  # build(0) cuts every page to nothing, whatever the sizes
+        # everything but the texts, counted with every page marked cut (the longest header it can have)
+        budget = settings.llm_max_input_tokens - fixed_tokens(TITLES_SYSTEM, DistinctTitles) - count_tokens(build(0))
+        size_bytes = [len(t.encode("utf-8")) for t in texts]
+        sizes[:] = size_bytes if sum(size_bytes) <= budget else [page_tokens(t) for t in texts]
+        return budget, build(budget)
+
+    # L16: counting and cutting turn megabytes of text into tokens: on a worker thread, not the loop
+    budget, user = await asyncio.to_thread(prepare)
     try:
-        done = await llm.complete(system=TITLES_SYSTEM, user=build(budget), schema=DistinctTitles)
+        done = await llm.complete(system=TITLES_SYSTEM, user=user, schema=DistinctTitles)
     except LLMInputTooLong as e:  # the count was off: cut by what the provider says, once
-        done = await llm.complete(system=TITLES_SYSTEM, user=build(after_refusal(budget, e)), schema=DistinctTitles)
+        user = await asyncio.to_thread(build, after_refusal(budget, e))
+        done = await llm.complete(system=TITLES_SYSTEM, user=user, schema=DistinctTitles)
 
     asked = {d["url"] for d in docs}
     blocked = {norm_title(shared_title), *(norm_title(s.get("title") or "") for s in settled),
@@ -533,11 +544,17 @@ async def suggest_metadata_one(
         return ("Document:\n" + json.dumps(header | text_meta(len(text), sent), ensure_ascii=False)
                 + "\n\nText:\n" + sent)
 
-    budget = settings.llm_max_input_tokens - fixed_tokens(system, schema) - count_tokens(build(0))
+    def prepare() -> tuple[int, str]:
+        budget = settings.llm_max_input_tokens - fixed_tokens(system, schema) - count_tokens(build(0))
+        return budget, build(budget)
+
+    # L16: cutting a huge page turns it into tokens (150 ms for 3M characters): on a worker thread
+    budget, user = await asyncio.to_thread(prepare)
     try:
-        done = await llm.complete(system=system, user=build(budget), schema=schema)
+        done = await llm.complete(system=system, user=user, schema=schema)
     except LLMInputTooLong as e:  # the count was off: cut by what the provider says, once
-        done = await llm.complete(system=system, user=build(after_refusal(budget, e)), schema=schema)
+        user = await asyncio.to_thread(build, after_refusal(budget, e))
+        done = await llm.complete(system=system, user=user, schema=schema)
     r = done.parsed
     if not r.title.strip():  # recorded on the row as a failure; the next Suggest metadata asks again
         raise LLMError("the model returned an empty title")

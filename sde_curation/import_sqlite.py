@@ -40,7 +40,7 @@ IDENTITY_TABLES = ("status_history", "patterns", "pattern_suggestions", "job_run
 # Tables that only ever existed in PostgreSQL: nothing to copy, and their absence from the source is fine.
 # `page_text` is one of them — the SQLite era kept the page text in a `full_text` column on the two
 # tables below, and `_copy_with_text` re-homes it as it copies.
-PG_ONLY_TABLES = {"dump_failures", "page_text"}
+PG_ONLY_TABLES = {"dump_failures", "page_text", "collection_stats"}
 SQLITE_TABLES = tuple(t for t in TABLES if t not in PG_ONLY_TABLES)
 # Tables whose SQLite `full_text` column has no counterpart here (schema V9): the text goes to
 # `page_text` once per content hash and the row keeps the hash that points at it.

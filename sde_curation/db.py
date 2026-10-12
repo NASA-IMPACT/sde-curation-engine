@@ -5,11 +5,17 @@ The schema lives in `schema.py` as numbered migrations applied at connect()."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
+import copy
+import functools
+import json
 import logging
 import sys
-from collections.abc import AsyncIterable, AsyncIterator, Iterable
+import time
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Iterable
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import psycopg
 from psycopg import AsyncConnection
@@ -54,6 +60,164 @@ class ConflictError(Exception):
     """A unique constraint refused the write (e.g. the username is taken)."""
 
 
+# Which pool a transaction takes. "read": a page or fragment a browser fetches (GET/HEAD) — the
+# read pool, whose statements are cut off after `read_statement_timeout_s`. "work": everything that
+# changes something — a curator's action, a background job, startup — on the work pool, without a
+# limit (a recompute or promote on 100k URLs may take minutes, and must not be cut off half-way).
+# Set per request by the web layer (web.app.DbScope); a job resets it to "work" when it starts.
+DbScope = Literal["read", "work"]
+db_scope: contextvars.ContextVar[DbScope] = contextvars.ContextVar("db_scope", default="work")
+
+
+def work_context() -> contextvars.Context:
+    """A copy of the current context with the work scope: run a background task in it, so a job a
+    page request started does not inherit the request's read pool and statement timeout."""
+    ctx = contextvars.copy_context()
+    ctx.run(db_scope.set, "work")
+    return ctx
+
+
+def _freeze(v: Any) -> Any:
+    """Arguments as a hashable key (lists → tuples, dicts → sorted tuples)."""
+    if isinstance(v, (list, tuple, set, frozenset)):
+        items = sorted(v, key=repr) if isinstance(v, (set, frozenset)) else v
+        return tuple(_freeze(x) for x in items)
+    if isinstance(v, dict):
+        return tuple(sorted((k, _freeze(x)) for k, x in v.items()))
+    hash(v)  # TypeError for anything else unhashable: the caller then runs uncoalesced
+    return v
+
+
+class SingleFlight:
+    """At most one run of the same read at a time; whoever asks while it runs shares its result.
+
+    Many browsers refresh the same per-collection counts on every job event: run one query each
+    and a slow count piles up until every pooled connection waits on a copy of it — what took the
+    test engine down on 2026-10-06 (16 copies of one 7 s count, /health starved, ALB restart). A
+    caller waiting here holds no connection.
+
+    A result is only shared with callers that asked while nothing had changed since the run began
+    (`gen`, see Database.touch): a caller that arrives after a write waits for the run in progress to
+    finish and then starts — or joins — a fresh one, so nobody is handed numbers from before their
+    own edit. The run is shielded: a browser that gives up does not cancel it for the others."""
+
+    def __init__(self) -> None:
+        self._runs: dict[Any, tuple[int, asyncio.Task]] = {}
+
+    async def run[R](self, key: Any, gen: Callable[[], int], factory: Callable[[], Awaitable[R]]) -> R:
+        while True:
+            now = gen()
+            cur = self._runs.get(key)
+            if cur is None:
+                task = asyncio.ensure_future(factory())
+                self._runs[key] = (now, task)
+                task.add_done_callback(functools.partial(self._done, key))
+                return await asyncio.shield(task)
+            started, task = cur
+            if started == now:
+                return await asyncio.shield(task)
+            await asyncio.wait({task})  # stale: let it finish, then go round for a fresh one
+
+    def _done(self, key: Any, task: asyncio.Task) -> None:
+        if self._runs.get(key, (None, None))[1] is task:
+            del self._runs[key]
+        if not task.cancelled():
+            task.exception()  # retrieved: every caller may have gone, and the error is theirs anyway
+
+    @property
+    def in_flight(self) -> int:
+        return len(self._runs)
+
+
+def _coalesced(fn):
+    """Database read keyed by (collection_id, arguments) through the instance's SingleFlight, for
+    page views only (the read scope): a job or a curator's action reads straight from the tables,
+    since it may have written a moment ago without anything having called touch() yet. Each caller
+    gets its own copy of a dict/list result (callers adjust what they are handed)."""
+
+    @functools.wraps(fn)
+    async def wrapper(self: Database, collection_id: str, *args: Any, **kwargs: Any):
+        if db_scope.get() != "read":
+            return await fn(self, collection_id, *args, **kwargs)
+        try:
+            key = (fn.__name__, collection_id, _freeze(args), _freeze(kwargs))
+        except TypeError:
+            return await fn(self, collection_id, *args, **kwargs)
+        result = await self._flights.run(
+            key, lambda: self._gens.get(collection_id, 0), lambda: fn(self, collection_id, *args, **kwargs)
+        )
+        return copy.copy(result) if isinstance(result, (dict, list)) else result
+
+    return wrapper
+
+
+# The collection whose change the running write marks (_touches): each transaction it opens
+# (Database._conn) marks the change before it commits.
+_marking: contextvars.ContextVar[str | None] = contextvars.ContextVar("_marking", default=None)
+
+
+def _touches(fn):
+    """A write that changes what a collection's pages show: mark the collection changed
+    (Database.changed) in the write's own transaction, just before it commits, so the write and its
+    mark commit or fail together (M9: a mark in a second transaction could fail after the write had
+    committed, and the stored page counts stayed stale). Coalesced page reads started before the
+    write are then not shared with anyone who asks afterwards. A running job's writes go through
+    these methods too, so the marking does not depend on the job's progress events. The collection
+    is the first argument: its id, an object with `collection_id`, or a list of such objects."""
+
+    @functools.wraps(fn)
+    async def wrapper(self: Database, first: Any, *args: Any, **kwargs: Any):
+        head = (first[0] if first else None) if isinstance(first, list) else first
+        cid = head if isinstance(head, str) else getattr(head, "collection_id", None)
+        token = _marking.set(cid if isinstance(cid, str) else None)
+        try:
+            result = await fn(self, first, *args, **kwargs)
+        finally:
+            _marking.reset(token)
+        if isinstance(cid, str):
+            self.touch(cid)  # again after the commit: a read that started meanwhile is not shared
+        return result
+
+    return wrapper
+
+
+def _stored(fn):
+    """A per-collection count a page shows, kept in `collection_stats` between changes.
+
+    Every write that changes what a page counts bumps the collection's `version` when it commits
+    (Database.changed, via _touches). A page read (the read scope) returns the count stored for the
+    current version; the first read after a change computes it once (shared through SingleFlight by
+    everyone asking meanwhile) and stores it, tagged with the version it read before counting. A
+    store is refused when the version moved meanwhile, so a stored count is never older than the
+    newest committed change. The writers only bump a number: no count runs on the write path (a
+    Suggest-metadata job writes every few seconds; the accept-all counts cost ~100 ms each at 100k).
+    Jobs and curator actions (the work scope) always count from the tables."""
+    name = fn.__name__
+
+    @functools.wraps(fn)
+    async def wrapper(self: Database, collection_id: str, *args: Any, **kwargs: Any):
+        if db_scope.get() != "read":
+            return await fn(self, collection_id, *args, **kwargs)
+        key = name + json.dumps([list(args), sorted(kwargs.items())], default=str)
+        version, stored = await self._stats_read(collection_id)
+        if key in stored:
+            return stored[key]
+        value = await self._flights.run(
+            (name, collection_id, key), lambda: self._gens.get(collection_id, 0),
+            lambda: fn(self, collection_id, *args, **kwargs),
+        )
+        self.stats_computed += 1
+        await self._stats_store(collection_id, version, key, value)
+        return copy.deepcopy(value)
+
+    return wrapper
+
+
+def _rule_key(match: str) -> str | None:
+    """The page an exact-URL rule matches (its canonical key); None for a glob."""
+    return canonical_key(match) if is_exact(match) else None
+
+
 async def _aiter[T](rows: Iterable[T] | AsyncIterable[T]) -> AsyncIterator[T]:
     if isinstance(rows, AsyncIterable):
         async for r in rows:
@@ -73,6 +237,33 @@ _BULK_ROWS = 5000
 async def _scalar(cur: psycopg.AsyncCursor) -> Any:
     row = await cur.fetchone()
     return None if row is None else next(iter(row.values()))
+
+
+# The engine is one asyncio process: anything done on the event loop without yielding freezes every
+# other request, SSE stream and health check for that long. Whole-collection reads and COPY writes
+# (a recompute on 100k URLs moves several hundred thousand rows each way) used to do all of their
+# per-row Python work in one go on the loop — about 0.4 s per edit on a laptop, measured by the
+# event-loop probe (looplag.py). Rows are now decoded and written in slices with a yield between
+# them, and objects are built from the rows in a worker thread (which the interpreter preempts
+# every few milliseconds, so the loop keeps running meanwhile).
+_SLICE_ROWS = 2000
+
+
+async def _fetch_all(cur: psycopg.AsyncCursor) -> list[Any]:
+    """cur.fetchall(), decoded `_SLICE_ROWS` rows at a time with a yield to the event loop between."""
+    out: list[Any] = []
+    while rows := await cur.fetchmany(_SLICE_ROWS):
+        out += rows
+        await asyncio.sleep(0)
+    return out
+
+
+async def _copy_rows(copy: Any, rows: Iterable[tuple]) -> None:
+    """Write prepared rows to a COPY, yielding to the event loop every `_SLICE_ROWS` rows."""
+    for i, row in enumerate(rows, 1):
+        await copy.write_row(row)
+        if i % _SLICE_ROWS == 0:
+            await asyncio.sleep(0)
 
 
 # Every curated column. The page text is not one of them: since V9 it lives once in `page_text`,
@@ -245,44 +436,133 @@ def match_clause(match: str, col: str) -> tuple[str, list[Any]]:
 
 
 class Database:
-    def __init__(self, dsn: str, *, pool_size: int = 8, connect_timeout_s: float = 30.0):
+    def __init__(self, dsn: str, *, pool_size: int = 8, connect_timeout_s: float = 30.0,
+                 read_pool_size: int = 0, read_statement_timeout_s: float | None = None,
+                 read_wait_s: float = 30.0):
+        """`pool_size`: the work pool (jobs, curator actions). `read_pool_size` > 0 adds the read
+        pool for page requests (see `db_scope`), with `read_statement_timeout_s` on every statement
+        and at most `read_wait_s` to wait for a free connection; 0 = one pool for everything (tests,
+        scripts)."""
         self.dsn = dsn
         self.pool_size = pool_size
+        self.read_pool_size = read_pool_size
+        self.read_statement_timeout_s = read_statement_timeout_s
+        self.read_wait_s = read_wait_s
         self.connect_timeout_s = connect_timeout_s
         self._pool: AsyncConnectionPool | None = None
+        self._read_pool: AsyncConnectionPool | None = None
+        self._flights = SingleFlight()
+        self._gens: dict[str, int] = {}  # collection_id → bumped by touch() on every change
+        self._session_users: dict[int, tuple[float, User]] = {}  # user id → (expires, user): session_user
+        self._session_user_gen: dict[int, int] = {}  # user id → times its cache entry was cleared
+        self.stats_computed = 0  # page counts computed (not served from collection_stats): see _stored
         # optional async hook(collection_id, old_status, new_status, note, actor) after every history row
         self.on_status_change = None
 
     @property
     def pool(self) -> AsyncConnectionPool:
+        """The work pool."""
         if self._pool is None:
             raise RuntimeError("database not connected")
         return self._pool
 
-    def _conn(self):
-        """One pooled connection = one transaction (commit on exit, rollback on exception)."""
-        return self.pool.connection()
+    @property
+    def read_pool(self) -> AsyncConnectionPool | None:
+        return self._read_pool
+
+    @contextlib.asynccontextmanager
+    async def _conn(self) -> AsyncIterator[AsyncConnection]:
+        """One pooled connection = one transaction (commit on exit, rollback on exception). Inside a
+        write that marks its change (_touches), the mark is the transaction's last statement."""
+        pool = self._read_pool if self._read_pool is not None and db_scope.get() == "read" else self.pool
+        async with pool.connection() as conn:
+            yield conn
+            if (cid := _marking.get()) is not None:
+                await self.changed(cid, conn=conn)
+
+    def touch(self, collection_id: str) -> None:
+        """Something about this collection changed: coalesced reads started before now are not
+        handed to anyone who asks from now on (SingleFlight)."""
+        self._gens[collection_id] = self._gens.get(collection_id, 0) + 1
+
+    async def changed(self, collection_id: str, *, conn: AsyncConnection | None = None) -> None:
+        """A write to this collection: touch() and make its stored page counts out of date
+        (collection_stats.version, see _stored). `conn`: the write's own transaction (_touches);
+        without it, a transaction of its own. A collection that is gone has nothing left to count."""
+        self.touch(collection_id)
+        sql = ("INSERT INTO collection_stats (collection_id, version)"
+               " SELECT collection_id, 1 FROM collections WHERE collection_id=%s"
+               " ON CONFLICT (collection_id) DO UPDATE SET version = collection_stats.version + 1")
+        if conn is not None:
+            await conn.execute(sql, (collection_id,))
+            return
+        token = _marking.set(None)
+        try:
+            async with self._conn() as own:
+                await own.execute(sql, (collection_id,))
+        finally:
+            _marking.reset(token)
+
+    async def _stats_read(self, collection_id: str) -> tuple[int, dict[str, Any]]:
+        """(the version, the counts stored for it): {} when nothing is stored for the current version."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT version, computed_version, counts FROM collection_stats WHERE collection_id=%s",
+                (collection_id,),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            return 0, {}
+        return row["version"], (row["counts"] if row["computed_version"] == row["version"] else {})
+
+    async def _stats_store(self, collection_id: str, version: int, key: str, value: Any) -> None:
+        """Store one count for `version`, unless a change has moved the version since it was read."""
+        try:
+            async with self._conn() as conn:
+                await conn.execute(
+                    "INSERT INTO collection_stats AS s (collection_id, version, computed_version, counts)"
+                    " VALUES (%(cid)s, %(v)s, %(v)s, %(new)s)"
+                    " ON CONFLICT (collection_id) DO UPDATE SET"
+                    "  counts = CASE WHEN s.computed_version = %(v)s THEN s.counts || %(new)s ELSE %(new)s END,"
+                    "  computed_version = %(v)s, updated_at = now()"
+                    " WHERE s.version = %(v)s",
+                    {"cid": collection_id, "v": version, "new": Jsonb({key: value})},
+                )
+        except psycopg.errors.ForeignKeyViolation:
+            pass
 
     async def connect(self) -> Database:
+        base = {"row_factory": dict_row}
         self._pool = AsyncConnectionPool(
             self.dsn, min_size=1, max_size=max(1, self.pool_size), open=False, name="engine",
-            kwargs={"row_factory": dict_row, "options": "-c timezone=UTC"},
+            kwargs={**base, "options": "-c timezone=UTC"},
         )
-        await self._pool.open()
+        if self.read_pool_size > 0:
+            opts = "-c timezone=UTC"
+            if self.read_statement_timeout_s:
+                opts += f" -c statement_timeout={int(self.read_statement_timeout_s * 1000)}"
+            self._read_pool = AsyncConnectionPool(
+                self.dsn, min_size=1, max_size=self.read_pool_size, open=False, name="engine-read",
+                kwargs={**base, "options": opts}, timeout=self.read_wait_s,
+            )
         try:
+            await self._pool.open()
             await self._pool.wait(timeout=self.connect_timeout_s)  # fail fast when unreachable
-            async with self._conn() as conn:
+            async with self.pool.connection() as conn:
                 await migrate_async(conn)
+            if self._read_pool is not None:
+                await self._read_pool.open()
+                await self._read_pool.wait(timeout=self.connect_timeout_s)
         except BaseException:
-            await self._pool.close()
-            self._pool = None
+            await self.close()
             raise
         return self
 
     async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
+        for p in (self._read_pool, self._pool):
+            if p is not None:
+                await p.close()
+        self._pool = self._read_pool = None
 
     async def recycle_connections(self) -> None:
         """Replace every pooled connection with a fresh one. A connection that carried a crawl's
@@ -292,6 +572,16 @@ class Database:
         after its own transaction, so nothing in flight is cut off. Nothing is bound to a
         connection between transactions (temp tables are ON COMMIT DROP, locks are xact-scoped)."""
         await self.pool.drain()
+        if self._read_pool is not None:
+            await self._read_pool.drain()
+
+    def pool_stats(self) -> dict[str, dict[str, int]]:
+        """psycopg_pool counters per pool (size, available, waiting requests …) for /health/db."""
+        keep = ("pool_size", "pool_available", "requests_waiting", "requests_errors", "connections_errors")
+        out = {"work": self.pool.get_stats()}
+        if self._read_pool is not None:
+            out["read"] = self._read_pool.get_stats()
+        return {name: {k: s[k] for k in keep if k in s} for name, s in out.items()}
 
     async def ping(self) -> bool:
         async with self._conn() as conn:
@@ -353,6 +643,7 @@ class Database:
             cur = await conn.execute("DELETE FROM collections WHERE collection_id=%s", (collection_id,))
             return cur.rowcount > 0
 
+    @_touches
     async def set_status(
         self, collection_id: str, new: Status, note: str | None = None, *, force: bool = False,
         actor: str | None = None,
@@ -416,6 +707,7 @@ class Database:
                 (at, capped, collection_id),
             )
 
+    @_touches
     async def set_index_key(self, collection_id: str, index_key: str, index_name: str | None) -> None:
         """The OpenSearch collection_key / collection_name this collection is indexed under."""
         async with self._conn() as conn:
@@ -442,6 +734,7 @@ class Database:
             row = await cur.fetchone()
             return bool(row["hit"] if isinstance(row, dict) else row[0])
 
+    @_touches
     async def set_division(self, collection_id: str, division: Division) -> None:
         """The curator's division for the whole collection (General = not assigned, so the AI is
         asked per page). The next recompute applies it to every URL no division rule decides."""
@@ -451,6 +744,7 @@ class Database:
                 (division.value, utcnow(), collection_id),
             )
 
+    @_touches
     async def set_flag(self, collection_id: str, needs_recuration: bool, reason: str | None = None) -> None:
         """Raise or clear the needs-re-curation flag; the reason is kept only while it is up."""
         async with self._conn() as conn:
@@ -458,6 +752,12 @@ class Database:
                 "UPDATE collections SET needs_recuration=%s, recuration_reason=%s, updated_at=%s WHERE collection_id=%s",
                 (needs_recuration, (reason or None) if needs_recuration else None, utcnow(), collection_id),
             )
+
+    @_touches
+    async def set_review_round(self, collection_id: str, open_: bool) -> None:
+        """Open or close a "Re-curate everything" round (Collection.review_round)."""
+        async with self._conn() as conn:
+            await conn.execute("UPDATE collections SET review_round=%s WHERE collection_id=%s", (open_, collection_id))
 
     @staticmethod
     async def _recount_curated(conn, collection_id: str, *, changed: bool) -> int:
@@ -499,6 +799,7 @@ class Database:
 
     # ── dump urls ──────────────────────────────────────────────────────
 
+    @_touches
     async def replace_dump(
         self, collection_id: str, rows: Iterable[DumpUrl] | AsyncIterable[DumpUrl],
         failures: list[DumpFailure] | None = None, *, dedupe_spellings: bool = False,
@@ -533,11 +834,12 @@ class Database:
             # file, for two fields it can just as well read back from this table.
             await conn.execute(
                 "CREATE TEMP TABLE dump_in (seq bigint, url text, final_url text, scraped_title text,"
-                " full_text text, content_type text, depth integer, content_hash text) ON COMMIT DROP"
+                " full_text text, content_type text, depth integer, content_hash text, canonical_key text)"
+                " ON COMMIT DROP"
             )
             async with conn.cursor() as cur, cur.copy(
-                "COPY dump_in (seq,url,final_url,scraped_title,full_text,content_type,depth,content_hash)"
-                " FROM STDIN"
+                "COPY dump_in (seq,url,final_url,scraped_title,full_text,content_type,depth,content_hash,"
+                "canonical_key) FROM STDIN"
             ) as copy:
                 seen: set[str] = set()
                 seq = 0
@@ -547,7 +849,7 @@ class Database:
                     seen.add(r.url)
                     await copy.write_row((
                         seq, r.url, r.final_url, r.scraped_title, r.full_text, r.content_type, r.depth,
-                        r.content_hash or content_hash(r.full_text),
+                        r.content_hash or content_hash(r.full_text), canonical_key(r.url),
                     ))
                     seq += 1
             # One row per page: a site that links the same page as http and https, with and without
@@ -580,8 +882,8 @@ class Database:
                 (collection_id, drop),
             )
             await conn.execute(
-                "INSERT INTO dump_urls (collection_id,url,scraped_title,content_type,depth,content_hash)"
-                " SELECT %s,url,scraped_title,content_type,depth,content_hash FROM dump_in"
+                "INSERT INTO dump_urls (collection_id,url,scraped_title,content_type,depth,content_hash,canonical_key)"
+                " SELECT %s,url,scraped_title,content_type,depth,content_hash,canonical_key FROM dump_in"
                 " WHERE true" + keep,
                 (collection_id, drop),
             )
@@ -592,8 +894,10 @@ class Database:
                 await conn.execute("ANALYZE dump_urls (collection_id, url, content_hash)")
             # the crawl this replaced may have been the only holder of some pages' text
             await self._gc_page_text(conn, collection_id)
+            # the excluded count is over the dump: unknown until the next recompute (or first view)
             await conn.execute(
-                "UPDATE collections SET dump_count=%s, updated_at=%s WHERE collection_id=%s",
+                "UPDATE collections SET dump_count=%s, excluded_count=NULL, review_round=false,"
+                " deltas_current=false, updated_at=%s WHERE collection_id=%s",
                 (n, utcnow(), collection_id),
             )
             return n
@@ -722,13 +1026,17 @@ class Database:
             )
             return [CuratedUrl(**r) for r in await cur.fetchall()], total
 
-    async def load_dump(self, collection_id: str) -> list[DumpUrl]:
+    async def load_dump(self, collection_id: str, *, keys: list[str] | None = None) -> list[DumpUrl]:
+        """The dump; `keys`: only the rows of these pages (canonical keys, see recompute_keys)."""
+        q = "SELECT collection_id,url,scraped_title,content_type,depth,content_hash FROM dump_urls WHERE collection_id=%s"
+        args: list[Any] = [collection_id]
+        if keys is not None:
+            q += " AND canonical_key = ANY(%s)"
+            args.append(list(keys))
         async with self._conn() as conn:
-            cur = await conn.execute(
-                "SELECT collection_id,url,scraped_title,content_type,depth,content_hash FROM dump_urls WHERE collection_id=%s",
-                (collection_id,),
-            )
-            return [DumpUrl(**r) for r in await cur.fetchall()]
+            cur = await conn.execute(q, args)
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: [DumpUrl(**r) for r in rows])
 
     async def dump_urls(self, collection_id: str) -> list[str]:
         async with self._conn() as conn:
@@ -760,7 +1068,8 @@ class Database:
             cur = await conn.execute(
                 "SELECT url, reason FROM dump_failures WHERE collection_id=%s", (collection_id,)
             )
-            return {r["url"]: r["reason"] for r in await cur.fetchall()}
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: {r["url"]: r["reason"] for r in rows})
 
     async def list_dump_failures(self, collection_id: str) -> list[DumpFailure]:
         async with self._conn() as conn:
@@ -775,14 +1084,21 @@ class Database:
             cur = await conn.execute(
                 "SELECT url, content_hash FROM dump_urls WHERE collection_id=%s", (collection_id,)
             )
-            return {r["url"]: r["content_hash"] for r in await cur.fetchall()}
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: {r["url"]: r["content_hash"] for r in rows})
 
     # ── deltas / curated ───────────────────────────────────────────────
 
-    async def load_deltas(self, collection_id: str) -> list[DeltaUrl]:
+    async def load_deltas(self, collection_id: str, *, urls: list[str] | None = None) -> list[DeltaUrl]:
+        """The delta rows; `urls`: only these."""
+        q, args = "SELECT * FROM delta_urls WHERE collection_id=%s", [collection_id]
+        if urls is not None:
+            q += " AND url = ANY(%s)"
+            args.append(list(urls))
         async with self._conn() as conn:
-            cur = await conn.execute("SELECT * FROM delta_urls WHERE collection_id=%s", (collection_id,))
-            return [DeltaUrl(**r) for r in await cur.fetchall()]
+            cur = await conn.execute(q, args)
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: [DeltaUrl(**r) for r in rows])
 
     async def get_delta(self, collection_id: str, url: str) -> DeltaUrl | None:
         async with self._conn() as conn:
@@ -854,6 +1170,7 @@ class Database:
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
+    @_stored
     async def count_deltas_by_kind(self, collection_id: str) -> dict[str, int]:
         """{total, new, modified, deleted, content_changed, renamed} in one pass over the collection's
         delta rows — the same numbers as list_deltas' totals for those filters, without its sort (it
@@ -878,18 +1195,34 @@ class Database:
         "title_ai_conf", "division_ai_conf", "document_type_ai_conf", "ai_model", "ai_content_hash", "ai_error",
         "ai_failures", "title_ai_before", "division_skipped",
     )
+    # The AI suggestion columns of a delta row. Their writers are Suggest metadata
+    # (set_delta_ai, set_delta_ai_errors), Regenerate titles (set_delta_ai_titles), accept / reject
+    # (clear_delta_ai, clear_delta_ai_field) and assigning a collection division. A recompute only
+    # carries them onto a row it inserts (replace_deltas).
+    _AI_COLS = frozenset((
+        "title_ai", "division_ai", "document_type_ai", "title_ai_conf", "division_ai_conf",
+        "document_type_ai_conf", "ai_model", "ai_content_hash", "ai_error", "ai_failures", "title_ai_before",
+        "division_skipped",
+    ))
 
+    @_touches
     async def replace_deltas(
         self, collection_id: str, deltas: list[DeltaUrl], effects: list[tuple[int, str, str]],
-        *, keep_effects: bool = False,
+        *, keep_effects: bool = False, excluded_count: int | None = None, full: bool = False,
     ) -> None:
         """Make the delta URLs (and, unless `keep_effects`, the rule→URL effects) equal to the given
-        state. Promote keeps the effects: the rules did not change, and the Curated table still
+        state. `full`: this is a full recompute's result over the current dump (deltas_current, H1). Promote keeps the effects: the rules did not change, and the Curated table still
         explains its values. The recompute always hands over the complete new state; only the rows
         that differ from the table are written (an inline edit changes one row of 100k, and
-        rewriting them all was most of what the edit cost)."""
+        rewriting them all was most of what the edit cost).
+        `excluded_count`: the dump URLs the rules keep out under these effects (DeltaSet.excluded),
+        stored on the collection with them. New effects without it leave the count unknown (NULL),
+        and `excluded_count()` recounts it the first time it is wanted.
+        The AI suggestion columns (`_AI_COLS`) are written for a new row only: on a row that stays a
+        delta they belong to Suggest metadata and to accept / reject, which may have written them
+        after this recompute loaded the rows. Writing back the loaded values would undo that."""
         cols = self._DELTA_COLS
-        data = [c for c in cols if c not in ("collection_id", "url")]
+        data = [c for c in cols if c not in ("collection_id", "url") and c not in self._AI_COLS]
         async with self._conn() as conn, conn.cursor() as cur:
             written = 0
             if not deltas:
@@ -897,9 +1230,9 @@ class Database:
                 written += cur.rowcount
             else:
                 await cur.execute("CREATE TEMP TABLE delta_in (LIKE delta_urls INCLUDING DEFAULTS) ON COMMIT DROP")
+                delta_rows = await asyncio.to_thread(lambda: [tuple(getattr(d, c) for c in cols) for d in deltas])
                 async with cur.copy(f"COPY delta_in ({','.join(cols)}) FROM STDIN") as copy:
-                    for d in deltas:
-                        await copy.write_row(tuple(getattr(d, c) for c in cols))
+                    await _copy_rows(copy, delta_rows)
                 # indexed + analysed: the anti-join below must be a lookup per row whatever plan is
                 # chosen — without the index a generic (prepared) plan nested-looped 100k × 100k rows
                 await cur.execute("CREATE INDEX ON delta_in (url)")
@@ -926,9 +1259,9 @@ class Database:
                     await cur.execute(
                         "CREATE TEMP TABLE effects_in (pattern_id bigint, url text, field text) ON COMMIT DROP"
                     )
+                    effect_rows = await asyncio.to_thread(lambda: list(set(effects)))
                     async with cur.copy("COPY effects_in (pattern_id,url,field) FROM STDIN") as copy:
-                        for row in set(effects):
-                            await copy.write_row(row)
+                        await _copy_rows(copy, effect_rows)
                     await cur.execute("CREATE INDEX ON effects_in (pattern_id, url, field)")
                     await cur.execute("ANALYZE effects_in")
                     await cur.execute(
@@ -943,11 +1276,177 @@ class Database:
                     )
                     if changed + cur.rowcount >= _BULK_ROWS:
                         await cur.execute("ANALYZE pattern_effects (pattern_id, collection_id, url)")
+            if keep_effects:
+                await cur.execute(
+                    "UPDATE collections SET delta_count=%s, updated_at=%s WHERE collection_id=%s",
+                    (len(deltas), utcnow(), collection_id),
+                )
+            else:
+                await cur.execute(
+                    "UPDATE collections SET delta_count=%s, excluded_count=%s, updated_at=%s,"
+                    " deltas_current=deltas_current OR %s WHERE collection_id=%s",
+                    (len(deltas), excluded_count if excluded_count is not None else (None if effects else 0),
+                     utcnow(), full, collection_id),
+                )
+
+    # ── one page at a time (V18 canonical keys; CurationService.recompute_keys) ──
+
+    async def keyed(self, collection_id: str) -> bool:
+        """Every dump row, curated row and exact-URL rule of the collection carries its canonical key
+        (V18; rows written before it get theirs from backfill_keys)."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT NOT EXISTS (SELECT 1 FROM dump_urls WHERE collection_id=%(c)s AND canonical_key IS NULL)"
+                " AND NOT EXISTS (SELECT 1 FROM curated_urls WHERE collection_id=%(c)s AND canonical_key IS NULL)"
+                " AND NOT EXISTS (SELECT 1 FROM patterns WHERE collection_id=%(c)s AND canonical_key IS NULL"
+                "                 AND position('*' in match) = 0) AS ok",
+                {"c": collection_id},
+            )
+            return bool((await cur.fetchone())["ok"])
+
+    BACKFILL_RETRY_S: ClassVar[float] = 0.2  # every row left is locked by a curator's write: wait this long
+
+    async def backfill_keys(self, batch: int = 5000) -> int:
+        """Fill `canonical_key` on the rows written before V18, `batch` rows per short transaction.
+        Returns how many rows it filled. Each batch locks its rows with SKIP LOCKED in the
+        transaction that updates them: the backfill never waits for a row a curator's write holds,
+        so it cannot deadlock with it (L5: a promote that lost the deadlock answered 500). Rows it
+        skipped are taken by a later batch."""
+        filled = 0
+        specs = (("dump_urls", "url", "(collection_id, url)", "canonical_key IS NULL"),
+                 ("curated_urls", "url", "(collection_id, url)", "canonical_key IS NULL"),
+                 ("patterns", "match", "id", "canonical_key IS NULL AND position('*' in match) = 0"))
+        for table, source, _pk, where in specs:
+            while True:
+                pick = "id, match AS u" if table == "patterns" else "collection_id, url AS u"
+                async with self._conn() as conn:
+                    cur = await conn.execute(f"SELECT {pick} FROM {table} WHERE {where} LIMIT %s"
+                                             " FOR UPDATE SKIP LOCKED", (batch,))
+                    rows = await cur.fetchall()
+                    if not rows:
+                        left = await conn.execute(f"SELECT 1 FROM {table} WHERE {where} LIMIT 1")
+                        if await left.fetchone() is None:
+                            break
+                    else:
+                        filled += await self._fill_keys(conn, table, rows)
+                        continue
+                await asyncio.sleep(self.BACKFILL_RETRY_S)
+        return filled
+
+    @staticmethod
+    async def _fill_keys(conn, table: str, rows: list[dict[str, Any]]) -> int:
+        """backfill_keys: write the keys of `rows` (locked by the caller's transaction)."""
+        keys = await asyncio.to_thread(lambda: [canonical_key(r["u"]) for r in rows])
+        if table == "patterns":
+            await conn.execute(
+                "UPDATE patterns t SET canonical_key = v.k FROM unnest(%s::bigint[], %s::text[]) AS v(i, k)"
+                " WHERE t.id = v.i", ([r["id"] for r in rows], keys))
+        else:
+            await conn.execute(
+                f"UPDATE {table} t SET canonical_key = v.k"
+                " FROM unnest(%s::text[], %s::text[], %s::text[]) AS v(c, u, k)"
+                " WHERE t.collection_id = v.c AND t.url = v.u",
+                ([r["collection_id"] for r in rows], [r["u"] for r in rows], keys))
+        return len(rows)
+
+    async def excluded_among(self, collection_id: str, urls: list[str]) -> int:
+        """How many of these dump URLs the rules keep out now: the ones whose `excluded` effect is an
+        exclude rule (an include that overrides one is recorded as the effect instead)."""
+        if not urls:
+            return 0
+        async with self._conn() as conn:
+            return await _scalar(await conn.execute(
+                "SELECT COUNT(*) FROM pattern_effects e JOIN patterns p ON p.id = e.pattern_id"
+                " WHERE e.collection_id=%s AND e.field='excluded' AND p.type='exclude' AND e.url = ANY(%s)",
+                (collection_id, list(urls)),
+            ))
+
+    @_touches
+    async def replace_deltas_scoped(
+        self, collection_id: str, urls: list[str], deltas: list[DeltaUrl], effects: list[tuple[int, str, str]],
+        *, excluded_change: int,
+    ) -> None:
+        """replace_deltas for the rows of a few pages: make the delta rows and rule effects of `urls`
+        (every dump and curated URL of those pages) equal to the given state, leave every other row
+        alone, and move the stored counts by the difference (`excluded_change`: dump URLs newly kept
+        out minus those let back in). Same rules as replace_deltas: AI columns written on insert only."""
+        cols = self._DELTA_COLS
+        data = [c for c in cols if c not in ("collection_id", "url") and c not in self._AI_COLS]
+        urls = list(urls)
+        async with self._conn() as conn, conn.cursor() as cur:
             await cur.execute(
-                "UPDATE collections SET delta_count=%s, updated_at=%s WHERE collection_id=%s",
-                (len(deltas), utcnow(), collection_id),
+                "DELETE FROM delta_urls WHERE collection_id=%s AND url = ANY(%s) AND NOT (url = ANY(%s))",
+                (collection_id, urls, [d.url for d in deltas]),
+            )
+            if deltas:
+                await cur.executemany(
+                    f"INSERT INTO delta_urls ({','.join(cols)}) VALUES ({','.join(['%s'] * len(cols))})"
+                    " ON CONFLICT (collection_id, url) DO UPDATE SET "
+                    + ", ".join(f"{c}=EXCLUDED.{c}" for c in data)
+                    + f" WHERE ({','.join('delta_urls.' + c for c in data)})"
+                      f" IS DISTINCT FROM ({','.join('EXCLUDED.' + c for c in data)})",
+                    [tuple(getattr(d, c) for c in cols) for d in deltas],
+                )
+            await cur.execute("DELETE FROM pattern_effects WHERE collection_id=%s AND url = ANY(%s)", (collection_id, urls))
+            if effects:
+                await cur.executemany(
+                    "INSERT INTO pattern_effects (pattern_id,collection_id,url,field) VALUES (%s,%s,%s,%s)"
+                    " ON CONFLICT DO NOTHING",
+                    [(pid, collection_id, u, f) for pid, u, f in set(effects)],
+                )
+            await cur.execute(
+                "UPDATE collections SET delta_count=(SELECT COUNT(*) FROM delta_urls WHERE collection_id=%s),"
+                " excluded_count = excluded_count + %s, updated_at=%s WHERE collection_id=%s",
+                (collection_id, excluded_change, utcnow(), collection_id),
             )
 
+    async def rule_match_counts(self, collection_id: str, set_: str, *, globs: list[tuple[int, str]],
+                                exact: list[tuple[int, str]]) -> dict[int, int]:
+        """{rule id: URLs of one set (dump / delta / curated) it matches}. `globs`: (id, LIKE pattern);
+        `exact`: (id, canonical key) — an exact-URL rule matches every row of its page. The delta set
+        has no key column: a delta row's URL is a dump URL, or the curated URL of a removal."""
+        table = {"dump": "dump_urls", "delta": "delta_urls", "curated": "curated_urls"}[set_]
+        out: dict[int, int] = {}
+        async with self._conn() as conn:
+            if globs:
+                cur = await conn.execute(
+                    f"SELECT g.i, (SELECT COUNT(*) FROM {table} t WHERE t.collection_id=%s AND t.url LIKE g.p) AS n"
+                    " FROM unnest(%s::bigint[], %s::text[]) AS g(i, p)",
+                    (collection_id, [i for i, _ in globs], [p for _, p in globs]),
+                )
+                out.update({r["i"]: r["n"] for r in await cur.fetchall()})
+            if exact:
+                keys = sorted({k for _, k in exact})
+                if set_ == "delta":
+                    q = ("SELECT k, COUNT(*) AS n FROM ("
+                         " SELECT u.canonical_key AS k FROM delta_urls d JOIN dump_urls u"
+                         "  ON u.collection_id = d.collection_id AND u.url = d.url"
+                         "  WHERE d.collection_id=%(c)s AND u.canonical_key = ANY(%(k)s)"
+                         " UNION ALL"
+                         " SELECT cu.canonical_key FROM delta_urls d JOIN curated_urls cu"
+                         "  ON cu.collection_id = d.collection_id AND cu.url = d.url"
+                         "  WHERE d.collection_id=%(c)s AND cu.canonical_key = ANY(%(k)s)"
+                         "  AND NOT EXISTS (SELECT 1 FROM dump_urls u2 WHERE u2.collection_id = d.collection_id"
+                         "                  AND u2.url = d.url)"
+                         ") x GROUP BY k")
+                else:
+                    q = (f"SELECT canonical_key AS k, COUNT(*) AS n FROM {table}"
+                         " WHERE collection_id=%(c)s AND canonical_key = ANY(%(k)s) GROUP BY canonical_key")
+                cur = await conn.execute(q, {"c": collection_id, "k": keys})
+                per_key = {r["k"]: r["n"] for r in await cur.fetchall()}
+                out.update({i: per_key.get(k, 0) for i, k in exact})
+        return out
+
+    async def exact_rule_ids(self, collection_id: str, types: list[str], keys: list[str]) -> list[int]:
+        """Ids of the exact-URL rules of these types for these pages (any spelling: by canonical key)."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT id FROM patterns WHERE collection_id=%s AND type = ANY(%s) AND canonical_key = ANY(%s)",
+                (collection_id, list(types), list(keys)),
+            )
+            return [r["id"] for r in await cur.fetchall()]
+
+    @_touches
     async def delete_deltas(self, collection_id: str, urls: list[str]) -> int:
         """Drop these rows from the review queue (a partial promote) and recount in SQL. The
         rule→URL effects stay: the rows became curated rows and the Curated table still explains
@@ -965,6 +1464,7 @@ class Database:
             )
             return cur.rowcount
 
+    @_touches
     async def delete_effects(self, collection_id: str, urls: list[str]) -> None:
         """Forget the rule→URL effects of URLs that are in neither set any more (promoted tombstones)."""
         if not urls:
@@ -974,10 +1474,11 @@ class Database:
                 "DELETE FROM pattern_effects WHERE collection_id=%s AND url = ANY(%s)", (collection_id, list(urls))
             )
 
-    async def set_delta_ai(self, collection_id: str, items: list[dict[str, Any]]) -> int:
+    @_touches
+    async def set_delta_ai(self, collection_id: str, items: list[dict[str, Any]], *, job: int | None = None) -> int:
         """Bulk-write AI suggestions for whole rows (never touches the effective fields). A
         re-classification replaces the previous answer, confidence included, and clears any
-        recorded failure."""
+        recorded failure. `job`: the Suggest-metadata job answering (V19 ai_job)."""
         if not items:
             return 0
         async with self._conn() as conn, conn.cursor() as cur:
@@ -985,34 +1486,44 @@ class Database:
                 """UPDATE delta_urls SET title_ai=%s, division_ai=%s, document_type_ai=%s,
                    title_ai_conf=%s, division_ai_conf=%s, document_type_ai_conf=%s,
                    ai_model=%s, ai_content_hash=%s, ai_error=NULL, ai_failures=0, title_ai_before=NULL,
-                   division_skipped=%s
+                   division_skipped=%s, ai_job=%s
                    WHERE collection_id=%s AND url=%s""",
                 [(i.get("title"), i.get("division"), i.get("document_type"),
                   i.get("title_conf"), i.get("division_conf"), i.get("document_type_conf"),
-                  i.get("model"), i.get("content_hash"), bool(i.get("division_skipped")),
+                  i.get("model"), i.get("content_hash"), bool(i.get("division_skipped")), job,
                   collection_id, i["url"]) for i in items],
             )
         return len(items)
 
-    async def set_delta_ai_errors(self, collection_id: str, items: list[tuple[str, str]]) -> int:
+    @_touches
+    async def set_delta_ai_errors(self, collection_id: str, items: list[tuple[str, str]], *,
+                                  job: int | None = None) -> int:
         """Record (url, error) for URLs whose Suggest metadata call failed. A previous answer stays:
         a failed re-classification does not throw away what the model said last time."""
         if not items:
             return 0
         async with self._conn() as conn, conn.cursor() as cur:
             await cur.executemany(
-                "UPDATE delta_urls SET ai_error=%s, ai_failures=ai_failures+1 WHERE collection_id=%s AND url=%s",
-                [(err[:1000], collection_id, url) for url, err in items],
+                "UPDATE delta_urls SET ai_error=%s, ai_failures=ai_failures+1, ai_job=%s"
+                " WHERE collection_id=%s AND url=%s",
+                [(err[:1000], job, collection_id, url) for url, err in items],
             )
         return len(items)
 
-    async def load_curated(self, collection_id: str, *, with_text: bool = False) -> list[CuratedUrl]:
+    async def load_curated(self, collection_id: str, *, with_text: bool = False,
+                           keys: list[str] | None = None) -> list[CuratedUrl]:
         """The whole curated set. `with_text` also loads the approved page text (the export needs
-        it; the diff and the pages do not, and it is most of the bytes)."""
+        it; the diff and the pages do not, and it is most of the bytes). `keys`: only the rows of
+        these pages."""
         cols = f"{_CURATED_COLS}, {_page_text('curated_urls')}" if with_text else _CURATED_COLS
+        q, args = f"SELECT {cols} FROM curated_urls WHERE collection_id=%s", [collection_id]
+        if keys is not None:
+            q += " AND canonical_key = ANY(%s)"
+            args.append(list(keys))
         async with self._conn() as conn:
-            cur = await conn.execute(f"SELECT {cols} FROM curated_urls WHERE collection_id=%s", (collection_id,))
-            return [CuratedUrl(**r) for r in await cur.fetchall()]
+            cur = await conn.execute(q, args)
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: [CuratedUrl(**r) for r in rows])
 
     async def iter_curated_for_export(self, collection_id: str, chunk: int = 500) -> AsyncIterator[list[CuratedUrl]]:
         """The exportable curated rows (not excluded) with the text they were approved with, in URL
@@ -1035,6 +1546,7 @@ class Database:
                 rows = {r["url"]: r for r in await cur.fetchall()}
             yield [CuratedUrl(**rows[u]) for u in page if u in rows]
 
+    @_touches
     async def set_curated_edited_by(self, collection_id: str, items: list[tuple[str, str | None]]) -> None:
         """Re-attribute unchanged curated rows (no delta) after a recompute."""
         if not items:
@@ -1045,6 +1557,7 @@ class Database:
                 [(eb, collection_id, url) for url, eb in items],
             )
 
+    @_touches
     async def set_curated_excluded(self, collection_id: str, items: list[tuple[str, bool]]) -> None:
         """Flag curated rows an exclude rule now keeps out, in place: exclusions are decided by the
         rules, never queued as delta URLs (the next index run drops the rows). The row stays in the
@@ -1060,8 +1573,29 @@ class Database:
                 )
             await self._recount_curated(conn, collection_id, changed=True)
 
+    @_coalesced
+    async def excluded_count(self, collection_id: str) -> int:
+        """Dump URLs an exclude rule keeps out, as stored on the collection (set by every recompute).
+        Unknown (NULL: after a migration, a new dump or a rule deleted outside a recompute) → counted
+        once here and stored; that count is a multi-second join on a 100k collection, so it is never
+        run per page view."""
+        async with self._conn() as conn:
+            stored = await _scalar(await conn.execute(
+                "SELECT excluded_count FROM collections WHERE collection_id=%s", (collection_id,)
+            ))
+        if stored is not None:
+            return stored
+        n = await self.count_excluded_by_rules(collection_id)
+        async with self._conn() as conn:  # a recompute that finished meanwhile stored the newer value
+            await conn.execute(
+                "UPDATE collections SET excluded_count=%s WHERE collection_id=%s AND excluded_count IS NULL",
+                (n, collection_id),
+            )
+        return n
+
     async def count_excluded_by_rules(self, collection_id: str) -> int:
-        """Dump URLs an exclude rule keeps out (no include overrides it) — they have no delta row."""
+        """Dump URLs an exclude rule keeps out (no include overrides it) — they have no delta row.
+        The definition of `excluded_count`, counted from the tables (slow on big collections)."""
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
                 "SELECT COUNT(DISTINCT e.url) FROM pattern_effects e JOIN patterns p ON p.id=e.pattern_id"
@@ -1070,6 +1604,7 @@ class Database:
                 (collection_id,),
             ))
 
+    @_touches
     async def set_curated_crawl_failure(self, collection_id: str, items: list[tuple[str, str | None]]) -> None:
         """Flag (reason) or clear (None) curated rows after a recompute: the current dump lacks the
         URL but the crawl does not prove it gone, or the crawl fetched it again."""
@@ -1081,12 +1616,14 @@ class Database:
                 [(reason, collection_id, url) for url, reason in items],
             )
 
+    @_stored
     async def count_curated_excluded(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
                 "SELECT COUNT(*) FROM curated_urls WHERE collection_id=%s AND excluded", (collection_id,)
             ))
 
+    @_stored
     async def count_curated_unreachable(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
@@ -1094,6 +1631,7 @@ class Database:
                 (collection_id,),
             ))
 
+    @_touches
     async def replace_curated(self, collection_id: str, rows: list[CuratedUrl], *, changed: bool = True) -> int:
         """Bulk-replace the curated set in one transaction; returns the included count (what
         `curated_count` holds — excluded rows are written but not counted). `changed` stamps
@@ -1113,16 +1651,16 @@ class Database:
                 "CREATE TEMP TABLE curated_in (LIKE curated_urls INCLUDING DEFAULTS) ON COMMIT DROP"
             )
             await conn.execute("ALTER TABLE curated_in ADD COLUMN full_text text")
+            copy_rows = await asyncio.to_thread(lambda: [(
+                r.collection_id, r.url, r.scraped_title, r.title, r.division, r.document_type,
+                r.excluded, r.content_hash or content_hash(r.full_text), r.edited_by,
+                r.crawl_failure, r.full_text, canonical_key(r.url),
+            ) for r in rows])
             async with conn.cursor() as cur, cur.copy(
                 "COPY curated_in (collection_id,url,scraped_title,title,division,document_type,excluded,"
-                "content_hash,edited_by,crawl_failure,full_text) FROM STDIN"
+                "content_hash,edited_by,crawl_failure,full_text,canonical_key) FROM STDIN"
             ) as copy:
-                for r in rows:
-                    await copy.write_row((
-                        r.collection_id, r.url, r.scraped_title, r.title, r.division, r.document_type,
-                        r.excluded, r.content_hash or content_hash(r.full_text), r.edited_by,
-                        r.crawl_failure, r.full_text,
-                    ))
+                await _copy_rows(copy, copy_rows)
             # A row handed to us with its own text keeps it: file the blob under the hash that
             # fingerprints it, exactly as `replace_dump` does. A promote loads the curated set
             # without text and this does nothing — the row's hash already points at a blob the
@@ -1142,13 +1680,21 @@ class Database:
             )
             await conn.execute(
                 "INSERT INTO curated_urls (collection_id,url,scraped_title,title,division,document_type,excluded,"
-                "content_hash,edited_by,crawl_failure)"
+                "content_hash,edited_by,crawl_failure,canonical_key)"
                 " SELECT collection_id,url,scraped_title,title,division,document_type,excluded,content_hash,"
-                "edited_by,crawl_failure FROM curated_in"
+                "edited_by,crawl_failure,canonical_key FROM curated_in"
                 " ON CONFLICT (collection_id, url) DO UPDATE SET scraped_title=EXCLUDED.scraped_title,"
                 " title=EXCLUDED.title, division=EXCLUDED.division, document_type=EXCLUDED.document_type,"
                 " excluded=EXCLUDED.excluded, content_hash=EXCLUDED.content_hash, edited_by=EXCLUDED.edited_by,"
-                " crawl_failure=EXCLUDED.crawl_failure"
+                " crawl_failure=EXCLUDED.crawl_failure, canonical_key=EXCLUDED.canonical_key"
+                # only the rows that differ: a promote that changes 1,200 rows of 96,000 writes 1,200
+                # (every row was rewritten before — dead row versions and WAL for nothing)
+                " WHERE (curated_urls.scraped_title, curated_urls.title, curated_urls.division,"
+                " curated_urls.document_type, curated_urls.excluded, curated_urls.content_hash,"
+                " curated_urls.edited_by, curated_urls.crawl_failure, curated_urls.canonical_key) IS DISTINCT FROM"
+                " (EXCLUDED.scraped_title, EXCLUDED.title, EXCLUDED.division, EXCLUDED.document_type,"
+                " EXCLUDED.excluded, EXCLUDED.content_hash, EXCLUDED.edited_by, EXCLUDED.crawl_failure,"
+                " EXCLUDED.canonical_key)"
             )
             if len(rows) >= _BULK_ROWS:
                 await conn.execute("ANALYZE curated_urls (collection_id, url, excluded)")
@@ -1157,6 +1703,7 @@ class Database:
 
     # ── index runs ─────────────────────────────────────────────────────
 
+    @_touches
     async def insert_index_run(self, r: IndexRun) -> IndexRun:
         async with self._conn() as conn:
             await conn.execute(
@@ -1173,6 +1720,7 @@ class Database:
             )
         return r
 
+    @_touches
     async def update_index_run(self, r: IndexRun) -> None:
         async with self._conn() as conn:
             await conn.execute(
@@ -1194,6 +1742,16 @@ class Database:
                 (collection_id, limit),
             )
             return [self._index_run(r) for r in await cur.fetchall()]
+
+    async def close_orphan_index_runs(self, *, keep: list[str]) -> int:
+        """At startup: every index run still 'running' whose job is not resuming (`keep`) failed with
+        the engine. Before this they stayed 'running' for good."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "UPDATE index_runs SET state='failed', error='engine restarted', finished_at=%s"
+                " WHERE state='running' AND NOT (run_id = ANY(%s))", (utcnow(), list(keep)),
+            )
+            return cur.rowcount
 
     async def get_index_run(self, run_id: str) -> IndexRun | None:
         async with self._conn() as conn:
@@ -1219,6 +1777,7 @@ class Database:
             )
             return {r["collection_id"]: self._index_run(r) for r in await cur.fetchall()}
 
+    @_stored
     async def curated_export_count(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
@@ -1227,6 +1786,7 @@ class Database:
 
     # ── LLM suggestions ────────────────────────────────────────────────
 
+    @_touches
     async def clear_pending_pattern_suggestions(self, collection_id: str) -> None:
         async with self._conn() as conn:
             await conn.execute(
@@ -1248,17 +1808,11 @@ class Database:
             )
             return cur.rowcount
 
+    @_touches
     async def add_pattern_suggestions(self, collection_id: str, rows: list[dict[str, Any]]) -> int:
         """Insert pending suggestions; a (type, match) already present — pending from another
         batch, or accepted/rejected earlier — is skipped. Returns how many were new."""
         async with self._conn() as conn:
-            return await self._add_pattern_suggestions(conn, collection_id, rows)
-
-    async def replace_pattern_suggestions(self, collection_id: str, rows: list[dict[str, Any]]) -> int:
-        async with self._conn() as conn:
-            await conn.execute(
-                "DELETE FROM pattern_suggestions WHERE collection_id=%s AND state='pending'", (collection_id,)
-            )
             return await self._add_pattern_suggestions(conn, collection_id, rows)
 
     async def count_pending_pattern_suggestions(self, collection_id: str) -> int:
@@ -1282,6 +1836,7 @@ class Database:
             cur = await conn.execute(q, args)
             return list(await cur.fetchall())
 
+    @_stored
     async def pattern_suggestion_counts(self, collection_id: str) -> dict[str, Any]:
         """Pending suggestions: {"total": n, "by_type": {type: n}} without loading the rows."""
         async with self._conn() as conn:
@@ -1299,6 +1854,7 @@ class Database:
             )
             return await cur.fetchone()
 
+    @_touches
     async def set_pattern_suggestion_state(
         self, collection_id: str, sid: int, state: str, *, actor: str | None = None,
         accepted_as: str | None = None,
@@ -1311,6 +1867,7 @@ class Database:
                 (state, actor, accepted_as, collection_id, sid),
             )
 
+    @_touches
     async def set_pattern_suggestions_state(
         self, collection_id: str, ids: list[int], state: str, *, actor: str | None = None
     ) -> int:
@@ -1349,22 +1906,31 @@ class Database:
             )
             return [(r["url"], r["scraped_title"]) for r in await cur.fetchall()]
 
-    async def count_deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> int:
+    @_stored
+    async def count_deltas_for_llm(self, collection_id: str, *, only_missing: bool = True,
+                                   skip_job: int | None = None) -> int:
+        """`skip_job`: leave out the rows that job answered or failed on (a resumed job, V19)."""
         q = (f"SELECT COUNT(*) FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id"
              f" AND u.url=d.url WHERE {self._LLM_WHERE}") + (self._LLM_MISSING if only_missing else "")
+        args: list[Any] = [collection_id]
+        if skip_job is not None:
+            q += " AND d.ai_job IS DISTINCT FROM %s"
+            args.append(skip_job)
         async with self._conn() as conn:
-            return await _scalar(await conn.execute(q, (collection_id,)))
+            return await _scalar(await conn.execute(q, args))
 
     async def iter_deltas_for_llm(
-        self, collection_id: str, *, only_missing: bool = True, chunk: int = 200
+        self, collection_id: str, *, only_missing: bool = True, chunk: int = 200, skip_job: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """{url, title, text, content_hash} rows with the FULL page text, streamed in keyset-paginated
         chunks so a 100k-URL collection never sits in memory at once. Each chunk is its own short
         transaction, and rows written by the running job are always behind the cursor, so
-        concurrent set_delta_ai calls are safe."""
+        concurrent set_delta_ai calls are safe. `skip_job`: as for count_deltas_for_llm."""
         q = (f"SELECT d.url, d.scraped_title AS title, p.full_text AS text, u.content_hash"
              f" FROM delta_urls d LEFT JOIN dump_urls u ON u.collection_id=d.collection_id AND u.url=d.url"
              f"{_TEXT_JOIN} WHERE {self._LLM_WHERE}") + (self._LLM_MISSING if only_missing else "")
+        if skip_job is not None:
+            q += f" AND d.ai_job IS DISTINCT FROM {int(skip_job)}"
         last = ""
         while True:
             async with self._conn() as conn:
@@ -1375,6 +1941,14 @@ class Database:
             for r in rows:
                 yield r
             last = rows[-1]["url"]
+
+    async def urls_titled_by_job(self, collection_id: str, job: int) -> set[str]:
+        """The delta URLs Suggest-metadata job `job` gave an AI title (a resumed job's duplicate-title pass).
+        Not a row it failed on: that keeps an older run's title."""
+        async with self._conn() as conn:
+            cur = await conn.execute("SELECT url FROM delta_urls WHERE collection_id=%s AND ai_job=%s"
+                                     " AND title_ai IS NOT NULL AND ai_error IS NULL", (collection_id, job))
+            return {r["url"] for r in await cur.fetchall()}
 
     async def deltas_for_llm(self, collection_id: str, *, only_missing: bool = True) -> list[dict[str, Any]]:
         return [r async for r in self.iter_deltas_for_llm(collection_id, only_missing=only_missing)]
@@ -1408,7 +1982,8 @@ class Database:
             sql += f" AND NOT {self._HUMAN_RULE}"; args.append(field)
         async with self._conn() as conn:
             cur = await conn.execute(sql + " ORDER BY url", args)
-            return [(r["url"], r["v"]) for r in await cur.fetchall()]
+            rows = await _fetch_all(cur)
+        return await asyncio.to_thread(lambda: [(r["url"], r["v"]) for r in rows])
 
     async def human_set_fields(self, collection_id: str, urls: list[str]) -> dict[str, set[str]]:
         """{url: {fields whose winning rule a person wrote}} — the rows the accept-all buttons pass
@@ -1509,6 +2084,7 @@ class Database:
             )
             return [DeltaUrl(**r) for r in await cur.fetchall()], total
 
+    @_stored
     async def count_ai_suggestions(self, collection_id: str, *, field: str | None = None,
                                    conf: str | None = None, skip_human: bool = False) -> int:
         """Pending field-level AI suggestions for `field` (every field when None) of confidence `conf`
@@ -1527,6 +2103,7 @@ class Database:
                 [*args, collection_id],
             )) or 0
 
+    @_stored
     async def delta_ai_counts(self, collection_id: str) -> dict[str, Any]:
         """Pending AI suggestions per field, plus `by_conf`: suggestions (field-level) per confidence,
         `failed`: included URLs whose last Suggest metadata call failed, and `retitled`: pending AI
@@ -1548,6 +2125,7 @@ class Database:
                 "by_conf": {"high": r["hi"] or 0, "medium": r["med"] or 0, "low": r["lo"] or 0},
                 "failed": r["failed"] or 0, "retitled": r["retitled"] or 0}
 
+    @_touches
     async def clear_delta_ai_field(
         self, collection_id: str, field: str, url: str | None = None, conf: str | None = None,
         urls: list[str] | None = None,
@@ -1569,6 +2147,7 @@ class Database:
             cur = await conn.execute(sql, args)
             return cur.rowcount
 
+    @_touches
     async def clear_delta_ai(self, collection_id: str, url: str, field: str) -> None:
         assert field in ("title", "division", "document_type")
         async with self._conn() as conn:
@@ -1578,6 +2157,7 @@ class Database:
                 (collection_id, url),
             )
 
+    @_coalesced
     async def incomplete_counts(self, collection_id: str, urls: list[str] | None = None) -> dict[str, int]:
         """Delta URLs promote would refuse (see _UNPROMOTABLE): how many, and why.
         `title` counts only the rows with no title at all: a row with no title rule is indexed under
@@ -1585,7 +2165,9 @@ class Database:
         the retired "General" placeholder — the same problem, but it reads differently to the
         curator. `duplicate` is the rows that would be indexed under a title + document type
         another page already has (undecided AI titles do not count: promote discards them), and it
-        overlaps the field counts — a row can be short of both. `urls`: only these rows (a promote
+        overlaps the field counts — a row can be short of both. `duplicate_undecided` is the subset
+        of `duplicate` with an AI title still undecided: accepting it may be all the row needs, and
+        Regenerate titles does not see it (it counts the AI title as accepted). `urls`: only these rows (a promote
         of a selection). One pass: the duplicate scan is a CTE, read twice, computed once."""
         where, args = "collection_id=%s AND ((" + _INCOMPLETE + ") OR url IN (SELECT url FROM dup))", [collection_id]
         if urls is not None:
@@ -1597,12 +2179,15 @@ class Database:
                 f" COUNT(*) FILTER (WHERE {_NO_DIVISION}) AS division,"
                 " COUNT(*) FILTER (WHERE division = 'General') AS general,"
                 " COUNT(*) FILTER (WHERE document_type IS NULL) AS document_type,"
-                " COUNT(*) FILTER (WHERE url IN (SELECT url FROM dup)) AS duplicate"
+                " COUNT(*) FILTER (WHERE url IN (SELECT url FROM dup)) AS duplicate,"
+                " COUNT(*) FILTER (WHERE url IN (SELECT url FROM dup) AND title_ai IS NOT NULL) AS duplicate_undecided"
                 f" FROM delta_urls WHERE {where}", [collection_id, collection_id, *args],
             )
             r = await cur.fetchone()
-        return {k: r[k] or 0 for k in ("urls", "title", "division", "general", "document_type", "duplicate")}
+        return {k: r[k] or 0 for k in ("urls", "title", "division", "general", "document_type", "duplicate",
+                                       "duplicate_undecided")}
 
+    @_touches
     async def set_delta_ai_titles(self, collection_id: str, items: list[dict[str, Any]]) -> int:
         """Replace just the AI title suggestion (value, confidence, model) of these rows: the other
         fields' suggestions and any recorded failure stay as they are. `before`: the title the row
@@ -1657,6 +2242,7 @@ class Database:
             )
             return list(await cur.fetchall())
 
+    @_coalesced
     async def duplicate_title_counts(self, collection_id: str) -> dict[str, int]:
         """URLs whose title and document type another page of the collection will also have (see
         _PROJECTED_TITLES), how many distinct title + type combinations they share (`titles`), and
@@ -1711,20 +2297,23 @@ class Database:
 
     # ── patterns ───────────────────────────────────────────────────────
 
+    @_touches
     async def insert_pattern(self, p: Pattern) -> Pattern:
         """Raises ConflictError when the collection already has that (type, match) rule."""
         try:
             async with self._conn() as conn:
                 cur = await conn.execute(
-                    "INSERT INTO patterns (collection_id,type,match,value,created_at,created_by,source)"
-                    " VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-                    (p.collection_id, p.type, p.match, p.value, p.created_at, p.created_by, p.source),
+                    "INSERT INTO patterns (collection_id,type,match,value,created_at,created_by,source,canonical_key)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                    (p.collection_id, p.type, p.match, p.value, p.created_at, p.created_by, p.source,
+                     _rule_key(p.match)),
                 )
                 p.id = (await cur.fetchone())["id"]
         except psycopg.errors.UniqueViolation as e:
             raise ConflictError(f"{p.type} rule {p.match!r} already exists") from e
         return p
 
+    @_touches
     async def insert_patterns(self, rows: list[Pattern]) -> int:
         """Bulk insert; rows identical to an existing (type, match) are skipped. One transaction.
         COPY + one INSERT … SELECT: bulk-accepting AI metadata inserts three rules per URL."""
@@ -1733,17 +2322,22 @@ class Database:
         async with self._conn() as conn, conn.cursor() as cur:
             await cur.execute(
                 "CREATE TEMP TABLE patterns_in (n bigint, collection_id text, type text, match text, value text,"
-                " created_at timestamptz, created_by text, source text) ON COMMIT DROP"
+                " created_at timestamptz, created_by text, source text, canonical_key text) ON COMMIT DROP"
             )
+            copy_rows = await asyncio.to_thread(lambda: [
+                (n, p.collection_id, p.type, p.match, p.value, p.created_at, p.created_by, p.source,
+                 _rule_key(p.match))
+                for n, p in enumerate(rows)])
             async with cur.copy(
-                "COPY patterns_in (n,collection_id,type,match,value,created_at,created_by,source) FROM STDIN"
+                "COPY patterns_in (n,collection_id,type,match,value,created_at,created_by,source,canonical_key)"
+                " FROM STDIN"
             ) as copy:
-                for n, p in enumerate(rows):
-                    await copy.write_row((n, p.collection_id, p.type, p.match, p.value, p.created_at, p.created_by, p.source))
+                await _copy_rows(copy, copy_rows)
             # ORDER BY n: ids are handed out in the order given, and the newest (highest id) rule wins
             await cur.execute(
-                "INSERT INTO patterns (collection_id,type,match,value,created_at,created_by,source)"
-                " SELECT collection_id,type,match,value,created_at,created_by,source FROM patterns_in ORDER BY n"
+                "INSERT INTO patterns (collection_id,type,match,value,created_at,created_by,source,canonical_key)"
+                " SELECT collection_id,type,match,value,created_at,created_by,source,canonical_key FROM patterns_in"
+                " ORDER BY n"
                 " ON CONFLICT DO NOTHING"
             )
             inserted = cur.rowcount
@@ -1751,6 +2345,7 @@ class Database:
                 await cur.execute("ANALYZE patterns (collection_id, type, match)")
             return inserted
 
+    @_touches
     async def delete_exact_patterns(self, collection_id: str, type_: str, matches: list[str]) -> int:
         if not matches:
             return 0
@@ -1759,22 +2354,28 @@ class Database:
                 "DELETE FROM patterns WHERE collection_id=%s AND type=%s AND match = ANY(%s)",
                 (collection_id, type_, list(matches)),
             )
+            if cur.rowcount:
+                await self._forget_excluded_count(conn, collection_id, [type_])
             return cur.rowcount
 
-    async def load_rules(self, collection_id: str) -> list[Rule]:
+    async def load_rules(self, collection_id: str, *, keys: list[str] | None = None) -> list[Rule]:
         """Every rule, oldest first, as the slim engine view (models.Rule), read through a
-        server-side cursor so the driver's row dicts never pile up next to the result."""
+        server-side cursor so the driver's row dicts never pile up next to the result. `keys`: every
+        glob rule, and the exact-URL rules of these pages only — all the rules that can match them."""
         types, sources = {t.value: t for t in PatternType}, {x.value: x for x in RuleSource}
-        out: list[Rule] = []
+        raw: list[tuple] = []
+        q, args = "SELECT id, type, match, value, source FROM patterns WHERE collection_id=%s", [collection_id]
+        if keys is not None:
+            q += " AND (position('*' in match) > 0 OR canonical_key = ANY(%s))"
+            args.append(list(keys))
         async with self._conn() as conn, conn.cursor(name="rules", row_factory=tuple_row) as cur:
-            await cur.execute(
-                "SELECT id, type, match, value, source FROM patterns WHERE collection_id=%s ORDER BY id",
-                (collection_id,),
-            )
+            await cur.execute(q + " ORDER BY id", args)
             while rows := await cur.fetchmany(10_000):
-                out += [Rule(i, types[t], m, sys.intern(v) if v is not None else None, sources[x])
-                        for i, t, m, v, x in rows]
-        return out
+                raw += rows
+        # built off the event loop (300k rules when every AI value has been accepted)
+        return await asyncio.to_thread(
+            lambda: [Rule(i, types[t], m, sys.intern(v) if v is not None else None, sources[x])
+                     for i, t, m, v, x in raw])
 
     async def iter_pattern_rows(self, collection_id: str, chunk: int = 5000) -> AsyncIterator[list[dict[str, Any]]]:
         """Every rule as a plain row, oldest first, `chunk` at a time (the patterns.yaml writer). Keyset pages, each
@@ -1793,6 +2394,7 @@ class Database:
             last = rows[-1]["id"]
             yield rows
 
+    @_stored
     async def count_patterns(self, collection_id: str) -> int:
         async with self._conn() as conn:
             return await _scalar(await conn.execute(
@@ -1811,9 +2413,11 @@ class Database:
         """The exact-URL rules for this page under any spelling of its URL (an exact rule matches by
         canonical key), oldest first — without loading a collection's every per-URL rule to find one."""
         key = canonical_key(url)
+        # by the stored key (V18), and by the old substring scan for a rule written before it whose
+        # key has not been filled in yet (backfill_keys)
         q = ("SELECT * FROM patterns WHERE collection_id=%s AND position('*' in match) = 0"
-             " AND position(lower(%s) in lower(match)) > 0")
-        args: list[Any] = [collection_id, key.rstrip("/")]  # the site root is also written without its "/"
+             " AND (canonical_key = %s OR (canonical_key IS NULL AND position(lower(%s) in lower(match)) > 0))")
+        args: list[Any] = [collection_id, key, key.rstrip("/")]  # the site root is also written without its "/"
         if type_ is not None:
             q += " AND type=%s"
             args.append(type_)
@@ -1830,13 +2434,15 @@ class Database:
             )
             return [(r["id"], r["type"], r["match"]) for r in await cur.fetchall()]
 
+    @_touches
     async def delete_patterns(self, collection_id: str, ids: list[int]) -> int:
         if not ids:
             return 0
         async with self._conn() as conn:
             cur = await conn.execute(
-                "DELETE FROM patterns WHERE collection_id=%s AND id = ANY(%s)", (collection_id, list(ids))
+                "DELETE FROM patterns WHERE collection_id=%s AND id = ANY(%s) RETURNING type", (collection_id, list(ids))
             )
+            await self._forget_excluded_count(conn, collection_id, [r["type"] for r in await cur.fetchall()])
             return cur.rowcount
 
     async def list_patterns(self, collection_id: str, *, types: list[str] | None = None,
@@ -1901,12 +2507,28 @@ class Database:
         return {"total": sum(r["n"] for r in rows), "exact": sum(r["exact"] for r in rows),
                 "by_source": {r["source"]: r["n"] for r in rows}}
 
+    @_touches
     async def delete_pattern(self, collection_id: str, pattern_id: int) -> bool:
+        """Delete one rule. Every caller recomputes next (CurationService), and that recompute stores
+        the excluded count. A per-URL rule leaves the stored count as it is until then: it decides
+        one page, which the per-page recompute counts before and after (excluded_before). Clearing
+        it sent that recompute to the full one (L4), and let a page view store a count in between
+        that the ✓ then subtracted from again (M10). A glob rule clears it."""
         async with self._conn() as conn:
             cur = await conn.execute(
-                "DELETE FROM patterns WHERE id=%s AND collection_id=%s", (pattern_id, collection_id)
+                "DELETE FROM patterns WHERE id=%s AND collection_id=%s RETURNING type, match",
+                (pattern_id, collection_id),
             )
+            await self._forget_excluded_count(
+                conn, collection_id, [r["type"] for r in await cur.fetchall() if not is_exact(r["match"])])
             return cur.rowcount > 0
+
+    @staticmethod
+    async def _forget_excluded_count(conn, collection_id: str, deleted_types: list[str]) -> None:
+        """An exclude/include rule went (its effects with it, ON DELETE CASCADE): the stored excluded
+        count is unknown until the recompute that follows stores the new one."""
+        if {"exclude", "include"} & set(deleted_types):
+            await conn.execute("UPDATE collections SET excluded_count=NULL WHERE collection_id=%s", (collection_id,))
 
     # ── jobs ───────────────────────────────────────────────────────────
 
@@ -2027,6 +2649,31 @@ class Database:
             row = await cur.fetchone()
         return self._user(row) if row else None
 
+    # Every request with a session cookie, polls and SSE connects included, looked its user up in the
+    # database. The answer changes only when a password, role or active flag changes, and each of those
+    # writers drops its user from this cache. On another engine process the change takes effect when
+    # that process's entry expires.
+    SESSION_USER_TTL_S = 30.0
+
+    async def session_user(self, user_id: int) -> User | None:
+        """get_user for the login check, cached for SESSION_USER_TTL_S."""
+        now = time.monotonic()
+        hit = self._session_users.get(user_id)
+        if hit is not None and hit[0] > now:
+            return hit[1].model_copy()
+        gen = self._session_user_gen.get(user_id, 0)
+        user = await self.get_user(user_id)
+        if user is None:
+            self._session_users.pop(user_id, None)
+            return None
+        if self._session_user_gen.get(user_id, 0) == gen:  # not if a change cleared the entry meanwhile (L8)
+            self._session_users[user_id] = (now + self.SESSION_USER_TTL_S, user)
+        return user.model_copy()
+
+    def _forget_session_user(self, user_id: int) -> None:
+        self._session_users.pop(user_id, None)
+        self._session_user_gen[user_id] = self._session_user_gen.get(user_id, 0) + 1
+
     async def get_user_by_username(self, username: str) -> User | None:
         async with self._conn() as conn:
             cur = await conn.execute("SELECT * FROM users WHERE lower(username)=lower(%s)", (username,))
@@ -2049,18 +2696,21 @@ class Database:
                 "UPDATE users SET password_hash=%s, session_version=session_version+1, updated_at=%s WHERE id=%s",
                 (password_hash, utcnow(), user_id),
             )
+        self._forget_session_user(user_id)
 
     async def set_role(self, user_id: int, role: Role) -> None:
         async with self._conn() as conn:
             await conn.execute(
                 "UPDATE users SET role=%s, updated_at=%s WHERE id=%s", (role, utcnow(), user_id)
             )
+        self._forget_session_user(user_id)
 
     async def set_active(self, user_id: int, active: bool) -> None:
         async with self._conn() as conn:
             await conn.execute(
                 "UPDATE users SET active=%s, updated_at=%s WHERE id=%s", (active, utcnow(), user_id)
             )
+        self._forget_session_user(user_id)
 
     # ── audit ledger ───────────────────────────────────────────────────
 

@@ -69,7 +69,11 @@ class EnvConfig:
     llm_service_tier: str | None = None
     llm_provider: str = "openai"  # "fake": canned answers, no API calls (load tests — see stress_config)
     llm_workers: int = 16
+    llm_workers_total: int = 64  # #24: LLM calls in flight across all jobs on one task (32 until 2026-10-12)
     llm_pattern_batch_urls: int = 1000
+    # M6: who the CloudWatch alarms email. Each address gets an AWS confirmation email after the
+    # first deploy and receives nothing until someone clicks its "Confirm subscription" link.
+    alarm_emails: tuple[str, ...] = ("bb0008@uah.edu", "srk0024@uah.edu")
     # Override for notification links; default = the stack's CloudFront URL.
     public_base_url: str | None = None
     cpu: int = 1024

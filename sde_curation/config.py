@@ -33,6 +33,19 @@ class Settings(BaseSettings):
     # connections per engine process. Every recompute, job and poll takes one for each transaction;
     # four curators on big collections kept 8 busy and requests queued for seconds behind them.
     db_pool_size: int = Field(default=16, ge=1, le=64)
+    # Page requests (GET/HEAD: pages, tabs, the fragments every open tab re-fetches on job events)
+    # take their own pool, so a burst of them never starves a job or a curator's action, and the
+    # reverse. Their statements are cut off after db_read_statement_timeout_s: a page that slow
+    # answers 503 instead of holding a connection while more copies of it queue up behind it.
+    # Actions and jobs (the work pool) have no limit — a promote on 100k URLs must not stop half-way.
+    db_read_pool_size: int = Field(default=12, ge=1, le=64)
+    db_read_statement_timeout_s: float = Field(default=30.0, gt=0)
+    # how long a page request waits for a free read connection before answering 503 (the wait plus
+    # the query must stay under CloudFront's 60 s, or the curator gets a 504 page instead)
+    db_read_wait_s: float = Field(default=10.0, gt=0)
+    # /health is liveness only (the ALB replaces the task when it fails). /health/db answers 503 when
+    # no database connection is free within this long.
+    health_db_timeout_s: float = Field(default=3.0, gt=0)
     # Bulk curation changes (Start curating / recompute, accept-all) on a collection with at least this
     # many dump URLs run as a background job: a request has 60 s before CloudFront gives up on it, and
     # an error page for work that is still going on makes the curator click again. 0 = always a job.
@@ -151,6 +164,8 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 60.0  # per attempt
     llm_max_retries: int = Field(default=5, ge=0, le=10)  # SDK retries on 429 / 5xx / timeouts
     llm_workers: int = Field(default=16, ge=1, le=64)  # concurrent calls inside one LLM job
+    # #24: concurrent calls across every LLM job in the engine together (one limit, shared)
+    llm_workers_total: int = Field(default=64, ge=1, le=256)
     # Calls that still fail with a rate limit / 5xx / timeout after the SDK's own retries are run
     # again at the end of the job, this long after the main pass, with a quarter of the workers.
     llm_retry_passes: int = Field(default=1, ge=0, le=5)
@@ -162,6 +177,21 @@ class Settings(BaseSettings):
     # stays running and the next start watches the crawl again, up to this many restarts per job.
     # 0 = fail it on restart.
     scrape_resume_after_restart: int = Field(default=3, ge=0, le=20)
+    # Jobs that carry on after an engine restart (JobManager resume registry). They never start as
+    # part of startup: a background task starts them RESUME_START_DELAY_S after the engine serves,
+    # RESUME_STAGGER_S apart, and at most RESUME_CONCURRENCY of them run a heavy phase (export, prod
+    # publish pre-flight, recompute, bulk accept) at once — all interrupted jobs coming back at the
+    # same moment is the pile-up that took the test engine down on 2026-10-06. A job's restarts are
+    # counted before it starts again; after RESUME_MAX_RESTARTS restarts in a row with no progress
+    # between them, or RESUME_MAX_RESTARTS_TOTAL in all, it fails instead (JobManager._count_restart).
+    resume_start_delay_s: float = Field(default=15.0, ge=0)
+    resume_stagger_s: float = Field(default=10.0, ge=0)
+    resume_concurrency: int = Field(default=2, ge=1, le=16)
+    resume_max_restarts: int = Field(default=3, ge=0, le=20)
+    # The limits above count restarts in a row with no progress between them (a job that moved since
+    # the last restart starts its count again). This one counts every restart of a job, moving or
+    # not, so a job that works a little and then brings the engine down again still stops.
+    resume_max_restarts_total: int = Field(default=10, ge=1, le=50)
     llm_retry_delay_s: float = Field(default=30.0, ge=0)
     # Suggest metadata sends the full page text — cut from the end only when the call would pass
     # llm_max_input_tokens — one call per URL. Suggest patterns sends every crawled URL (+ title) in batches of this size.

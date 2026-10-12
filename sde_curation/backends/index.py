@@ -7,6 +7,7 @@ Both backends only *dispatch*; completion is always read from S3
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -19,6 +20,13 @@ from ..models import Collection, IndexStatus, ValidationReport
 from .s3 import S3
 
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+log = logging.getLogger(__name__)
+# Tag on every indexer task the engine starts (EcsDispatchIndexer.run_task_args). The indexer's ECS
+# cluster is shared with other workloads, and the engine's IAM role may stop only tasks carrying
+# this tag key (infra/stacks/engine_stack.py, StopEngineIndexerTasks). Changing it needs both.
+ENGINE_TASK_TAG = "sde-curation-engine"
 
 
 class IndexError_(RuntimeError):
@@ -35,8 +43,13 @@ class IndexBackend(Protocol):
     name: str
 
     async def dispatch(
-        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False
-    ) -> Dispatch: ...
+        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False,
+        token: str | None = None,
+    ) -> Dispatch:
+        """`token`: a second dispatch with the same token starts no new task and answers with the
+        first one (ECS RunTask `clientToken`). A resume that cannot know whether the interrupted
+        dispatch started a task dispatches again with the same token (H2)."""
+        ...
 
     async def still_running(self, d: Dispatch) -> bool | None:
         """True/False if knowable, None if the backend cannot tell."""
@@ -66,6 +79,7 @@ class LocalSubprocessIndexer:
         self.root = settings.indexer_root
         self.python = settings.resolved_indexer_python
         self._procs: dict[str, asyncio.subprocess.Process] = {}
+        self._tokens: dict[str, Dispatch] = {}
 
     def env(self) -> dict[str, str]:
         s = self.s
@@ -81,8 +95,11 @@ class LocalSubprocessIndexer:
         return env
 
     async def dispatch(
-        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False
+        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False,
+        token: str | None = None,
     ) -> Dispatch:
+        if token is not None and (same := self._tokens.get(token)) is not None:
+            return same  # this process started it already (a subprocess does not outlive the engine)
         if not (self.root / "api_scraper.py").is_file():
             raise IndexError_(f"indexer not found: {self.root / 'api_scraper.py'} (INDEXER_ROOT)")
         if not self.python.is_file():
@@ -96,7 +113,10 @@ class LocalSubprocessIndexer:
             cwd=self.root, env=self.env(), stdout=log, stderr=asyncio.subprocess.STDOUT,
         )
         self._procs[run_id] = proc
-        return Dispatch(external_ref=f"pid:{proc.pid}", detail={"log": str(log.name)})
+        d = Dispatch(external_ref=f"pid:{proc.pid}", detail={"log": str(log.name)})
+        if token is not None:
+            self._tokens[token] = d
+        return d
 
     async def still_running(self, d: Dispatch) -> bool | None:
         run_id = next((k for k, p in self._procs.items() if f"pid:{p.pid}" == d.external_ref), None)
@@ -157,10 +177,12 @@ class EcsDispatchIndexer:
         return self._ecs
 
     def run_task_args(
-        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False
+        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False,
+        token: str | None = None,
     ) -> dict[str, Any]:
         s = self.s
         return {
+            **({"clientToken": token[:64]} if token else {}),
             "cluster": s.indexing_ecs_cluster,
             "taskDefinition": s.indexing_task_family,
             "launchType": "FARGATE",
@@ -175,14 +197,17 @@ class EcsDispatchIndexer:
                 "command": indexer_command(c, run_id, target, allow_high_deletion=allow_high_deletion),
             }]},
             "startedBy": f"sde-curation-engine:{c.collection_id}"[:36],
+            # L14: the cluster is shared, and the engine's role may stop only tasks with this tag
+            "tags": [{"key": ENGINE_TASK_TAG, "value": c.collection_id[:256]}],
         }
 
     async def dispatch(
-        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False
+        self, c: Collection, run_id: str, target: str, *, allow_high_deletion: bool = False,
+        token: str | None = None,
     ) -> Dispatch:
         ecs = self._client()
         resp = await asyncio.to_thread(
-            ecs.run_task, **self.run_task_args(c, run_id, target, allow_high_deletion=allow_high_deletion)
+            ecs.run_task, **self.run_task_args(c, run_id, target, allow_high_deletion=allow_high_deletion, token=token)
         )
         if resp.get("failures"):
             raise IndexError_(f"ecs:RunTask failed: {resp['failures']}")
@@ -202,6 +227,15 @@ class EcsDispatchIndexer:
             d.detail["exit_code"] = (t.get("containers") or [{}])[0].get("exitCode")
             return False
         return True
+
+    async def kill(self, d: Dispatch) -> None:
+        """Stop the indexer task (a curator cancelled the run). Already stopped: nothing to do."""
+        ecs = self._client()
+        try:
+            await asyncio.to_thread(ecs.stop_task, cluster=self.s.indexing_ecs_cluster, task=d.external_ref,
+                                    reason="cancelled in the curation engine")
+        except Exception as e:  # noqa: BLE001 - the run is marked cancelled either way; say why the task may live on
+            log.warning("could not stop indexer task %s: %s", d.external_ref, e)
 
 
 def make_index_backend(settings: Settings) -> IndexBackend:

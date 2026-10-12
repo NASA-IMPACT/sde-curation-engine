@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>History · SDE Curation Engine</title>
+  <link rel="stylesheet" href="/static/app.css?v=<V>">
+  <script src="/static/htmx.min.js?v=<V>"></script>
+  <script src="/static/sse.js?v=<V>"></script>
+  <script src="/static/json-enc.js?v=<V>"></script>
+</head>
+<body hx-ext="sse" sse-connect="/events">
+  <header>
+    <a href="/" class="brand">SDE Curation Engine</a>
+    <span id="conn" class="dot" title="SSE connection"></span>
+
+
+    <details class="menu" id="menu">
+      <summary aria-label="Menu" title="Menu">
+
+        <span class="burger" aria-hidden="true"><i></i><i></i><i></i></span>
+      </summary>
+      <div class="menu-panel" role="menu">
+
+        <a role="menuitem" href="/">Collections</a>
+        <a role="menuitem" href="/jobs">Jobs</a>
+        <a role="menuitem" href="/history">History</a>
+        <a role="menuitem" href="/manual">User manual</a>
+
+
+
+      </div>
+    </details>
+
+  </header>
+  <main>
+<h1>History</h1>
+<p class="muted">Every action by anyone, on any collection, newest first — collection changes, scrapes, curation, indexing and user administration. Rows outlive their collection: a deleted collection's history stays here, marked <span class="muted">deleted</span>.</p>
+
+<form class="toolbar" method="get" action="/history">
+  <input type="search" name="q" value="" placeholder="Filter by who, action, collection id or detail…" autofocus>
+
+  <button type="submit" class="secondary">Filter</button>
+
+</form>
+<section class="card">
+  <h2>Actions <span class="count">13</span></h2>
+  <table>
+    <thead><tr>
+<th class="sorted" aria-sort="descending"><a class="sort" href="/history?sort=at&dir=asc&limit=200" title="sort by at, ascending">At<span class="arrow">▼</span></a></th>
+<th ><a class="sort" href="/history?sort=actor&dir=asc&limit=200" title="sort by by, ascending">By<span class="arrow">⇅</span></a></th>
+<th ><a class="sort" href="/history?sort=collection&dir=asc&limit=200" title="sort by collection, ascending">Collection<span class="arrow">⇅</span></a></th>
+<th ><a class="sort" href="/history?sort=action&dir=asc&limit=200" title="sort by action, ascending">Action<span class="arrow">⇅</span></a></th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/run.org?tab=activity">run.org</a> <small class="muted">run.org</small></td>
+          <td><code>recompute</code></td><td class="muted">8 delta URLs</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/run.org?tab=activity">run.org</a> <small class="muted">run.org</small></td>
+          <td><code>scrape.start</code></td><td class="muted">job #4</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/run.org?tab=activity">run.org</a> <small class="muted">run.org</small></td>
+          <td><code>collection.create</code></td><td class="muted">run.org ← https://run.org</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/ex.org?tab=activity">ex.org</a> <small class="muted">ex.org</small></td>
+          <td><code>url.edit</code></td><td class="muted">title https://ex.org/p4 → Edited by hand</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/ex.org?tab=activity">ex.org</a> <small class="muted">ex.org</small></td>
+          <td><code>promote.urls</code></td><td class="muted">2 → 2 curated, 4 left</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/ex.org?tab=activity">ex.org</a> <small class="muted">ex.org</small></td>
+          <td><code>pattern.add</code></td><td class="muted">exclude */p2</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/ex.org?tab=activity">ex.org</a> <small class="muted">ex.org</small></td>
+          <td><code>ai.bulk_accept</code></td><td class="muted">title × 7 · division × 7 · document_type × 7</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/ex.org?tab=activity">ex.org</a> <small class="muted">ex.org</small></td>
+          <td><code>suggest.metadata</code></td><td class="muted">job #3</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/ex.org?tab=activity">ex.org</a> <small class="muted">ex.org</small></td>
+          <td><code>suggestion.accept</code></td><td class="muted">exclude https://ex.org/p9</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/ex.org?tab=activity">ex.org</a> <small class="muted">ex.org</small></td>
+          <td><code>suggest.patterns</code></td><td class="muted">job #2</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/ex.org?tab=activity">ex.org</a> <small class="muted">ex.org</small></td>
+          <td><code>recompute</code></td><td class="muted">8 delta URLs</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/ex.org?tab=activity">ex.org</a> <small class="muted">ex.org</small></td>
+          <td><code>scrape.start</code></td><td class="muted">job #1</td></tr>
+
+      <tr><td class="nowrap"><TS></td>
+          <td class="small">anonymous</td>
+          <td><a href="/collections/ex.org?tab=activity">ex.org</a> <small class="muted">ex.org</small></td>
+          <td><code>collection.create</code></td><td class="muted">ex.org ← https://ex.org</td></tr>
+    </tbody>
+  </table>
+
+</section>
+</main>
+  <script>
+    // Per-URL edits = exact-URL rules (Dump / Delta / Curated URL tables). When the field still has an
+    // AI suggestion (`ai` = true) the edit goes through /ai/accept so the suggestion is resolved too:
+    // same value → accepted as AI, a different value → "AI, edited".
+    // A refusal's message: the JSON `detail` when the app sent one. A proxy error page (HTML from the
+    // ALB/CloudFront, e.g. 502 Bad Gateway) never reaches the user as raw markup.
+    function errorText(status, statusText, body) {
+      let m = body || statusText;
+      try { m = JSON.parse(m).detail || m; } catch (_) {}
+      if (typeof m !== 'string') return JSON.stringify(m);
+      if (/^\s*</.test(m) || [502, 503, 504].includes(status))
+        return `The server is temporarily unavailable (HTTP ${status}). Please try again in a moment.`;
+      return m;
+    }
+    // The pagers' page box (partials/pager.html): jump to the typed page, clamped to 1..pages. It
+    // clicks a new link placed beside the box, so the jump is boosted exactly when the pager's own
+    // links are (a boosted link's URL is read when htmx processes it: re-pointing › does nothing).
+    function jumpPage(input) {
+      const max = +input.max || 1;
+      const n = Math.min(max, Math.max(1, Math.round(+input.value) || 1));
+      input.value = n;
+      if (String(n) === input.dataset.page) return;
+      input.dataset.page = String(n);  // the blur after an Enter must not jump a second time
+      const link = document.createElement('a');
+      link.href = input.dataset.href.replace('__PAGE__', n);
+      link.hidden = true;
+      input.after(link);
+      htmx.process(link);
+      link.click();
+    }
+    async function postJson(path, body) {
+      const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      if (!r.ok) { alert(errorText(r.status, r.statusText, await r.text())); return false; }
+      return true;
+    }
+    async function editField(cid, url, type, value, ai) {
+      const base = `/api/collections/${encodeURIComponent(cid)}`;
+      const ok = (ai && value)
+        ? await postJson(`${base}/ai/accept`, {url, field: type, value})
+        : await postJson(`${base}/urls`, value ? {url, type, value} : {url, type, value: null});
+      if (ok) location.reload();
+    }
+    function editTitle(cid, url, current, ai) {
+      const v = prompt("Title for\n" + url + "\n\nTip: {title} = scraped title, {collection} = collection name", current);
+      if (v === null) return;
+      if (!v.trim()) { alert("Title cannot be empty. To fall back to the pattern/curated value, delete the exact-URL title rule on the Rules tab."); return; }
+      editField(cid, url, "title", v, !!ai);
+    }
+    // ✎ on an AI division / doc-type badge: preselect the suggested value and hand over to the select.
+    function pickAi(btn, value) {
+      const sel = btn.closest("td").querySelector("select");
+      if (!sel) return;
+      sel.value = value; sel.focus();
+      try { sel.showPicker(); } catch (_) {}
+    }
+    // Delta URLs → promote a selection. Ticks are per page (a promote reloads it). The confirm
+    // text is written onto the button: htmx reads hx-confirm at request time.
+    function pickCount() {
+      const on = [...document.querySelectorAll('input.pick:checked')];
+      const btn = document.querySelector('#promote-bar button'); if (!btn) return;
+      const ai = on.filter(b => b.dataset.ai === '1').length, del = on.filter(b => b.dataset.del === '1').length;
+      document.getElementById('pick-n').textContent = on.length;
+      document.getElementById('pick-warn').textContent =
+        (del ? `${del} removal${del > 1 ? 's' : ''}` : '') + (del && ai ? ' · ' : '') + (ai ? `${ai} with an undecided AI suggestion` : '');
+      btn.disabled = on.length === 0;
+      btn.setAttribute('hx-confirm', `Promote ${on.length} delta URL${on.length > 1 ? 's' : ''} to the curated URLs?`
+        + (del ? `\n${del} of them are removals: their curated rows are dropped and the next index run deletes them.` : '')
+        + (ai ? `\n${ai} still carry an undecided AI suggestion — promoting discards it.` : ''));
+    }
+    function pickAll(box) { document.querySelectorAll('input.pick:not(:disabled)').forEach(b => { b.checked = box.checked; }); pickCount(); }
+    // Edit a pattern suggestion's glob in place, then accept it with the edited match.
+    function editSuggestion(btn, cid, sid, match) {
+      const cell = btn.closest("tr").querySelector("td.match");
+      if (!cell || cell.querySelector("input")) return;
+      cell.dataset.orig = cell.innerHTML;
+      cell.innerHTML = `<span class="inline nowrap"><input size="42" aria-label="edited glob"> <button class="primary mini" type="button">Save &amp; accept</button> <button class="secondary mini" type="button">Cancel</button></span>`;
+      const input = cell.querySelector("input"); input.value = match; input.focus(); input.select();
+      const [save, cancel] = cell.querySelectorAll("button");
+      const restore = () => { cell.innerHTML = cell.dataset.orig; };
+      cancel.onclick = restore;
+      input.onkeydown = (e) => { if (e.key === "Escape") restore(); if (e.key === "Enter") save.click(); };
+      save.onclick = async () => {
+        const v = input.value.trim();
+        if (!v) { alert("The match cannot be empty."); return; }
+        if (await postJson(`/api/collections/${encodeURIComponent(cid)}/suggestions/${sid}/accept`, {match: v})) location.reload();
+      };
+    }
+    // Hamburger menu: close on outside click or Escape.
+    document.addEventListener('click', (e) => { const m = document.getElementById('menu'); if (m && m.open && !m.contains(e.target)) m.open = false; });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { const m = document.getElementById('menu'); if (m) m.open = false; } });
+    // Connection indicator: green when the SSE stream is open.
+    // Polling is the safety net for a live job only: `every Ns [jobLive()]` on the pollers. The header
+    // and the jobs strip carry data-job-live while something is queued or running.
+    function jobLive(scope) { return !!document.querySelector((scope ? scope + ' ' : '') + '[data-job-live]'); }
+    // A running job sends a progress event every second to every open tab, and each one re-fetched
+    // the header and the stepper. `sse:collection[… && sseRefresh(this)], sseRefresh` refreshes at
+    // most once per SSE_REFRESH_MS per element: the first event of a burst at once, the rest folded
+    // into one trailing refresh, so the last event (the job's end) is never dropped — htmx's own
+    // `throttle:` drops it. `every Ns [… && sseQuiet(this, N000)]` keeps the poll for when SSE is silent.
+    // Kept per element id, not on the element: a dashboard row swaps itself out (outerHTML), and the
+    // trailing refresh must reach the row now on the page.
+    const SSE_REFRESH_MS = 3000;
+    const sseState = new Map();  // element id → {last, timer}
+    function sseRefresh(elt) {
+      const s = sseState.get(elt.id) || {last: 0, timer: null};
+      sseState.set(elt.id, s);
+      if (s.timer) return false;  // a trailing refresh is already queued
+      const wait = s.last + SSE_REFRESH_MS - Date.now();
+      if (wait <= 0) { s.last = Date.now(); return true; }
+      s.timer = setTimeout(() => {
+        s.timer = null; s.last = Date.now();
+        const now = document.getElementById(elt.id);
+        if (now) htmx.trigger(now, 'sseRefresh');
+      }, wait);
+      return false;
+    }
+    function sseQuiet(elt, ms) { return Date.now() - ((sseState.get(elt.id) || {}).last || 0) >= ms; }
+    // A job poll that slows down while SSE is live: `sse:collection[… && sseSeen(this) && …], every 2s
+    // [jobPollDue(this, 10000, 4000)]` fetches once per 10 s while the element's SSE events keep
+    // arriving, and once per 4 s after they have been silent for 10 s (a dead stream). The tick is
+    // short so both intervals land on it; 500 ms of slack absorbs timer jitter. With a dead stream,
+    // the header's own poll can clear data-job-live before this poll sees the job's end, so the first
+    // tick after the job stops being live fetches once more; with a live stream the end event did.
+    const pollState = new Map();  // element id → {seen, polled, live}
+    function pollEntry(elt) { const s = pollState.get(elt.id) || {seen: 0, polled: 0, live: false}; pollState.set(elt.id, s); return s; }
+    function sseSeen(elt) { pollEntry(elt).seen = Date.now(); return true; }
+    function jobPollDue(elt, liveMs, deadMs) {
+      const s = pollEntry(elt), now = Date.now(), sseLive = now - s.seen < liveMs, wasLive = s.live;
+      s.live = jobLive();
+      if (!s.live) {
+        if (!wasLive || sseLive) return false;
+        s.polled = now;
+        return true;
+      }
+      if (now - s.polled < (sseLive ? liveMs : deadMs) - 500) return false;
+      s.polled = now;
+      return true;
+    }
+    // A reconnect after a drop fires `sseReopen`: events sent meanwhile are gone, so lists that rely
+    // on them (the dashboard table) re-fetch once instead of polling all the time.
+    let sseDropped = false;
+    document.body.addEventListener('htmx:sseOpen', () => {
+      document.getElementById('conn').classList.add('on');
+      if (sseDropped) { sseDropped = false; htmx.trigger(document.body, 'sseReopen'); }
+    });
+    document.body.addEventListener('htmx:sseError', () => { sseDropped = true; document.getElementById('conn').classList.remove('on'); });
+    // One place for server-side refusals (4xx/5xx). Aborted/replaced requests never alert, and neither
+    // do background refreshes (an `every Ns` poll fires with no triggering event, an SSE refresh with
+    // an sse:* one): the old content stays and the next refresh recovers, while an alert would freeze
+    // the page — and every timer on it — until OK is clicked.
+    document.body.addEventListener('htmx:responseError', (e) => {
+      const ev = e.detail.requestConfig && e.detail.requestConfig.triggeringEvent;
+      const xhr = e.detail.xhr;
+      if (!ev || ev.type.startsWith('sse:')) { console.warn('background refresh failed', xhr.status, e.detail.pathInfo); return; }
+      alert(errorText(xhr.status, xhr.statusText, xhr.responseText));
+    });
+
+  </script>
+</body>
+</html>

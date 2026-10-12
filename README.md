@@ -19,9 +19,13 @@ WEB_COSMOS test indexing, validation gate, prod indexing, notifications.
 cp .env.example .env      # sibling repo paths, AWS values, OPENAI_API_KEY (or LLM_PROVIDER=fake)
 make install              # uv sync if uv is installed, else python3.13 venv + pip -r requirements-dev.txt
 make run                  # http://localhost:8080   (8000 is taken by sde-elastic-wrapper)
-make test                 # 315 tests, incl. a state-matrix that fires every action in every status
+make test                 # all tests in three levels, fastest first (see tests/conftest.py):
+make test-unit            #   unit: no database or Docker, about 10 s
+make test-integration     #   integration: API, database layer, jobs against PostgreSQL
+make test-e2e             #   end-to-end: real crawler/indexer subprocesses, S3 (moto), restarts, browser
 make lint
 ```
+The browser journeys (`tests/e2e/test_browser.py`) need Chromium once: `.venv/bin/python -m playwright install chromium`.
 
 Crawler prerequisite (one-off): the local scrape backend runs `run.py` from
 `../sde-crawl4ai-scraper` with its own Python 3.11 venv:
@@ -368,8 +372,8 @@ their value on the next "Start curating" / recompute.
 - Promote warns when ≥ `PROMOTE_REMOVAL_WARN_RATIO` (default 0.25, and at least 5 rows) of the
   curated set vanished from the crawl — a partial crawl looks exactly like a site that shrank.
 - Live views refresh on SSE **and** poll (5–10 s), so a missed event cannot leave a page stale.
-- Every job ends in `succeeded` or `failed` with the reason shown; jobs orphaned by a crash are
-  marked failed on restart.
+- Every job ends in `succeeded` or `failed` with the reason shown; a job interrupted by a crash
+  or a deploy carries on after the restart, or fails with the reason when it cannot.
 - Server-side refusals surface as an alert with the server's message; nothing fails silently.
 
 ### Working in parallel (several curators at once)
@@ -391,9 +395,10 @@ are in flight — the ceilings come from the systems behind it.
   one job at a time under `flock`; extra jobs are accepted immediately and shown as *queued*
   with how many crawls are ahead, and a queue can wait indefinitely. So scrapes from several
   curators are accepted in parallel but crawled one at a time.
-- *LLM jobs* — each job runs its own pool of `LLM_WORKERS` (default 16) concurrent calls. There
-  is no limiter across jobs: five curators classifying at once is up to 80 in-flight calls.
-  This is the first place you will hit the provider's rate limit.
+- *LLM jobs* — each job runs its own pool of `LLM_WORKERS` (default 16) concurrent calls, and
+  one limit shared by every LLM job caps the engine at `LLM_WORKERS_TOTAL` (default 64) calls in
+  flight. Five curators classifying at once share those 64, so each job runs slower instead of
+  more calls failing on the provider's rate limit.
 - *Index runs* — each dispatches its own ECS task and polls S3. Nothing limits how many run at
   once; runs on different collections are fine as long as the indexer tolerates it.
 - *Bulk curation changes* — on a collection with at least `BULK_JOB_MIN_URLS` (20 000) dump URLs,
@@ -415,13 +420,20 @@ ingest reads the crawl in chunks of 500 pages or 1 MB of text, whichever comes f
 the pooled DB connections afterwards (a 6.7 GB crawl of ~1 MB pages peaks under 300 MB; see
 `docs/architecture.md` §1);
 `patterns.yaml` is written in the background once a collection has more than 2 000 rules (always
-current after a promote and at shutdown). A Suggest-metadata job interrupted by an engine restart
-(a deploy, a crash) is started again for the URLs still missing, at most
-`LLM_RESUME_AFTER_RESTART` (3) times; a job a curator cancelled stays cancelled.
+current after a promote and at shutdown). Every job interrupted by an engine restart (a deploy, a
+crash) carries on after it as the same job; a scrape keeps running on the crawler meanwhile. A job
+fails instead after 3 restarts in a row with no progress between them (`RESUME_MAX_RESTARTS`;
+`LLM_RESUME_AFTER_RESTART` for Suggest metadata, `SCRAPE_RESUME_AFTER_RESTART` for a scrape), or
+after `RESUME_MAX_RESTARTS_TOTAL` (10) restarts in all. A job a curator cancelled stays cancelled.
 
 **Data layer**
-- PostgreSQL through a small connection pool (`DB_POOL_SIZE`, default 16); every `Database`
-  method is one transaction, and status transitions lock the collection row. The job registry
+- PostgreSQL through two connection pools: the work pool (`DB_POOL_SIZE`, default 16) for jobs
+  and curator actions, with no time limit, and the read pool (`DB_READ_POOL_SIZE`, default 12) for
+  page requests (GET), whose statements stop after `DB_READ_STATEMENT_TIMEOUT_S`. A page that
+  slow, or one that waits `DB_READ_WAIT_S` for a free connection, answers 503 + `Retry-After`
+  instead of piling up behind itself; jobs and pages never starve each other. Identical page
+  reads of one collection's counts run once at a time and are shared (a refresh after a change
+  always counts afresh). Every `Database` method is one transaction, and status transitions lock the collection row. The job registry
   and per-collection locks still live in memory, so the ECS service is pinned to one task —
   **do not run two replicas** until those move into the database.
 - Curation edits have no stale-edit check. Two curators editing the same row on the same
@@ -441,8 +453,8 @@ current after a promote and at shutdown). A Suggest-metadata job interrupted by 
 **Guidance**
 - Assign curators to distinct collections — that is the model the app is built around.
 - Expect scrapes to queue on the shared crawler; kick them off early.
-- If several people will run LLM jobs at the same time, lower `LLM_WORKERS` or add a
-  process-wide semaphore in `llm/pool.py` so total in-flight calls stay under the provider limit.
+- If several people run LLM jobs at the same time and the provider still answers with rate
+  limits, lower `LLM_WORKERS_TOTAL` (all jobs together) rather than `LLM_WORKERS` (one job).
 - If two people must share one collection, agree on who edits; the app will not detect a
   stale edit.
 
@@ -450,7 +462,11 @@ current after a promote and at shutdown). A Suggest-metadata job interrupted by 
 | Key | Purpose |
 |---|---|
 | `DATABASE_URL` or `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_SSLMODE` | PostgreSQL. One URL locally (`make db-up` → `postgresql://engine:engine@localhost:5432/engine`); the ECS task gets the parts, with user/password from the RDS secret |
-| `DB_POOL_SIZE` (16) | connections per engine process |
+| `DB_POOL_SIZE` (16) | work-pool connections per engine process (jobs, curator actions; no statement limit) |
+| `DB_READ_POOL_SIZE` (12) | read-pool connections per engine process (page requests) |
+| `DB_READ_STATEMENT_TIMEOUT_S` (30) | a page request's statement is cancelled after this long → 503 |
+| `DB_READ_WAIT_S` (10) | how long a page request waits for a free read connection → 503 |
+| `HEALTH_DB_TIMEOUT_S` (3) | `/health/db` answers 503 when no read connection answers within this long |
 | `BULK_JOB_MIN_URLS` (20000) | dump URLs from which recompute / accept-all run as background jobs (0 = always) |
 | `DATA_DIR` | `collections/<id>/{collection,patterns}.yaml`, index logs, scrape jobs |
 | `CRAWLER_ROOT`, `CRAWLER_PYTHON` | crawl4ai repo and its interpreter |
@@ -469,6 +485,8 @@ current after a promote and at shutdown). A Suggest-metadata job interrupted by 
 | `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-6-luna`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` (per attempt), `LLM_MAX_RETRIES`, `LLM_TEMPERATURE` (unset = model default; reasoning models reject any other value) | LLM assist; any OpenAI-compatible endpoint |
 | `LLM_REASONING_EFFORT` (unset = model default, medium on gpt-5.6+), `LLM_MAX_COMPLETION_TOKENS` (4000), `LLM_SERVICE_TIER` (unset; `flex` ≈ 50% off, slower) | reasoning effort per call; the output budget (answer + reasoning; a call cut off by it is asked again with 4×, then recorded as failed); OpenAI service tier. Reasoning tokens show in the job's token counts |
 | `PROMOTE_REMOVAL_WARN_RATIO` (0.25) | share of the curated set that must vanish from a crawl before Promote warns |
+| `LLM_WORKERS_TOTAL` (64) | LLM calls in flight across every LLM job in the engine together; each job also stays within `LLM_WORKERS` |
+| `RESUME_START_DELAY_S` (15), `RESUME_STAGGER_S` (10), `RESUME_CONCURRENCY` (2), `RESUME_MAX_RESTARTS` (3), `RESUME_MAX_RESTARTS_TOTAL` (10), `LLM_RESUME_AFTER_RESTART` (3), `SCRAPE_RESUME_AFTER_RESTART` (3) | jobs that carry on after an engine restart: they start this long after the engine serves, this far apart, at most this many in a heavy phase at once; a job fails after this many restarts in a row with no progress (per kind), or this many in all |
 | `LLM_WORKERS` (16), `LLM_RETRY_PASSES` (1), `LLM_RETRY_DELAY_S` (30), `LLM_PATTERN_BATCH_URLS` (1000), `LLM_DEDUPE_TITLES` (false), `GLOBAL_EXCLUDES_PATH` | calls in flight per LLM job; end-of-job retries of rate-limited / 5xx / timed-out calls (a quarter of the workers, after the delay); URLs per Suggest-patterns call; true: Suggest metadata re-titles same title + doc type pages by itself (default: flag only); override the packaged global exclude YAML |
 | `APP_PASSWORD`, `SESSION_SECRET`, `SESSION_TTL_S`, `AUTH_COOKIE_SECURE` | login with local accounts (off when `APP_PASSWORD` is empty; the value seeds the bootstrap `admin`); `/health` stays open |
 
@@ -501,7 +519,8 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `GET …/suggestions?state=`, `POST …/suggestions/{sid}/accept\|reject` | pattern suggestions |
 | `POST …/ai/accept\|reject` `{url, field}` | per-URL metadata suggestion |
 | `POST …/ai/bulk` `{decision, field?, url?, conf?}` | decide many at once; an accept without `url` passes over the fields your own rules decide |
-| `GET /health` | `{ok, db, sse_clients}` |
+| `GET /health` | liveness for the ALB: `{ok, sse_clients}`; never touches the database, so a busy database does not get the engine replaced |
+| `GET /health/db` | `{ok, db, pools}` — a read-pool ping within `HEALTH_DB_TIMEOUT_S`, plus both pools' counters; 503 when it does not answer |
 
 ## Testing the workflow by hand
 1. Dashboard → add `https://aurorasaurus.org` (max pages 15) → **Scrape**; watch the spinner, then
@@ -535,7 +554,9 @@ sde_curation/
   jobs.py          JobManager: background tasks, cancel, recovery, SSE events
   events.py        in-process event bus → SSE
   web/             FastAPI app, auth.py (local users, roles, signed sessions), Jinja templates, vendored htmx (+sse, json-enc)
-tests/             pytest; fake crawler fixture, moto for AWS, state-matrix
+tests/             pytest in three levels: unit/ (no database), integration/ (PostgreSQL, in-process fake
+                   crawler), e2e/ (subprocess crawler and indexer, moto S3, restarts); support/ = shared
+                   fixtures, flows, fakes
 infra/             AWS CDK (Python): Fargate + EFS + ALB + CloudFront/WAF; bootstrap/ = GitHub deploy role
 .github/workflows/ deploy.yml (push to dev|test|prod → cdk deploy), test.yml (PRs)
 Dockerfile         python:3.13-slim + pip -r requirements.txt (exported from uv.lock), non-root, uvicorn on 8080
