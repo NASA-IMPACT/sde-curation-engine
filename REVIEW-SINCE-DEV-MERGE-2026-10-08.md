@@ -27,7 +27,7 @@ HEAD. The reproduction tests and scripts are kept outside the repo, in
 and M7), 1 measured and found negligible (M8), and 1 not reproducible locally (M1, needs AWS).
 Finding IDs are kept from the first version of this review; M4 and M8 moved to Low.
 
-**Status (2026-10-12):** every code finding is fixed and committed (`84006aa`, section 8). Two
+**Status (2026-10-12, evening):** merged to dev and stress-tested (section 10); fixes for the stress test's crash-pattern run are in the working tree, not committed. **Earlier status (2026-10-12):** every code finding is fixed and committed (`84006aa`, section 8). Two
 CI fixes followed (`da6a347`, `c599d15`); the GitHub Actions run on `c599d15` passes all levels
 (section 8.4). Every finding in section 9.1 is done in the working tree (2026-10-12), and so is the
 restart-count decision; nothing is committed. The remaining decisions are pending (section 9.2).
@@ -556,6 +556,12 @@ tests check the value.
 - **Recurring check:** run the mutation test on a schedule (last result: 195 of 250 mutants caught,
   78 %).
 
+**Rollback base for the merge to dev (2026-10-12):** manual snapshot
+`sde-curation-engine-dev-db-pre-optimize-20261012` (available, taken 18:35 UTC). Checked first, read
+only: dev's schema is plain V10 (no V11/V15/V19 columns), no jobs queued or running. Rollback =
+`docs/dev-db-rollback.md` Option C (revert the code first, then restore this snapshot with the
+rename swap, then Step 8b). Anything done on dev after 18:35 UTC is lost by that restore.
+
 ### 9.4 After the next deploy
 
 - Confirm that `pg_stat_statements` exists (M1).
@@ -581,3 +587,39 @@ tests check the value.
   running. Remove or keep. The Postgres on port 5432 was not touched.
 - **Backup:** a copy of `tests/` from before the old tests were deleted is in the session
   scratchpad (`tests-before-p4`). It is lost when the session's temporary files are cleared.
+
+---
+
+## 10. Dev deploy and stress test (2026-10-12)
+
+The branch was merged to `dev` (PR #69, `963156e`) and deployed by CI (task definition rev 43).
+Plan, checks and results: `DEV-STRESS-TEST-PLAN-2026-10-12.md`; run folders under
+`~/projects/sde-curation-stress/results/`.
+
+| Step | Result |
+|---|---|
+| Rollback base | manual snapshot `sde-curation-engine-dev-db-pre-optimize-20261012` (V10), taken after a read-only check |
+| 0 Read-only smoke test | passed: V11–V19 ran, parameter group in sync, `pg_stat_statements`, RDS log kept 30 days, key backfill done, alarm emails confirmed |
+| 1 Index and cancel (L14, H2) | passed on `aurorasaurus.org`: tagged task, StopTask by the engine role, run ID as client token, 6/6 validated, 0 deleted |
+| 2 Stress-mode deploy | passed: rev 44, `LLM_PROVIDER=fake`, WAF 20,000, no database change |
+| 3 Small run | passed |
+| 4 Full ramp (as on 2026-10-06) | passed: 111/111 jobs, no 5xx or 503, pages p95 ≤ 3.9 s, RDS CPU ≤ 73 %; better than 2026-10-06 at the heavy levels. RDS was not the bottleneck: 77 % of its active sessions waited on the engine (Suggest metadata's per-row UPDATEs) |
+| 5 Crash pattern, Run A | **no crash** (no restart, no PoolTimeout, `/health` fine; the 2026-10-06 excluded count was stopped at 30 s and answered 503), but **limits failed**: pages p95 8.3 s, RDS CPU 100 % for about 3 minutes, 7 × 503, 1 request with no answer in 90 s; glob delete 48 s in the request |
+
+**Fixes for Run A, built and tested locally (working tree, not committed):**
+- **c, frozen counts:** while a job runs, a collection's pages show the counts stored before it (renewed at most once a minute) and recount once when it ends; the duplicate-title and promote-refusal counts are stored counts too; the Curate step says "counts as of HH:MM:SSZ".
+- **d, shared render:** while a job runs, one tab-body render is shared for 10 s by every viewer of the same page, filters and role.
+- **e1:** a hidden tab skips its table refreshes during a job and catches up when shown.
+- **e3 (off by default):** `JOB_TABLE_REFRESH=on_request`: no table refresh during a job; a notice says what changed and offers "Show the latest". Not wired into the infra.
+- **1a:** every copy of the running job's progress inside the tab follows the header's live progress.
+- **Clamp:** the "on your own rules" count is never negative (found while comparing e1 and e3).
+- Local comparison of e1 and e3, with screenshots: `~/projects/sde-curation-stress/results/local-compare-20261012T222103Z/` (and the page published from it).
+- Tests: unit 521, integration 226, e2e 58 passed; page snapshots updated (browser script and invisible markers only).
+
+**Next:** commit and merge to `dev` (CI deploys normal mode), redeploy stress mode from the merged
+commit, re-run Run A, then put dev back: the plan's section "Re-run after the fixes" (R1–R5).
+
+**Still open from Run A:** the excluded count after a glob delete (17–30+ s at 97K exclusions); a
+glob add or delete on 100K URLs runs 48 s inside the request (should be a job); one request with no
+answer in 90 s (cause not found); Suggest metadata's one UPDATE per page.
+

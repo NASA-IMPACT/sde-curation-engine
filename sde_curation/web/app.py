@@ -82,6 +82,8 @@ from . import auth
 
 _HERE = Path(__file__).parent
 log = logging.getLogger(__name__)
+# While a job runs, one tab-body render is shared this long (the tabs' own refresh interval, 10 s)
+TAB_BODY_SHARE_S = 10.0
 templates = Jinja2Templates(directory=_HERE / "templates")
 
 
@@ -1106,7 +1108,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # what the accept-all buttons would really apply, and what they hold back: a field an SME
         # rule already decides is left for the row's own ✓ (see api_decide_ai_bulk)
         accept_counts = {f: await d.count_ai_suggestions(cid, field=f, skip_human=True) for f in AI_FIELDS}
-        held = {f: ai_counts[f] - accept_counts[f] for f in AI_FIELDS}
+        # never below 0: during a job the two counts can come from different moments (the frozen
+        # counts, _stored; and a job adding suggestions between two queries even without them)
+        held = {f: max(0, ai_counts[f] - accept_counts[f]) for f in AI_FIELDS}
         return {
             "stats": step["stats"],
             "focus": focus, "suggestions": suggestions, "suggestion_counts": suggestion_counts,
@@ -1116,6 +1120,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "last_metadata_job": await d.latest_job_of_kind(cid, "llm_metadata"),
             "classifiable": await d.count_deltas_for_llm(cid),
             "classifiable_all": await d.count_deltas_for_llm(cid, only_missing=False),
+            # while a job runs the counts are a snapshot (db._stored): say when it was taken
+            "counts_as_of": (datetime.fromtimestamp(as_of, UTC).strftime("%H:%M:%SZ")
+                             if (as_of := await d.counts_as_of(cid)) else None),
             "ai_counts": ai_counts, "ai_pending_total": ai_counts["title"] + ai_counts["division"] + ai_counts["document_type"],
             "ai_accept_counts": accept_counts, "ai_held": held, "ai_held_total": sum(held.values()),
             "ai_accept_total": sum(accept_counts.values()),
@@ -1226,13 +1233,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ctx = await collection_context(request, collection_id, tab, set, step)
         return templates.TemplateResponse(request, "collection.html", ctx)
 
+    # (collection, query, admin) → (expires, job id, html): see collection_tab_body
+    shared_tab_bodies: dict[tuple[str, str, bool], tuple[float, int, bytes]] = {}
+
     @app.get("/collections/{collection_id}/tab-body", response_class=HTMLResponse)
     async def collection_tab_body(request: Request, collection_id: str, tab: str = "overview", set: str | None = None,
                                   step: str | None = None):
         """The page's #tab-body alone, for #job-watch's refresh while a job runs: the same context
-        as the page (so the same HTML), without rendering the layout, header and stepper."""
+        as the page (so the same HTML), without rendering the layout, header and stepper.
+
+        While a job runs on the collection, one render is shared for TAB_BODY_SHARE_S by every viewer
+        of the same page, filters and role (X-Tab-Body: shared). Every open tab refreshes every 10 s
+        during a job, and on a 100K collection each render cost 11-12 s of database time under load
+        (dev stress run A, 2026-10-12). Nothing is shared outside a job, so a curator's own edit
+        always shows at once; a new job never reuses the render of the one before."""
+        job_id = db(request).live_job(collection_id)
+        key = (collection_id, str(request.url.query), is_admin(request))
+        now = time.monotonic()
+        if job_id is not None and (hit := shared_tab_bodies.get(key)) and hit[0] > now and hit[1] == job_id:
+            return HTMLResponse(hit[2], headers={"X-Tab-Body": "shared"})
         ctx = await collection_context(request, collection_id, tab, set, step)
-        return templates.TemplateResponse(request, "partials/tab_body.html", ctx)
+        resp = templates.TemplateResponse(request, "partials/tab_body.html", ctx, headers={"X-Tab-Body": "rendered"})
+        if job_id is not None and resp.status_code == 200:
+            for k in [k for k, v in shared_tab_bodies.items() if v[0] <= now]:
+                del shared_tab_bodies[k]
+            shared_tab_bodies[key] = (now + TAB_BODY_SHARE_S, job_id, resp.body)
+        return resp
 
     @app.get("/collections/{collection_id}/header", response_class=HTMLResponse)
     async def collection_header(request: Request, collection_id: str):

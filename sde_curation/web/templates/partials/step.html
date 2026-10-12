@@ -13,7 +13,7 @@
 <div class="step-head">
   <strong>Step {{ info.index }} · {{ info.label }}</strong>
   <span class="state-tag {{ info.state }}">{{ {'done':'done','current':'current step','todo':'upcoming'}[info.state] }}</span>
-  {% if running %}<span class="spinner"></span> <small class="muted">{{ job.kind }} · {{ job_progress(job) }}</small>
+  {% if running %}<span class="spinner"></span> <small class="muted">{{ job.kind }} · <span data-job-progress="{{ job.id }}">{{ job_progress(job) }}</span></small>
     <button class="secondary mini" hx-post="/api/collections/{{ cid }}/jobs/cancel" hx-swap="none" hx-confirm="Cancel the running {{ job.kind }} job?">Cancel</button>{% endif %}
 </div>
 <p class="muted">{{ info.hint }}</p>

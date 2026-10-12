@@ -11,7 +11,7 @@
     </h1>
     <div class="badges">
       {% include "partials/status_badge.html" %}
-      {% if running %}<span class="chip busy"><span class="spinner"></span> {{ job.kind }} · {{ job_progress(job) }}</span>
+      {% if running %}<span class="chip busy"><span class="spinner"></span> {{ job.kind }} · <span data-job-progress="{{ job.id }}">{{ job_progress(job) }}</span></span>
       {% elif job and job.state == 'failed' and high_deletion_refused(job) %}<span class="chip warn" title="{{ job.error }}">⚠ high deletion — confirm to continue</span>
       {% elif job and job.state == 'failed' %}<span class="chip fail" title="{{ job.error }}">✗ last {{ job.kind }} failed</span>{% endif %}
     </div>

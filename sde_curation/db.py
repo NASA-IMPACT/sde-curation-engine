@@ -54,6 +54,9 @@ from .schema import migrate_async
 SOURCE_LABEL = {"sme": "SME", "llm": "AI", "llm_edited": "AI, edited", "global": "global list"}
 
 log = logging.getLogger(__name__)
+# While a job writes, its collection's pages show the counts stored before it; a long job (hours of
+# Suggest metadata) renews them at most this often (see _stored)
+FROZEN_COUNTS_MAX_AGE_S = 60.0
 
 
 class ConflictError(Exception):
@@ -199,6 +202,23 @@ def _stored(fn):
         if db_scope.get() != "read":
             return await fn(self, collection_id, *args, **kwargs)
         key = name + json.dumps([list(args), sorted(kwargs.items())], default=str)
+        if self.counts_frozen(collection_id):
+            # A job is writing: every write moves the version, and counting again after each one is
+            # what saturated the database on 2026-10-12 (dev stress run A). Show what was stored
+            # before the job; count once when it ends. A count never stored is counted, not stored:
+            # storing it would replace the frozen ones.
+            frozen = await self._stats_frozen(collection_id)
+            renew = time.time() - frozen.get("_since", 0) >= FROZEN_COUNTS_MAX_AGE_S  # a long job: once a minute
+            if key in frozen and not renew:
+                return copy.deepcopy(frozen[key])
+            self.stats_computed += 1
+            value = await self._flights.run(
+                (name, collection_id, key), lambda: self._gens.get(collection_id, 0),
+                lambda: fn(self, collection_id, *args, **kwargs),
+            )
+            # a count asked for the first time joins the frozen ones; a renewal starts a new snapshot
+            await self._stats_freeze(collection_id, key, value, renew=renew)
+            return copy.deepcopy(value)
         version, stored = await self._stats_read(collection_id)
         if key in stored:
             return stored[key]
@@ -456,6 +476,9 @@ class Database:
         self._session_users: dict[int, tuple[float, User]] = {}  # user id → (expires, user): session_user
         self._session_user_gen: dict[int, int] = {}  # user id → times its cache entry was cleared
         self.stats_computed = 0  # page counts computed (not served from collection_stats): see _stored
+        # collection_id → the job running on it, kept by insert_job / update_job (finish_job): while a
+        # job writes, its collection's pages show the counts stored before it (counts_frozen, _stored)
+        self._live_jobs: dict[str, int] = {}
         # optional async hook(collection_id, old_status, new_status, note, actor) after every history row
         self.on_status_change = None
 
@@ -515,18 +538,63 @@ class Database:
             return 0, {}
         return row["version"], (row["counts"] if row["computed_version"] == row["version"] else {})
 
+    async def _stats_freeze(self, collection_id: str, key: str, value: Any, *, renew: bool) -> None:
+        """While a job runs: add a count to the stored snapshot whatever its version, or (renew) start
+        a new snapshot with it, tagged with the current version."""
+        try:
+            async with self._conn() as conn:
+                await conn.execute(
+                    "INSERT INTO collection_stats AS s (collection_id, counts) VALUES (%(cid)s, %(new)s || %(since)s)"
+                    " ON CONFLICT (collection_id) DO UPDATE SET"
+                    "  counts = CASE WHEN %(renew)s THEN %(new)s || %(since)s ELSE s.counts || %(new)s END,"
+                    "  computed_version = CASE WHEN %(renew)s THEN s.version ELSE s.computed_version END,"
+                    "  updated_at = now()",
+                    {"cid": collection_id, "new": Jsonb({key: value}), "since": Jsonb({"_since": time.time()}),
+                     "renew": renew},
+                )
+        except psycopg.errors.ForeignKeyViolation:
+            pass
+
+    async def counts_as_of(self, collection_id: str) -> float | None:
+        """While a job runs: when the counts its pages show were counted (unix time); else None."""
+        if not self.counts_frozen(collection_id):
+            return None
+        since = (await self._stats_frozen(collection_id)).get("_since")
+        return float(since) if since is not None else None
+
+    async def _stats_frozen(self, collection_id: str) -> dict[str, Any]:
+        """The counts stored last, whatever version they were counted for."""
+        async with self._conn() as conn:
+            cur = await conn.execute("SELECT counts FROM collection_stats WHERE collection_id=%s", (collection_id,))
+            row = await cur.fetchone()
+        return row["counts"] if row else {}
+
+    def live_job(self, collection_id: str) -> int | None:
+        """The id of the job running on the collection (this process started or resumed it)."""
+        return self._live_jobs.get(collection_id)
+
+    def counts_frozen(self, collection_id: str) -> bool:
+        return self.live_job(collection_id) is not None
+
+    def _track_job(self, j: JobRun) -> None:
+        if j.state in (JobState.QUEUED, JobState.RUNNING):
+            self._live_jobs[j.collection_id] = j.id
+        elif self._live_jobs.get(j.collection_id) == j.id:
+            del self._live_jobs[j.collection_id]
+
     async def _stats_store(self, collection_id: str, version: int, key: str, value: Any) -> None:
         """Store one count for `version`, unless a change has moved the version since it was read."""
         try:
             async with self._conn() as conn:
                 await conn.execute(
                     "INSERT INTO collection_stats AS s (collection_id, version, computed_version, counts)"
-                    " VALUES (%(cid)s, %(v)s, %(v)s, %(new)s)"
+                    " VALUES (%(cid)s, %(v)s, %(v)s, %(new)s || %(since)s)"
                     " ON CONFLICT (collection_id) DO UPDATE SET"
-                    "  counts = CASE WHEN s.computed_version = %(v)s THEN s.counts || %(new)s ELSE %(new)s END,"
+                    "  counts = CASE WHEN s.computed_version = %(v)s THEN s.counts || %(new)s"
+                    "           ELSE %(new)s || %(since)s END,"
                     "  computed_version = %(v)s, updated_at = now()"
                     " WHERE s.version = %(v)s",
-                    {"cid": collection_id, "v": version, "new": Jsonb({key: value})},
+                    {"cid": collection_id, "v": version, "new": Jsonb({key: value}), "since": Jsonb({"_since": time.time()})},
                 )
         except psycopg.errors.ForeignKeyViolation:
             pass
@@ -2157,7 +2225,7 @@ class Database:
                 (collection_id, url),
             )
 
-    @_coalesced
+    @_stored
     async def incomplete_counts(self, collection_id: str, urls: list[str] | None = None) -> dict[str, int]:
         """Delta URLs promote would refuse (see _UNPROMOTABLE): how many, and why.
         `title` counts only the rows with no title at all: a row with no title rule is indexed under
@@ -2242,7 +2310,7 @@ class Database:
             )
             return list(await cur.fetchall())
 
-    @_coalesced
+    @_stored
     async def duplicate_title_counts(self, collection_id: str) -> dict[str, int]:
         """URLs whose title and document type another page of the collection will also have (see
         _PROJECTED_TITLES), how many distinct title + type combinations they share (`titles`), and
@@ -2543,6 +2611,7 @@ class Database:
                 ),
             )
             j.id = (await cur.fetchone())["id"]
+        self._track_job(j)
         return j
 
     async def update_job(self, j: JobRun) -> None:
@@ -2552,6 +2621,7 @@ class Database:
                    finished_at=%s WHERE id=%s""",
                 (j.state, j.run_id, j.external_ref, Jsonb(j.progress), j.error, j.finished_at, j.id),
             )
+        self._track_job(j)  # finish_job comes through here: the counts thaw before the end is announced
 
     async def finish_job(self, j: JobRun, state: JobState, error: str | None = None) -> None:
         j.state, j.error, j.finished_at = state, error, utcnow()

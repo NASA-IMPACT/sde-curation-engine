@@ -35,9 +35,11 @@
   </header>
   <main>
 
+
 <div id="job-watch" hx-get="/collections/ex.org/tab-body?tab=rules" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:drop"
      hx-on::config-request="event.detail.path = '/collections/ex.org/tab-body' + location.search"
-     hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded&quot;') || detail.data.includes('&quot;state&quot;: &quot;failed&quot;'))], every 2s [jobPollDue(this, 10000, 4000)], sseReopen from:body"></div>
+     hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded&quot;') || detail.data.includes('&quot;state&quot;: &quot;failed&quot;')) && visibleOrLater(this)], every 2s [jobPollDue(this, 10000, 4000)], shownAgain, sseReopen from:body"></div>
+
 
 <div id="wb-header" hx-get="/collections/ex.org/header"
      hx-trigger="sse:collection[detail.data.includes('&quot;ex.org&quot;') && sseRefresh(this)], sseRefresh, every 10s [jobLive() && sseQuiet(this, 10000)], sseReopen from:body" hx-sync="this:replace" hx-swap="innerHTML">
@@ -509,7 +511,88 @@
     const pollState = new Map();  // element id → {seen, polled, live}
     function pollEntry(elt) { const s = pollState.get(elt.id) || {seen: 0, polled: 0, live: false}; pollState.set(elt.id, s); return s; }
     function sseSeen(elt) { pollEntry(elt).seen = Date.now(); return true; }
+    // A hidden tab (another tab in front, a minimised window) skips its job refreshes and catches up
+    // once, with `shownAgain`, when it is shown again: every open tab refreshing its table during a
+    // job held the dev database at 100 % CPU on 100K collections (stress run A, 2026-10-12).
+    const missedWhileHidden = new Set();  // element ids
+    function visibleOrLater(elt) {
+      if (document.visibilityState !== 'hidden') return true;
+      missedWhileHidden.add(elt.id);
+      return false;
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') return;
+      for (const id of missedWhileHidden) {
+        const elt = document.getElementById(id);
+        if (elt) htmx.trigger(elt, 'shownAgain');
+      }
+      missedWhileHidden.clear();
+    });
+    // JOB_TABLE_REFRESH=on_request: the job-watch poll only notices a job's end when the event
+    // stream is dead (the end event refreshes the table otherwise), and #job-news tells the curator
+    // what the running job has changed since the table was shown.
+    function jobEndPollDue(elt) {
+      if (!visibleOrLater(elt)) return false;
+      const s = pollEntry(elt), wasLive = s.live, sseLive = Date.now() - s.seen < 10000;
+      s.live = jobLive();
+      return !s.live && wasLive && !sseLive;
+    }
+    const JOB_LABELS = {scrape: 'The crawl', llm_metadata: 'Suggest metadata', llm_patterns: 'Suggest exclusions',
+      llm_titles: 'Regenerate titles', index_test: 'Index to test', index_prod: 'Index to prod', validate: 'Validation',
+      recompute: 'Recompute', bulk_suggestions: 'Accepting suggestions', bulk_ai: 'Accepting AI metadata'};
+    const jobNewsState = {shownAt: new Date(), doneAt: null, lastDone: null};
+    function jobNews(data) {
+      const box = document.getElementById('job-news');
+      if (!box || data.collection_id !== box.dataset.cid || !data.job) return;
+      const job = data.job, live = job.state === 'running' || job.state === 'queued';
+      if (!live) { box.hidden = true; return; }
+      const done = typeof job.progress?.done === 'number' ? job.progress.done : null;
+      if (jobNewsState.doneAt === null) jobNewsState.doneAt = done;
+      jobNewsState.lastDone = done;
+      // news only: at least 10 s after the table was shown (the live refresh's own interval: the
+      // notice does not flicker back right after "Show the latest"), and more done since then
+      // (a job that reports no count: the 10 s alone)
+      const news = Date.now() - jobNewsState.shownAt >= 10000
+        && (done === null || jobNewsState.doneAt === null || done > jobNewsState.doneAt);
+      if (!news) return;
+      const since = jobNewsState.shownAt.toISOString().slice(11, 19) + 'Z';  // UTC, as everywhere on the page
+      const more = done !== null && jobNewsState.doneAt !== null && done > jobNewsState.doneAt
+        ? ` · ${(done - jobNewsState.doneAt).toLocaleString()} more done since then` : '';
+      box.querySelector('.job-news-text').textContent =
+        `${JOB_LABELS[job.kind] || 'A job'} is changing this collection. This table shows it as it was at ${since}${more}.`;
+      box.hidden = false;
+    }
+    function showLatest() {
+      jobNewsState.shownAt = new Date(); jobNewsState.doneAt = jobNewsState.lastDone;
+      const watch = document.getElementById('job-watch');
+      if (watch) htmx.trigger(watch, 'showLatest');
+      const box = document.getElementById('job-news');
+      if (box) box.hidden = true;
+    }
+    document.body.addEventListener('htmx:sseMessage', (e) => {
+      if (e.target.id !== 'job-watch' || !e.detail || typeof e.detail.data !== 'string') return;
+      try { jobNews(JSON.parse(e.detail.data)); } catch (err) { /* not a collection event */ }
+    });
+    // The header refreshes from the progress events all along; a running job's progress text inside
+    // the tab body only refreshes with the table. Copy the header's text into every other copy, so
+    // the page never shows two progress numbers (JOB_TABLE_REFRESH=on_request leaves the table as it is).
+    document.body.addEventListener('htmx:afterSettle', (e) => {
+      const header = document.getElementById('wb-header');
+      if (!header || !(e.target === header || header.contains(e.target))) return;
+      for (const live of header.querySelectorAll('[data-job-progress]')) {
+        for (const copy of document.querySelectorAll(`[data-job-progress="${live.dataset.jobProgress}"]`)) {
+          if (!header.contains(copy)) copy.textContent = live.textContent;
+        }
+      }
+    });
+    document.body.addEventListener('htmx:afterRequest', (e) => {
+      // the job-watch fetch (Show the latest, the job's end, a tab shown again) made the table current
+      if (e.detail.elt && e.detail.elt.id === 'job-watch' && e.detail.successful) {
+        jobNewsState.shownAt = new Date(); jobNewsState.doneAt = jobNewsState.lastDone;
+      }
+    });
     function jobPollDue(elt, liveMs, deadMs) {
+      if (!visibleOrLater(elt)) return false;
       const s = pollEntry(elt), now = Date.now(), sseLive = now - s.seen < liveMs, wasLive = s.live;
       s.live = jobLive();
       if (!s.live) {
