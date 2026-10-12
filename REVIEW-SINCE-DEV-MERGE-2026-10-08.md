@@ -27,8 +27,10 @@ HEAD. The reproduction tests and scripts are kept outside the repo, in
 and M7), 1 measured and found negligible (M8), and 1 not reproducible locally (M1, needs AWS).
 Finding IDs are kept from the first version of this review; M4 and M8 moved to Low.
 
-**Status (2026-10-09):** every code finding is fixed in the working tree, not committed (section 8).
-The infrastructure, runbook and documentation findings, and the decisions, are pending (section 9).
+**Status (2026-10-12):** every code finding is fixed and committed (`84006aa`, section 8). Two
+CI fixes followed (`da6a347`, `c599d15`); the GitHub Actions run on `c599d15` passes all levels
+(section 8.4). Every finding in section 9.1 is done in the working tree (2026-10-12), and so is the
+restart-count decision; nothing is committed. The remaining decisions are pending (section 9.2).
 
 ---
 
@@ -246,14 +248,14 @@ minor, hygiene, documentation, or only under a non-default setting.
 | L6 | `replace_pattern_suggestions` writes without marking the change. Unused today. | Reproduced: page shows 0 suggestions, table has 2. Delete it or mark it. |
 | L7 | A review round stays open after its queue empties without a full promote. | Reproduced via Re-curate everything → partial promote of all but one → ✗ the last: `delta_count=0 status=curated review_round=True`; a later edit set back to its original value stays queued. |
 | L8 | A race in the 30 s login cache keeps a just-demoted user's old row. | Reproduced: role in DB `curator`, cached `admin`, the demoted user's admin-only page answers 200 for up to 30 s. |
-| L9 | Runbooks tell operators to check `/health` for `"db": "ok"`. | Confirmed: `docs/rds-cutover.md:23`, `docs/rds-migration.md:127`; `/health` no longer has that field; `/health/db` does and requires login (paths are matched exactly). |
+| L9 | **Done (2026-10-12, working tree, not committed).** `docs/rds-cutover.md` and `docs/rds-migration.md` now say: sign in, then check `/health/db` for `"db": "ok"`. | the first deploy to test |
 | L10 | A stale crawl-failure flag makes the scoped recompute's `kept` count differ from the full one. | Reproduced: full `kept=0`, scoped `kept=1`. Wider than first stated: the page (`step_context`) shows it too; the diff never clears the flag on modified rows. |
-| L11 | The 2 s slow-statement log writes bind parameters, with no log retention. | Confirmed: no retention on the RDS log group; a local run logged a full 20,000-character parameter. Correction: the log export already existed at `d8cbfbb`; only the 2 s threshold is new; page text is written by COPY, URL arrays are bind parameters. |
-| L12 | The `DbConnections > 80` alarm cannot fire from the engine (maximum 28 connections). | Confirmed from the template and settings. |
-| L13 | Rollback runbook: `--max-allocated-storage 100` vs dev's 200 (test 500); reverting removes the parameter group, which reboots again. | Confirmed: `docs/dev-db-rollback.md:212, :308`. |
-| L14 | `ecs:StopTask` covers every task in the indexer cluster. | Confirmed from the template: no condition or tag scope. |
-| L15 | Stale documents. | Confirmed, wider than stated: `docs/architecture.md:368, 425, 447, 461` and `README.md:394–395, 449` say LLM calls across jobs are unbounded; the README lacks `LLM_WORKERS_TOTAL` and the four `RESUME_*` settings; `CHANGELOG-2026-10-06.md:147` says "no alarms"; `.github/workflows/deploy.yml:9` says in-flight jobs are marked failed on deploy. |
-| L16 | Suggest metadata counts each page's tokens on the event loop: 0.2–0.4 s freezes at 100K (also in the baseline). | Measured (stress run). |
+| L11 | **Done (2026-10-12, working tree, not committed).** The parameter group sets `log_parameter_max_length = 1024`: a slow statement's bind parameters are cut to their first 1,024 characters. The exported RDS log group keeps 1 month (`cloudwatch_logs_retention`, the same as the engine's log; CDK adds a small log-retention Lambda). The infra test is no longer `xfail`. I believe `log_parameter_max_length` applies without a reboot; not checked on AWS. | soon after |
+| L12 | **Done (2026-10-12, working tree, not committed).** The alarm fires above `ENGINE_MAX_DB_CONNECTIONS + 12` = 40 connections for 5 minutes (`engine_stack.py`). Under load the engine keeps both pools full (29–31 connections in the 2026-10-08 stress run, pages still about 1 s), so a count near 28 is normal; above 40 means a second engine task or a leaked connection. `tests/unit/test_config.py` fails if the pool defaults stop adding up to 28. Infra test no longer `xfail`; the container is unchanged. | soon after |
+| L13 | **Done (2026-10-12, working tree, not committed).** `docs/dev-db-rollback.md`: `--max-allocated-storage 200` (dev; test is 500) in both restore commands; Option A now warns that the revert detaches the parameter group and reboots the database again. Also: Option E's compensating migration becomes V20 now that V19 exists (note added). `infra/README.md` had the same stale 100 GB; corrected. | the first deploy to test |
+| L14 | **Done (2026-10-12, working tree, not committed).** The engine tags every indexer task it starts (`sde-curation-engine` = collection ID, `backends/index.py` `ENGINE_TASK_TAG`). IAM: `ecs:StopTask` only on tasks with that tag (`StopEngineIndexerTasks`); `ecs:TagResource` only while running a task (`ecs:CreateAction = RunTask`; AWS refuses a tagged `RunTask` without it); `ecs:DescribeTasks` unchanged. Unit test for the tag, infra test no longer `xfail`. **Deploy it with no index job running** (a resume across this deploy would get `ConflictException`, and tasks started before it carry no tag), then run one Index to test on dev and cancel one. | soon after |
+| L15 | **Done (2026-10-12, working tree, not committed).** `docs/architecture.md` (LLM limit, restart behaviour, singleton note, known risks), `README.md` (LLM limit, guidance, restart paragraph, settings table: `LLM_WORKERS_TOTAL` and the seven `RESUME_*` settings), `docs/deploy-dev.md` (deploys no longer fail jobs), `CHANGELOG-2026-10-06.md:147` (an update note; the changelog itself is history). `.github/workflows/deploy.yml:9` was already correct. | soon after |
+| L16 | **Done (2026-10-12, working tree, not committed).** Suggest metadata and Regenerate titles build their prompts (count and cut the page text) on a worker thread (`llm/tasks.py`). Measured: a 3M-character page takes 150 ms to encode, and `tiktoken` lets the loop run meanwhile (12 ms worst pause). Regenerate titles also skips counting when the pages fit by bytes. New unit tests run a call on a 3M-character page beside a loop ticker: before, the loop stopped for 157 ms and 588 ms; after, under 40 % of one encoding. Not explained: the 0.2–0.4 s freezes of the stress run used 3,000-character pages, where counting takes about 1 ms; they may come from something else. | soon after |
 | L17 | Cancelling a metadata job during its database write. | Reproduced, worse than first stated: the batch being written is lost (`answers received=400 saved=0` with a widened batch), and the resume asks those pages again (paid twice); about 25 pages per write in progress at shutdown with the real batch size. The final data is correct. |
 
 ---
@@ -364,8 +366,8 @@ the 2026-10-06 crash (`0361da2`).
 
 ## 8. Fixes (2026-10-09)
 
-**Status:** all 19 code findings are fixed in the working tree. Nothing is committed. The 11
-infrastructure, runbook and documentation findings are still open (section 9).
+**Status:** all 19 code findings are fixed, committed as `84006aa` on `featuure/optimize-app`.
+The 11 infrastructure, runbook and documentation findings are still open (section 9).
 
 **How each fix was checked.** Every code finding had a test that failed before the fix. The test
 was marked `xfail(strict=True)` until the fix, then the mark was removed and the test passed. For
@@ -373,15 +375,29 @@ three fixes without a test of their own (the cancel half of H2, the restart-limi
 the job marker of M4/M5/L2), a new test was added and shown to fail with the fix taken out, or the
 contract test was extended to check the real and fake databases against each other.
 
-**Results after the fixes:**
+**Results after the fixes.** Local is a 14-core laptop. CI is the GitHub Actions run 38023365460
+on `c599d15` (2026-10-10), pytest's own times. The gates are from `TEST-STRATEGY-2026-10-09.md`
+section 6.
 
-| Level | Result | Time | Gate |
+| Level | Local | CI (GitHub Actions) | Gate |
 |---|---|---|---|
-| Unit | 511 passed | 12 s | under 20 s: met |
-| Integration | 209 passed | 99 s | under 90 s: **9 s over** |
-| E2E | 56 passed | 111 s | under 4 min: met |
+| Unit | 511 passed, 12 s | 509 passed, 2 skipped, 24 s | under 20 s: met locally, **4 s over on CI** |
+| Integration | 209 passed, 99 s | 209 passed, 168 s | under 90 s: **9 s over locally, 78 s over on CI** |
+| E2E | 56 passed, 111 s | 56 passed, 118 s | under 4 min: met on both |
+| Infra synth | not re-run after the fixes | 23 passed, 5 xfailed, 11 s | none |
 
-Lint (`ruff`) is clean. The L5 deadlock test depends on timing; it passed on 3 separate runs.
+The 2 CI skips are expected: `tests/unit/test_index.py` and `tests/unit/test_publish.py` need the
+`sde-api-scrapers` repo, which CI does not check out.
+
+Lint (`ruff`) is clean. The L5 deadlock test depends on timing; it passed on 3 separate local runs
+and on CI.
+
+**Whole CI job:** 7 min 11 s (04:14:33 to 04:21:44). By step: install 54 s, unit 28 s,
+integration 2 min 50 s, Chromium install 26 s, e2e 2 min 0 s, infra synth 12 s, the rest
+about 21 s. The last green run before the test redesign (`9152447`, 2026-10-08) took 7 min 31 s,
+with all tests in one step (449 passed in 377 s). So the three levels together now take about the
+same time as the old single suite (310 s against 377 s of pytest time), and CI now shows which
+level failed.
 
 ### 8.1 What was fixed
 
@@ -424,8 +440,15 @@ Lint (`ruff`) is clean. The L5 deadlock test depends on timing; it passed on 3 s
 - **Migration V19** adds two columns, both cheap: `delta_urls.ai_job` (nullable) and
   `collections.deltas_current` (default true). A collection that is crawled but not yet recomputed
   when V19 lands keeps the old H1 behaviour until its next Start curating.
-- **ECS token window:** ECS keeps a `clientToken` for a limited time. How long is not verified. A
-  resume after a longer outage could still start a second task.
+- **ECS token window (checked 2026-10-12, AWS "Ensuring idempotency" page):** a `RunTask`
+  `clientToken` is kept for 24 hours, or until 1 hour after the task stops, whichever is shorter.
+  So a resume within that window gets the same task back. A resume more than 1 hour after the
+  first task stopped starts a second task for the same run (it indexes the same export again: a
+  wasted run, not wrong data). Same token with **different** parameters fails with
+  `ConflictException`, which carries the existing task ARNs (`resourceIds`). Today that fails the
+  job. Follow-up: on `ConflictException`, adopt the task in `resourceIds`. This matters for L14:
+  adding tags to `RunTask` changes its parameters, so a resume across the deploy that adds them
+  would hit it.
 - **Regenerate titles with a broken model:** when every model call fails, the job now ends with
   titles made from the URLs and records the error in `titles_error`. Before, the job failed.
 - **Suggest metadata jobs started before this deploy** have no `ai_job` marks and no stored
@@ -433,6 +456,22 @@ Lint (`ruff`) is clean. The L5 deadlock test depends on timing; it passed on 3 s
 - **Contract test finding:** the first version of `urls_titled_by_job` also returned pages the job
   failed on, which keep an older title. The contract test caught it; both databases now leave those
   pages out.
+
+### 8.4 CI fixes after the commit (2026-10-10)
+
+The first three pushes with the new test layout failed in the unit step on GitHub Actions. Both
+causes were network calls that the unit tests' network guard blocks. They did not show locally,
+because the laptop had the needed file and credentials already.
+
+| Run | Commit | Result | Cause | Fix |
+|---|---|---|---|---|
+| 38020763164 | `bbe8160` | failed, unit step | the tokenizer download, as for `84006aa` | the same as for `84006aa` |
+| 38022646373 | `84006aa` | failed, unit step: 17 tests | `tiktoken` downloads its `o200k_base` tokenizer file on first use. The runner has no cached copy. | `da6a347`: `test.yml` and `deploy.yml` fetch the tokenizer in a step before the unit tests. |
+| 38022941200 | `da6a347` | failed, unit step: 2 tests | Creating a `boto3` S3 client looks for AWS credentials. The runner has none, so `botocore` asks the EC2 metadata service (a network call). Seen in the revalidate tests in `tests/unit/test_jobs_index.py`. | `c599d15`: the unit network guard (`tests/unit/conftest.py`) sets fake AWS credentials and `AWS_EC2_METADATA_DISABLED=true`, and clears `AWS_PROFILE`. A unit test can also no longer use a developer's real AWS credentials. |
+| 38023365460 | `c599d15` | **passed**, all levels | | |
+
+Both failures were reproduced locally before the fix: with an empty `TIKTOKEN_CACHE_DIR` (17
+failed), and with the AWS credentials hidden (2 failed).
 
 ---
 
@@ -442,24 +481,60 @@ Lint (`ruff`) is clean. The L5 deadlock test depends on timing; it passed on 3 s
 
 | # | What to do | Before |
 |---|---|---|
-| M1 | Correct the reboot comment in `infra/stacks/engine_stack.py` and the deploy notes: the first deploy that attaches the parameter group reboots the database (about 1–2 minutes). Deploy when no jobs run. After the deploy, check that the `pg_stat_statements` extension exists. | the merge to dev |
-| M6 | Subscribe the alarm topic. **Needs an email or chat address from Bernard.** | the first deploy to test |
-| M7 | Add `HealthyHostCount < 1` for 3 minutes (missing data as breaching) and an alarm on `HTTPCode_ELB_5XX_Count`. | the first deploy to test |
-| M11 | Correct `docs/dev-db-rollback.md:187` and `infra/README.md:91`: a restored database resumes its running jobs, including Index to prod. Tell the operator to mark them failed before starting the engine. | the first deploy to test |
+| M1 | **Done (2026-10-12, working tree, not committed).** The comment in `engine_stack.py` now says the first deploy that attaches the parameter group reboots the database (CloudFormation reboots on attach because of the static `shared_preload_libraries`). `infra/README.md` has a "First deploy with the parameter group" note: deploy with no jobs running, tell the curators, then check that the `pg_stat_statements` extension exists. | the merge to dev |
+| M6 | **Done in the working tree (2026-10-12), not committed.** The alarm topic emails `bb0008@uah.edu` and `srk0024@uah.edu` (`infra/config.py` `alarm_emails`, `engine_stack.py` `_alarms`). The infra test is no longer `xfail`. After each environment's first deploy, both addresses must click the AWS "Confirm subscription" email; until then they receive nothing. | the first deploy to test |
+| M7 | **Done (2026-10-12, working tree, not committed).** Two alarms: `NoHealthyEngine` (`HealthyHostCount` < 1 for 3 minutes, missing data counts as breaching) and `Elb5xx` (`HTTPCode_ELB_5XX_Count` > 10 in 5 minutes). The infra test is no longer `xfail`. A deploy's own gap (about 90 s) stays under the 3 minutes; a service scaled to 0 (the rollback runbook's Step 4) does fire it. | the first deploy to test |
+| M11 | **Done (2026-10-12, working tree, not committed).** `infra/README.md` and `docs/dev-db-rollback.md` now say that jobs resume after a restart. The rollback runbook has a new Step 8b: fail the jobs the restored database calls running, from a one-off task, before the engine starts; then stop any indexer task by hand. The command was checked on a throwaway Postgres; not yet run on AWS. | the first deploy to test |
 | L9 | Correct `docs/rds-cutover.md:23` and `docs/rds-migration.md:127`: `/health` has no `"db"` field. | the first deploy to test |
 | L13 | Correct `docs/dev-db-rollback.md:212, :308`: storage flag values; reverting removes the parameter group and reboots again. | the first deploy to test |
 | L11 | Set a retention on the RDS log group. Decide whether the 2 s slow-statement log may contain bind parameters. | soon after |
 | L12 | Remove or lower the `DbConnections > 80` alarm (the engine opens at most 28). | soon after |
-| L14 | Scope `ecs:StopTask` to the engine's tasks (depends on the open question about the cluster). | soon after |
+| L14 | Scope `ecs:StopTask` to the engine's tasks. **The cluster is shared with other workloads (Bernard, 2026-10-12), so this is needed.** Plan: tag each task at `RunTask` (adds `ecs:TagResource` for `RunTask` only) and allow `StopTask` only on tasks with that tag. Must be checked on AWS after the deploy: a missing permission would fail every Index to test. Tasks started before the deploy carry no tag and cannot be stopped by the engine. | soon after |
 | L15 | Update stale documents: `docs/architecture.md:368, 425, 447, 461`; `README.md:394–395, 449` (add `LLM_WORKERS_TOTAL` and the `RESUME_*` settings); `CHANGELOG-2026-10-06.md:147`; `.github/workflows/deploy.yml:9`. | soon after |
 | L16 | Move Suggest metadata's per-page token count off the event loop (0.2–0.4 s freezes at 100K). This is code, but not a regression. | soon after |
 
+**Also changed 2026-10-12 (Bernard):** `LLM_WORKERS_TOTAL` is 64 (was 32), in the app default
+(`config.py`) and in every environment (`infra/config.py`). Several LLM jobs at once now share 64
+calls in flight. If the OpenAI account answers with more rate limits, lower it again. Unit and infra
+tests check the value.
+
 ### 9.2 Decisions for Bernard
 
-- **Promote vs Regenerate titles:** promote refuses some duplicate titles that Regenerate titles
-  does not change (pages whose AI title is held back as pending). Align them, or accept it.
-- **Access rules:** a curator can index to prod and read `/api/audit` and `/docs`. Keep, or make
-  admin-only.
+**Decided 2026-10-12:**
+
+- **Alarm addresses (M6):** `bb0008@uah.edu` and `srk0024@uah.edu`. Done (section 9.1).
+- **Index to prod:** curators keep it. No change.
+- **Indexer cluster:** shared with other workloads. L14 is needed (section 9.1).
+- **Promote vs Regenerate titles:** the flow Bernard wants: after Suggest metadata finds
+  duplicates, the curator runs Regenerate titles, which suggests distinct titles. If the curator
+  accepts them and no duplicate is left, promote goes ahead. If the curator rejects them and the
+  duplicate is still there, promote refuses. **The code already does this.** Promote checks the
+  titles it would write: decided values only, never an undecided AI title. New test
+  `test_regenerated_titles_promote_once_accepted_and_never_while_still_shared`
+  (`tests/integration/test_g1_duplicate_titles.py`) covers four cases: both undecided (refused),
+  both accepted (promotes), one accepted and one rejected (promotes, the titles differ), both
+  rejected (refused). It fails if promote counts undecided AI titles. **The message is fixed
+  (2026-10-12, working tree):** when duplicate rows have an undecided AI title, the Curate step and
+  promote's 409 say how many are waiting for a decision and link to them
+  (`?tab=delta&missing=true&ai=title`); Regenerate titles is offered only for a page that still
+  shares its title after the decision. New count `duplicate_undecided` in `incomplete_counts`
+  (real and fake database, contract test). Tests: a unit test of the 409 text and two page tests.
+
+- **Restart count (section 7 question):** a restart counts against a job only while it makes no
+  progress. **Done (2026-10-12, working tree, not committed).** `restarts` now counts the restarts
+  in a row with no change in the job's progress between them, and starts again from 0 when the
+  job moved. The per-kind limits stay (3). A new lifetime limit, `RESUME_MAX_RESTARTS_TOTAL` (10),
+  counts every restart and stops a job that moves a little and then brings the engine down again.
+  Applies to every job kind, scrape included. The failure message now says "… engine restarts
+  without progress" or "… engine restarts in all". Unit tests (moved → count starts again, for a
+  resumed job and a scrape; lifetime limit; default 10) were red before the code and fail with
+  either half taken out. Unit 516, integration 215, e2e 56 passed.
+
+**Still open:**
+
+- **Access to `/api/audit` and `/docs`:** `/api/audit` returns the History page's activity log as
+  JSON, and curators can already open the History page, so it shows them nothing new. `/docs` is
+  FastAPI's generated API reference. It lists every route and shows no data. Recommendation: keep both.
 - **Unreachable code:** the last-admin lockout guard has a branch no request can reach. Remove it, or
   leave it as a safety net.
 - **The open questions in section 7:** `/health/db` behind login; whether the indexer cluster is
@@ -468,11 +543,15 @@ Lint (`ruff`) is clean. The L5 deadlock test depends on timing; it passed on 3 s
 
 ### 9.3 Test strategy (TEST-STRATEGY-2026-10-09.md, step P5)
 
-- **Integration time:** the level takes 99 s against its 90 s gate. The largest tests are the
+- **Integration time:** the level takes 99 s locally and 168 s on CI, against its 90 s gate. The largest tests are the
   per-URL twin test (25 s) and the L5 deadlock test (18 s).
 - **Faster integration level (Bernard's decision):** let the app run on the in-memory fake
   database, so most page and route tests move to the unit level.
-- **CI timing:** measure the three levels in GitHub Actions and CircleCI.
+- **CI timing: measured (section 8).** GitHub Actions runs the levels 1.3 to 2 times slower than
+  the laptop: unit 24 s, integration 168 s, e2e 118 s. Integration is the level to speed up: it is
+  78 s over its gate on CI. Decide whether the gates apply to the laptop or to CI. The repo has
+  no CircleCI configuration; "CircleCI" in the test strategy refers only to two of its blog
+  articles.
 - **Docs:** describe the test layout in the README and docs.
 - **Recurring check:** run the mutation test on a schedule (last result: 195 of 250 mutants caught,
   78 %).
@@ -482,6 +561,9 @@ Lint (`ruff`) is clean. The L5 deadlock test depends on timing; it passed on 3 s
 - Confirm that `pg_stat_statements` exists (M1).
 - Confirm that migration V19 ran and that the key backfill finished.
 - Watch the first index run after a restart: one ECS task per run (H2).
+- After the deploy that brings L14: run one Index to test on dev and check that it starts (the new
+  `ecs:TagResource` permission), then cancel one and check that its ECS task stops.
+- Both alarm addresses confirm their AWS subscription email (M6).
 
 ### 9.5 Not started
 
@@ -490,8 +572,11 @@ Lint (`ruff`) is clean. The L5 deadlock test depends on timing; it passed on 3 s
 
 ### 9.6 Housekeeping
 
-- **Commit:** nothing is committed. Old test files are deleted in the working tree only; run
-  `git add -A tests` before the commit.
+- **Commit:** done. The test redesign is `bbe8160`, the fixes `84006aa`, the CI fixes `da6a347`
+  and `c599d15`. The working tree is clean. Nothing is pushed to dev.
+- **Migration number clash:** the held-back patch
+  `~/projects/sde-curation-stress/patches/part4-two-group-stored-counts-V19.patch` adds its own V19.
+  This branch now has a different V19. Renumber that patch to V20 before applying it.
 - **Local containers:** `mut-pg` (port 55480, used by the mutation runs) and `sde-prof` are still
   running. Remove or keep. The Postgres on port 5432 was not touched.
 - **Backup:** a copy of `tests/` from before the old tests were deleted is in the session

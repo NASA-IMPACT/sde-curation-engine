@@ -106,7 +106,7 @@ async def test_an_index_job_past_its_restart_limit_stops_its_task(tmp_path):
 
     await engine.recover()
 
-    assert (await db.get_job(job.id)).error == "stopped resuming after 3 engine restarts"
+    assert (await db.get_job(job.id)).error == "stopped resuming after 3 engine restarts without progress"
     assert indexer.stopped == ["task/1"]
     assert (await db.get_index_run("r-1")).state == "failed"
 

@@ -133,7 +133,7 @@ async def test_a_job_that_never_survives_its_resume_stops_after_the_limit(tmp_pa
     finally:
         await db.close()
     assert len(rec.starts) == 3
-    assert job.state is JobState.FAILED and job.error == "stopped resuming after 3 engine restarts"
+    assert job.state is JobState.FAILED and job.error == "stopped resuming after 3 engine restarts without progress"
 
 
 async def test_a_job_cancelled_while_it_waits_to_resume_stays_cancelled(tmp_path, monkeypatch):

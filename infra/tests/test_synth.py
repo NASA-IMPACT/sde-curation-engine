@@ -168,8 +168,13 @@ def test_task_role_can_drive_indexer_and_crawler(template):
                 "Resource": {"Fn::Join": ["", [Match.string_like_regexp(":task-definition/$"), {"Ref": Match.any_value()}, ":*"]]},
                 "Condition": {"ArnEquals": {"ecs:cluster": {"Fn::Join": Match.any_value()}}},
             }),
-            # the indexer's tasks only: described while a run is watched, stopped when a curator cancels it
-            Match.object_like({"Action": ["ecs:DescribeTasks", "ecs:StopTask"],
+            # the indexer's tasks only: described while a run is watched, stopped when a curator cancels
+            # it (only tasks with the engine's tag, L14), tagged only while the engine starts them
+            Match.object_like({"Action": "ecs:DescribeTasks",
+                               "Resource": {"Fn::Join": ["", Match.array_with([Match.string_like_regexp(":task/$")])]}}),
+            Match.object_like({"Action": "ecs:StopTask",
+                               "Resource": {"Fn::Join": ["", Match.array_with([Match.string_like_regexp(":task/$")])]}}),
+            Match.object_like({"Action": "ecs:TagResource",
                                "Resource": {"Fn::Join": ["", Match.array_with([Match.string_like_regexp(":task/$")])]}}),
             Match.object_like({"Action": "iam:PassRole", "Resource": [{"Ref": Match.any_value()}, {"Ref": Match.any_value()}]}),
             Match.object_like({"Action": "aoss:APIAccessAll"}),
@@ -295,7 +300,7 @@ def test_database_records_query_statistics_and_slow_statements(template):
 
 def test_alarms_notify_one_topic(template):
     """Database CPU, 5xx answers, slow answers and an unhealthy engine each raise an alarm on one SNS
-    topic (subscribed by hand)."""
+    topic (emailed to the config's alarm addresses)."""
     template.resource_count_is("AWS::SNS::Topic", 1)
     (topic_id,) = template.find_resources("AWS::SNS::Topic")
     alarms = template.find_resources("AWS::CloudWatch::Alarm")
@@ -314,18 +319,19 @@ def test_alarms_notify_one_topic(template):
     assert (memory["Threshold"], memory["EvaluationPeriods"], memory["ComparisonOperator"]) == (
         1_000_000_000, 5, "LessThanThreshold")
     conns = by_metric["DatabaseConnections"]
-    assert (conns["Threshold"], conns["EvaluationPeriods"], conns["Namespace"]) == (80, 5, "AWS/RDS")
+    assert (conns["Threshold"], conns["EvaluationPeriods"], conns["Namespace"]) == (40, 5, "AWS/RDS")
     engine = by_metric["MemoryUtilization"]
     assert (engine["Threshold"], engine["EvaluationPeriods"], engine["Namespace"]) == (85, 5, "AWS/ECS")
-    for props in by_metric.values():
+    for metric, props in by_metric.items():
         assert props["AlarmActions"] == [{"Ref": topic_id}]
-        assert props["TreatMissingData"] == "notBreaching"
+        # no data means "no engine registered" only for the healthy-engine count (M7)
+        assert props["TreatMissingData"] == ("breaching" if metric == "HealthyHostCount" else "notBreaching")
 
 
 def test_the_task_carries_the_per_job_and_the_shared_llm_limits(template):
     """#24: LLM_WORKERS limits one job; LLM_WORKERS_TOTAL limits every LLM job on the task together."""
     env = _container_env(template)
-    assert (env["LLM_WORKERS"], env["LLM_WORKERS_TOTAL"]) == ("16", "32")
+    assert (env["LLM_WORKERS"], env["LLM_WORKERS_TOTAL"]) == ("16", "64")
 
 
 # ── Known bugs from REVIEW-SINCE-DEV-MERGE-2026-10-08.md (expected failures until fixed) ──────────
@@ -336,42 +342,63 @@ def test_the_task_carries_the_per_job_and_the_shared_llm_limits(template):
 ENGINE_MAX_DB_CONNECTIONS = 28
 
 
-@pytest.mark.xfail(strict=True, reason="M6: the alarm topic has no subscription, so no one is notified")
 def test_the_alarm_topic_notifies_someone(template):
-    subs = template.find_resources("AWS::SNS::Subscription")
-    (topic,) = template.find_resources("AWS::SNS::Topic").values()
-    assert subs or topic["Properties"].get("Subscription")
+    """M6: every alarm address in the config gets an email subscription on the alarm topic."""
+    subs = [s["Properties"] for s in template.find_resources("AWS::SNS::Subscription").values()]
+    assert sorted(s["Endpoint"] for s in subs if s["Protocol"] == "email") == sorted(get_config("dev").alarm_emails)
+    assert get_config("dev").alarm_emails
 
 
-@pytest.mark.xfail(strict=True, reason="M7: no alarm fires when the engine has no healthy target (fast crash loop)")
 def test_an_alarm_fires_when_no_engine_is_healthy(template):
+    """M7: an engine that crashes within seconds never counts as unhealthy, and the load balancer
+    answers its 503s itself. No healthy engine for 3 minutes, or the balancer's own 5xx, alarm."""
     alarms = [a["Properties"] for a in template.find_resources("AWS::CloudWatch::Alarm").values()]
     healthy = [a for a in alarms if a.get("MetricName") == "HealthyHostCount"]
     assert healthy and healthy[0]["ComparisonOperator"] == "LessThanThreshold" and healthy[0]["Threshold"] == 1
     assert healthy[0]["TreatMissingData"] == "breaching"
+    assert healthy[0]["EvaluationPeriods"] == 3 and healthy[0]["Period"] == 60
     assert any(a.get("MetricName") == "HTTPCode_ELB_5XX_Count" for a in alarms)
 
 
-@pytest.mark.xfail(strict=True, reason="L12: the database-connections alarm (80) cannot fire from the engine (max 28)")
-def test_the_connections_alarm_can_fire_from_the_engine(template):
+def test_the_connections_alarm_fires_only_above_what_the_engine_itself_opens(template):
+    """L12 (decided 2026-10-12): under load the engine keeps both pools full (29-31 connections in
+    the 2026-10-08 stress run, pages still about 1 s), so a count near 28 is normal. The alarm sits
+    12 above the engine's maximum: a second engine task or a leaked connection, not a busy engine.
+    tests/unit/test_config.py fails if the engine's pool defaults stop adding up to 28."""
     alarms = [a["Properties"] for a in template.find_resources("AWS::CloudWatch::Alarm").values()]
     (conns,) = [a for a in alarms if a.get("MetricName") == "DatabaseConnections"]
-    assert conns["Threshold"] < ENGINE_MAX_DB_CONNECTIONS
+
+    assert (conns["Threshold"], conns["EvaluationPeriods"]) == (ENGINE_MAX_DB_CONNECTIONS + 12, 5)
 
 
-@pytest.mark.xfail(strict=True, reason="L14: ecs:StopTask covers every task in the indexer cluster, not only the engine's")
+ENGINE_TASK_TAG = "sde-curation-engine"  # sde_curation/backends/index.py: the tag every indexer task gets
+
+
+def _statements_with(template: Template, action: str) -> list[dict]:
+    return [s for s in _policy_statements(template)
+            if action in (s["Action"] if isinstance(s["Action"], list) else [s["Action"]])]
+
+
 def test_the_engine_can_stop_only_its_own_indexer_tasks(template):
-    (stop,) = [s for s in _policy_statements(template)
-               if "ecs:StopTask" in (s["Action"] if isinstance(s["Action"], list) else [s["Action"]])]
-    assert "Condition" in stop
+    """L14: the indexer cluster is shared. StopTask is allowed only on tasks carrying the engine's
+    tag, and the engine may add that tag only while it starts a task (RunTask with tags needs
+    ecs:TagResource, or the RunTask fails)."""
+    (stop,) = _statements_with(template, "ecs:StopTask")
+    (tag,) = _statements_with(template, "ecs:TagResource")
+    (describe,) = _statements_with(template, "ecs:DescribeTasks")
+
+    assert stop["Action"] == "ecs:StopTask"
+    assert stop["Condition"] == {"Null": {f"aws:ResourceTag/{ENGINE_TASK_TAG}": "false"}}
+    assert tag["Action"] == "ecs:TagResource"
+    assert tag["Condition"] == {"StringEquals": {"ecs:CreateAction": "RunTask"}}
+    assert "Condition" not in describe  # reading a task's state needs no tag
 
 
-@pytest.mark.xfail(strict=True, reason="L11: the slow-statement log writes full bind parameters, kept forever")
 def test_the_slow_statement_log_is_bounded(template):
     """log_min_duration_statement logs each slow statement with its parameters (5,000-URL arrays).
     The parameters are cut to a short prefix, and the exported database log expires."""
     (params,) = template.find_resources("AWS::RDS::DBParameterGroup").values()
-    assert int(params["Properties"]["Parameters"].get("log_parameter_max_length", -1)) in range(1025)
-    assert any(r["Properties"].get("LogGroupName", {}) and "postgresql" in json.dumps(r["Properties"]["LogGroupName"])
-               for r in template.find_resources("AWS::Logs::LogGroup").values()) or \
-        template.find_resources("Custom::LogRetention")
+    assert params["Properties"]["Parameters"]["log_parameter_max_length"] == "1024"
+    (retention,) = [r["Properties"] for r in template.find_resources("Custom::LogRetention").values()
+                    if "postgresql" in json.dumps(r["Properties"]["LogGroupName"])]
+    assert retention["RetentionInDays"] == 30  # the same month the engine's own log keeps

@@ -165,7 +165,7 @@ class Settings(BaseSettings):
     llm_max_retries: int = Field(default=5, ge=0, le=10)  # SDK retries on 429 / 5xx / timeouts
     llm_workers: int = Field(default=16, ge=1, le=64)  # concurrent calls inside one LLM job
     # #24: concurrent calls across every LLM job in the engine together (one limit, shared)
-    llm_workers_total: int = Field(default=32, ge=1, le=256)
+    llm_workers_total: int = Field(default=64, ge=1, le=256)
     # Calls that still fail with a rate limit / 5xx / timeout after the SDK's own retries are run
     # again at the end of the job, this long after the main pass, with a quarter of the workers.
     llm_retry_passes: int = Field(default=1, ge=0, le=5)
@@ -182,11 +182,16 @@ class Settings(BaseSettings):
     # RESUME_STAGGER_S apart, and at most RESUME_CONCURRENCY of them run a heavy phase (export, prod
     # publish pre-flight, recompute, bulk accept) at once — all interrupted jobs coming back at the
     # same moment is the pile-up that took the test engine down on 2026-10-06. A job's restarts are
-    # counted before it starts again; after RESUME_MAX_RESTARTS it fails instead.
+    # counted before it starts again; after RESUME_MAX_RESTARTS restarts in a row with no progress
+    # between them, or RESUME_MAX_RESTARTS_TOTAL in all, it fails instead (JobManager._count_restart).
     resume_start_delay_s: float = Field(default=15.0, ge=0)
     resume_stagger_s: float = Field(default=10.0, ge=0)
     resume_concurrency: int = Field(default=2, ge=1, le=16)
     resume_max_restarts: int = Field(default=3, ge=0, le=20)
+    # The limits above count restarts in a row with no progress between them (a job that moved since
+    # the last restart starts its count again). This one counts every restart of a job, moving or
+    # not, so a job that works a little and then brings the engine down again still stops.
+    resume_max_restarts_total: int = Field(default=10, ge=1, le=50)
     llm_retry_delay_s: float = Field(default=30.0, ge=0)
     # Suggest metadata sends the full page text — cut from the end only when the call would pass
     # llm_max_input_tokens — one call per URL. Suggest patterns sends every crawled URL (+ title) in batches of this size.

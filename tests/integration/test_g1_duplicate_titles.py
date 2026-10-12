@@ -5,6 +5,8 @@ duplicate is are in tests/integration/test_db_contract.py (counts) and tests/uni
 
 import re
 
+import pytest
+
 from sde_curation.models import DumpUrl, JobKind, JobRun, JobState
 
 CID = "ex.org"
@@ -143,6 +145,52 @@ async def test_deciding_or_reclassifying_a_regenerated_title_drops_the_title_it_
     assert (rows[url("/x/alpha")].title, rows[url("/x/alpha")].title_ai_before) == ("Same, Part A", None)
     assert rows[url("/x/beta")].title_ai_before is None
     assert (rows[url("/x/gamma")].title_ai, rows[url("/x/gamma")].title_ai_before) == ("Fresh", None)
+
+
+@pytest.mark.parametrize(("decisions", "promotes"), [
+    ({}, False),                                            # undecided: promote discards them, both stay "Same"
+    ({"/x/alpha": "accept", "/x/beta": "accept"}, True),    # accepted: no duplicate left
+    ({"/x/alpha": "accept", "/x/beta": "reject"}, True),    # one accepted is enough to tell them apart
+    ({"/x/alpha": "reject", "/x/beta": "reject"}, False),   # rejected: still the same title
+])
+async def test_regenerated_titles_promote_once_accepted_and_never_while_still_shared(client, decisions, promotes):
+    """Bernard's flow (2026-10-12): Regenerate titles writes distinct titles; the curator accepts or
+    rejects them; promote goes ahead only when no two pages are left with the same title."""
+    await regenerated(client, titles=TOLD_APART)
+    for path, decision in decisions.items():
+        r = await client.post(f"{API}/ai/{decision}", json={"url": url(path), "field": "title"})
+        assert r.status_code == 200
+
+    r = await client.post(f"{API}/promote")
+
+    assert r.status_code == (200 if promotes else 409), r.text
+    if not promotes:
+        assert "2 sharing a title and document type with another page" in r.json()["detail"]
+        assert " without a " not in r.json()["detail"]  # refused for the duplicate, nothing else
+
+
+async def test_while_regenerated_titles_wait_the_curate_step_asks_for_a_decision_not_a_regenerate(client):
+    """Undecided regenerated titles block promote, but Regenerate titles sees no duplicate (it counts
+    them as accepted). The Curate step sends the curator to the decision, and its link lists the rows."""
+    await regenerated(client, titles=TOLD_APART)
+
+    curate = (await client.get(f"{TAB}curate")).text
+    listed = (await client.get(f"{TAB}delta&missing=true&ai=title")).text
+
+    assert "2 of them have an AI title waiting for a decision" in curate
+    assert f'href="/collections/{CID}?tab=delta&missing=true&ai=title"' in curate
+    assert url("/x/alpha") in listed and url("/x/beta") in listed and url("/x/gamma") not in listed
+
+
+async def test_once_the_regenerated_titles_are_rejected_the_curate_step_offers_regenerate_again(client):
+    await regenerated(client, titles=TOLD_APART)
+    for path in TOLD_APART:
+        await client.post(f"{API}/ai/reject", json={"url": url(path), "field": "title"})
+
+    curate = (await client.get(f"{TAB}curate")).text
+
+    assert "waiting for a decision" not in curate
+    assert "Regenerate duplicate titles in step 2" in curate
 
 
 # ── the metadata review table under Curate ──────────────────────────────────────────────────────

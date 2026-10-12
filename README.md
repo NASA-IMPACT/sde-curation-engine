@@ -372,8 +372,8 @@ their value on the next "Start curating" / recompute.
 - Promote warns when ≥ `PROMOTE_REMOVAL_WARN_RATIO` (default 0.25, and at least 5 rows) of the
   curated set vanished from the crawl — a partial crawl looks exactly like a site that shrank.
 - Live views refresh on SSE **and** poll (5–10 s), so a missed event cannot leave a page stale.
-- Every job ends in `succeeded` or `failed` with the reason shown; jobs orphaned by a crash are
-  marked failed on restart.
+- Every job ends in `succeeded` or `failed` with the reason shown; a job interrupted by a crash
+  or a deploy carries on after the restart, or fails with the reason when it cannot.
 - Server-side refusals surface as an alert with the server's message; nothing fails silently.
 
 ### Working in parallel (several curators at once)
@@ -395,9 +395,10 @@ are in flight — the ceilings come from the systems behind it.
   one job at a time under `flock`; extra jobs are accepted immediately and shown as *queued*
   with how many crawls are ahead, and a queue can wait indefinitely. So scrapes from several
   curators are accepted in parallel but crawled one at a time.
-- *LLM jobs* — each job runs its own pool of `LLM_WORKERS` (default 16) concurrent calls. There
-  is no limiter across jobs: five curators classifying at once is up to 80 in-flight calls.
-  This is the first place you will hit the provider's rate limit.
+- *LLM jobs* — each job runs its own pool of `LLM_WORKERS` (default 16) concurrent calls, and
+  one limit shared by every LLM job caps the engine at `LLM_WORKERS_TOTAL` (default 64) calls in
+  flight. Five curators classifying at once share those 64, so each job runs slower instead of
+  more calls failing on the provider's rate limit.
 - *Index runs* — each dispatches its own ECS task and polls S3. Nothing limits how many run at
   once; runs on different collections are fine as long as the indexer tolerates it.
 - *Bulk curation changes* — on a collection with at least `BULK_JOB_MIN_URLS` (20 000) dump URLs,
@@ -419,9 +420,11 @@ ingest reads the crawl in chunks of 500 pages or 1 MB of text, whichever comes f
 the pooled DB connections afterwards (a 6.7 GB crawl of ~1 MB pages peaks under 300 MB; see
 `docs/architecture.md` §1);
 `patterns.yaml` is written in the background once a collection has more than 2 000 rules (always
-current after a promote and at shutdown). A Suggest-metadata job interrupted by an engine restart
-(a deploy, a crash) is started again for the URLs still missing, at most
-`LLM_RESUME_AFTER_RESTART` (3) times; a job a curator cancelled stays cancelled.
+current after a promote and at shutdown). Every job interrupted by an engine restart (a deploy, a
+crash) carries on after it as the same job; a scrape keeps running on the crawler meanwhile. A job
+fails instead after 3 restarts in a row with no progress between them (`RESUME_MAX_RESTARTS`;
+`LLM_RESUME_AFTER_RESTART` for Suggest metadata, `SCRAPE_RESUME_AFTER_RESTART` for a scrape), or
+after `RESUME_MAX_RESTARTS_TOTAL` (10) restarts in all. A job a curator cancelled stays cancelled.
 
 **Data layer**
 - PostgreSQL through two connection pools: the work pool (`DB_POOL_SIZE`, default 16) for jobs
@@ -450,8 +453,8 @@ current after a promote and at shutdown). A Suggest-metadata job interrupted by 
 **Guidance**
 - Assign curators to distinct collections — that is the model the app is built around.
 - Expect scrapes to queue on the shared crawler; kick them off early.
-- If several people will run LLM jobs at the same time, lower `LLM_WORKERS` or add a
-  process-wide semaphore in `llm/pool.py` so total in-flight calls stay under the provider limit.
+- If several people run LLM jobs at the same time and the provider still answers with rate
+  limits, lower `LLM_WORKERS_TOTAL` (all jobs together) rather than `LLM_WORKERS` (one job).
 - If two people must share one collection, agree on who edits; the app will not detect a
   stale edit.
 
@@ -482,6 +485,8 @@ current after a promote and at shutdown). A Suggest-metadata job interrupted by 
 | `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-6-luna`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` (per attempt), `LLM_MAX_RETRIES`, `LLM_TEMPERATURE` (unset = model default; reasoning models reject any other value) | LLM assist; any OpenAI-compatible endpoint |
 | `LLM_REASONING_EFFORT` (unset = model default, medium on gpt-5.6+), `LLM_MAX_COMPLETION_TOKENS` (4000), `LLM_SERVICE_TIER` (unset; `flex` ≈ 50% off, slower) | reasoning effort per call; the output budget (answer + reasoning; a call cut off by it is asked again with 4×, then recorded as failed); OpenAI service tier. Reasoning tokens show in the job's token counts |
 | `PROMOTE_REMOVAL_WARN_RATIO` (0.25) | share of the curated set that must vanish from a crawl before Promote warns |
+| `LLM_WORKERS_TOTAL` (64) | LLM calls in flight across every LLM job in the engine together; each job also stays within `LLM_WORKERS` |
+| `RESUME_START_DELAY_S` (15), `RESUME_STAGGER_S` (10), `RESUME_CONCURRENCY` (2), `RESUME_MAX_RESTARTS` (3), `RESUME_MAX_RESTARTS_TOTAL` (10), `LLM_RESUME_AFTER_RESTART` (3), `SCRAPE_RESUME_AFTER_RESTART` (3) | jobs that carry on after an engine restart: they start this long after the engine serves, this far apart, at most this many in a heavy phase at once; a job fails after this many restarts in a row with no progress (per kind), or this many in all |
 | `LLM_WORKERS` (16), `LLM_RETRY_PASSES` (1), `LLM_RETRY_DELAY_S` (30), `LLM_PATTERN_BATCH_URLS` (1000), `LLM_DEDUPE_TITLES` (false), `GLOBAL_EXCLUDES_PATH` | calls in flight per LLM job; end-of-job retries of rate-limited / 5xx / timed-out calls (a quarter of the workers, after the delay); URLs per Suggest-patterns call; true: Suggest metadata re-titles same title + doc type pages by itself (default: flag only); override the packaged global exclude YAML |
 | `APP_PASSWORD`, `SESSION_SECRET`, `SESSION_TTL_S`, `AUTH_COOKIE_SECURE` | login with local accounts (off when `APP_PASSWORD` is empty; the value seeds the bootstrap `admin`); `/health` stays open |
 

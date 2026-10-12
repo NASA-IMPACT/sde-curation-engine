@@ -7,6 +7,8 @@ import asyncio
 import contextlib
 import ctypes
 import functools
+import hashlib
+import json
 import logging
 import tempfile
 import time
@@ -76,6 +78,10 @@ _URGENT_PROGRESS = frozenset({"phase", "pid", "ssm_command", "external_ref"})
 AI_FLUSH_ROWS = 25
 AI_FLUSH_SECONDS = 2.0
 DISPATCH_WAIT_ON_CANCEL_S = 60  # a cancel during the indexer dispatch waits this long to stop the task it started
+# Progress keys that the resume itself writes, or that rise and fall while a job waits: a change in
+# them does not show that the job moved since the last engine restart.
+_RESTART_BOOKKEEPING = frozenset({"restarts", "restarts_total", "restart_mark", "resumed", "resumed_from",
+                                  "resumed_watch", "inflight", "title_calls_inflight"})
 # How often the crawl ingest reports the pages it has read. Each report is one job-row UPDATE and
 # one SSE event, so it is paced by the clock rather than by the read chunks: a small crawl
 # is over before the second report, a big one ticks steadily.
@@ -326,6 +332,25 @@ class JobManager:
             await self.db.update_job(new)
             log.info("resumed %s for %s as job %s (after job %s)", j.kind, c.collection_id, new.id, j.id)
 
+    def _count_restart(self, j: JobRun, limit: int) -> str | None:
+        """Count one more engine restart against job `j`, in its progress. `restarts` counts the
+        restarts in a row the job made no progress between: it starts again from 0 when the job's
+        progress changed since the last restart (`restart_mark`), so a long job is not failed by
+        deploys it kept working through. `restarts_total` counts them all and stops a job that moves
+        a little and then brings the engine down again. Returns why the job must fail instead, or
+        None (and `j.progress` holds the new counts)."""
+        p = j.progress
+        mark = hashlib.sha1(json.dumps({k: v for k, v in p.items() if k not in _RESTART_BOOKKEEPING},
+                                       sort_keys=True, default=str).encode()).hexdigest()[:12]
+        in_a_row = 0 if p.get("restart_mark") not in (None, mark) else int(p.get("restarts", 0))
+        total = int(p.get("restarts_total", p.get("restarts", 0)))  # jobs from before the total: their count
+        if in_a_row >= limit:
+            return f"stopped resuming after {in_a_row} engine restarts without progress"
+        if total >= self.s.resume_max_restarts_total:
+            return f"stopped resuming after {total} engine restarts in all"
+        j.progress = {**p, "restarts": in_a_row + 1, "restarts_total": total + 1, "restart_mark": mark}
+        return None
+
     async def _queue_resume(self, j: JobRun) -> bool:
         """Decide whether job `j` (left 'running' by the previous engine) resumes, and queue it.
         The restart is counted and written before anything runs again, so a job that brings the
@@ -334,17 +359,14 @@ class JobManager:
         c = await self.db.get_collection(j.collection_id)
         if c is None:
             return False
-        restarts = int(j.progress.get("restarts", 0))
         # Suggest metadata keeps its own long-standing setting (same default)
         limit = self.s.llm_resume_after_restart if j.kind == JobKind.LLM_METADATA else self.s.resume_max_restarts
-        if restarts >= limit:
-            await self._stop_index_task(j, f"stopped resuming after {restarts} engine restarts")
-            await self.db.finish_job(j, JobState.FAILED,
-                                     error=f"stopped resuming after {restarts} engine restarts")
+        if refused := self._count_restart(j, limit):
+            await self._stop_index_task(j, refused)
+            await self.db.finish_job(j, JobState.FAILED, error=refused)
             self._emit(c, j)
             return True
         j.state, j.error, j.finished_at = JobState.RUNNING, None, None
-        j.progress = {**j.progress, "restarts": restarts + 1}
         await self.db.update_job(j)
         self._resume_queue.append(j)
         self._pending_resume[j.collection_id] = j
@@ -406,12 +428,10 @@ class JobManager:
         A deploy stops only the watcher: ScrapeBackend.resume follows the crawl if it is still going
         and ingests it if it finished meanwhile, and never starts a second crawl. False when it
         cannot be resumed (restarted too many times in a row, collection gone)."""
-        restarts = int(j.progress.get("restarts", 0))
         c = await self.db.get_collection(j.collection_id)
-        if not c or restarts >= self.s.scrape_resume_after_restart:
+        if not c or self._count_restart(j, self.s.scrape_resume_after_restart):
             return False
         j.state, j.error, j.finished_at = JobState.RUNNING, None, None
-        j.progress = {**j.progress, "restarts": restarts + 1}
         await self.db.update_job(j)
         self._emit(c, j)
         reuse = bool(j.progress.get("reused"))

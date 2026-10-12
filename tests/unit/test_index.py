@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from sde_curation.backends.index import (
+    ENGINE_TASK_TAG,
     EcsDispatchIndexer,
     IndexError_,
     LocalSubprocessIndexer,
@@ -158,3 +159,14 @@ async def test_local_indexer_missing_paths(tmp_path):
         await LocalSubprocessIndexer(s).dispatch(COLL, "r", "test")
     await asyncio.sleep(0)
     assert export_prefix("k", "r") == "curated_collections/k/r"
+
+
+def test_every_indexer_task_the_engine_starts_carries_the_engine_tag():
+    """L14: the indexer's ECS cluster is shared with other workloads (Bernard, 2026-10-12). The
+    engine's role may stop only tasks with this tag, so every task it starts must carry it."""
+    s = Settings(index_backend="ecs", indexing_subnets=["subnet-1"], llm_provider="fake")
+
+    args = EcsDispatchIndexer(s, ecs=object()).run_task_args(COLL, "r1", "test")
+
+    assert args["tags"] == [{"key": ENGINE_TASK_TAG, "value": COLL.collection_id}]
+    assert ENGINE_TASK_TAG == "sde-curation-engine"  # infra/stacks/engine_stack.py grants StopTask on this key

@@ -815,7 +815,8 @@ class FakeDatabase:
     async def incomplete_counts(self, collection_id: str, urls: list[str] | None = None) -> dict[str, int]:
         dup = {r["url"] for r in self._duplicates(collection_id, pending=False) if r["delta"]}
         wanted = None if urls is None else set(urls)
-        out = dict.fromkeys(("urls", "title", "division", "general", "document_type", "duplicate"), 0)
+        out = dict.fromkeys(("urls", "title", "division", "general", "document_type", "duplicate",
+                             "duplicate_undecided"), 0)
         for d in self._deltas.get(collection_id, {}).values():
             incomplete = (d["kind"] != "deleted" and not d["excluded"]
                           and (_no_title(d["title"], d["scraped_title"]) or _no_division(d["division"])
@@ -828,6 +829,7 @@ class FakeDatabase:
             out["general"] += d["division"] == "General"
             out["document_type"] += d["document_type"] is None
             out["duplicate"] += d["url"] in dup
+            out["duplicate_undecided"] += d["url"] in dup and d["title_ai"] is not None
         return out
 
     async def title_keys(self, collection_id: str) -> dict[str, str]:

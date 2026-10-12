@@ -495,6 +495,15 @@ async def _shared_title():
     return db, service
 
 
+async def _shared_title_regenerated_undecided():
+    """Regenerate titles told the two pages apart; the curator has not decided the new titles yet."""
+    db, service = await _shared_title()
+    await service.recompute(await fresh(db))
+    await db.set_delta_ai_titles(CID, [{"url": u, "title": f"Same {n}", "before": "Same"}
+                                       for n, u in enumerate(URLS[:2])])
+    return db, service
+
+
 async def _blank_and_shared():
     db, service = await build(3, titled=False)
     for u in URLS[:2]:
@@ -513,11 +522,15 @@ ACCEPT = "accept the AI suggestions or set the values by hand first"
     (_no_document_type, f"{PAGES} delta URLs cannot be promoted yet ({PAGES} without a document type): {ACCEPT}"),
     (_shared_title, ("2 delta URLs cannot be promoted yet (2 sharing a title and document type with another page):"
                      " run Regenerate duplicate titles, or give them a title of their own by hand")),
+    (_shared_title_regenerated_undecided, (
+        "2 delta URLs cannot be promoted yet (2 sharing a title and document type with another page):"
+        " 2 of them have an AI title waiting for a decision: accept or reject it; a page that still"
+        " shares its title after that needs Regenerate duplicate titles or a title of its own by hand")),
     (_blank_and_shared, ("3 delta URLs cannot be promoted yet (1 without a title, 2 sharing a title and document type"
                          f" with another page): {ACCEPT}; Regenerate duplicate titles gives the shared ones a title of"
                          " their own")),
 ], ids=["blank title, one page", "no division", "General placeholder", "no document type",
-        "duplicate title + document type", "blank and duplicate"])
+        "duplicate title + document type", "duplicate, regenerated titles undecided", "blank and duplicate"])
 async def test_promote_refuses_incomplete_metadata_and_moves_nothing(arrange, message):
     db, service = await arrange()
     await service.recompute(await fresh(db))

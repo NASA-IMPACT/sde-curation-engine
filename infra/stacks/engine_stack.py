@@ -60,6 +60,9 @@ from aws_cdk import (
     aws_sns as sns,
 )
 from aws_cdk import (
+    aws_sns_subscriptions as sns_subs,
+)
+from aws_cdk import (
     aws_ssm as ssm,
 )
 from aws_cdk import (
@@ -70,6 +73,11 @@ from constructs import Construct
 from config import EnvConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Same value as ENGINE_TASK_TAG in sde_curation/backends/index.py (the infra app does not import the engine)
+ENGINE_TASK_TAG = "sde-curation-engine"
+# The most database connections the engine opens: DB_POOL_SIZE (16) + DB_READ_POOL_SIZE (12), the
+# defaults in sde_curation/config.py (tests/unit/test_config.py fails if they stop adding up to this).
+ENGINE_MAX_DB_CONNECTIONS = 28
 CONTAINER_PORT = 8080
 DATA_DIR = "/data"
 DB_NAME = "engine"
@@ -121,15 +129,22 @@ class CurationEngineStack(Stack):
         pg_engine = rds.DatabaseInstanceEngine.postgres(version=rds.PostgresEngineVersion.VER_17)
         # Query statistics (pg_stat_statements; the extension itself is created by schema V13) and a
         # log line for every statement over 2 s, so database load can be traced to the statement that
-        # caused it. shared_preload_libraries is a static parameter: attaching this group to an
-        # existing instance leaves it "pending-reboot" until the instance is rebooted (about a
-        # minute of downtime), which is done by hand at a quiet moment.
+        # caused it. M1: shared_preload_libraries is a static parameter, and CloudFormation reboots
+        # the instance when it attaches a group that holds a static parameter ("If the parameter
+        # group contains static parameters, whether they were changed or not, an update triggers a
+        # reboot", AWS::RDS::DBInstance DBParameterGroupName). So the first deploy that brings this
+        # group reboots that environment's database: about 1-2 minutes without it, once. Deploy
+        # with no jobs running (infra/README.md, "First deploy with the parameter group").
         db_params = rds.ParameterGroup(
             self, "DbParams", engine=pg_engine, description=f"{cfg.name} database parameters",
             parameters={
                 "shared_preload_libraries": "pg_stat_statements",
                 "pg_stat_statements.track": "top",
                 "log_min_duration_statement": "2000",
+                # L11: a slow statement is logged with its bind parameters, and one of them can be a
+                # list of thousands of URLs (20,000 characters seen). Keep the first 1,024 characters
+                # of each: enough to tell which statement it was.
+                "log_parameter_max_length": "1024",
             },
         )
         db = rds.DatabaseInstance(
@@ -146,6 +161,8 @@ class CurationEngineStack(Stack):
             deletion_protection=cfg.db_deletion_protection, removal_policy=RemovalPolicy.SNAPSHOT,
             enable_performance_insights=True, auto_minor_version_upgrade=True,
             cloudwatch_logs_exports=["postgresql"],
+            # L11: RDS creates the exported log's group with no expiry; keep a month, as the engine's
+            cloudwatch_logs_retention=logs.RetentionDays.ONE_MONTH,
         )
 
         # ── EFS: DATA_DIR (per-collection yaml, index logs, scrape jobs) ─
@@ -331,8 +348,10 @@ class CurationEngineStack(Stack):
                 target_group: elbv2.ApplicationTargetGroup, service: ecs.FargateService) -> sns.Topic:
         """The signals that would have shown the 2026-10-06 incident as it started instead of after
         the fact: database CPU, 5xx answers, slow answers and an unhealthy engine. They notify an SNS
-        topic that has no subscription here; subscribe an email or chat endpoint to it by hand."""
+        topic that emails every address in `cfg.alarm_emails` (each must confirm its subscription)."""
         topic = sns.Topic(self, "Alarms", topic_name=f"{self.cfg.name}-alarms")
+        for email in self.cfg.alarm_emails:
+            topic.add_subscription(sns_subs.EmailSubscription(email))
         minute, five = Duration.minutes(1), Duration.minutes(5)
         above = cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD
         specs = [
@@ -350,16 +369,33 @@ class CurationEngineStack(Stack):
             ("DbMemory", "database freeable memory below 1 GB for 5 minutes",
              db.metric_freeable_memory(period=minute, statistic="Minimum"), 1_000_000_000, 5,
              cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD),
-            ("DbConnections", "more than 80 database connections for 5 minutes",
-             db.metric_database_connections(period=minute, statistic="Maximum"), 80, 5, above),
+            # L12: under load the engine keeps both pools full (29-31 in the 2026-10-08 stress run,
+            # pages still about 1 s), so near 28 is normal. 12 above it is something else holding
+            # connections: a second engine task, or a leaked connection.
+            ("DbConnections", (f"more than {ENGINE_MAX_DB_CONNECTIONS + 12} database connections for 5 minutes"
+                               " (the engine opens at most 28: a second engine task or a leak)"),
+             db.metric_database_connections(period=minute, statistic="Maximum"), ENGINE_MAX_DB_CONNECTIONS + 12, 5,
+             above),
             ("EngineMemory", "engine task memory above 85 % for 5 minutes",
              service.metric_memory_utilization(period=minute, statistic="Maximum"), 85, 5, above),
+            # M7: an engine that crashes within seconds of starting never fails two health checks, so
+            # UnhealthyEngine stays quiet. No healthy engine at all is the signal; no data (no target
+            # registered) counts as none healthy. A deploy's own gap (minHealthyPercent=0, about 90 s)
+            # stays under the 3 minutes.
+            ("NoHealthyEngine", "no healthy engine for 3 minutes",
+             target_group.metrics.healthy_host_count(period=minute, statistic="Minimum"), 1, 3,
+             cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD, cloudwatch.TreatMissingData.BREACHING),
+            # with no target to send to, the load balancer answers 503 itself: Alb5xx counts only the
+            # engine's own answers
+            ("Elb5xx", "more than 10 load-balancer 5xx answers in 5 minutes (no engine to answer)",
+             alb.metrics.http_code_elb(elbv2.HttpCodeElb.ELB_5XX_COUNT, period=five, statistic="Sum"),
+             10, 1, above),
         ]
-        for name, what, metric, threshold, periods, op in specs:
+        for name, what, metric, threshold, periods, op, *missing in specs:
             alarm = cloudwatch.Alarm(
                 self, f"Alarm{name}", alarm_name=f"{self.cfg.name}-{name}", alarm_description=what,
                 metric=metric, threshold=threshold, evaluation_periods=periods, comparison_operator=op,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+                treat_missing_data=missing[0] if missing else cloudwatch.TreatMissingData.NOT_BREACHING,
             )
             alarm.add_alarm_action(cw_actions.SnsAction(topic))
         return topic
@@ -444,10 +480,21 @@ class CurationEngineStack(Stack):
             resources=[f"arn:aws:ecs:{r}:{a}:task-definition/{p['indexing_task_family']}:*"],
             conditions={"ArnEquals": {"ecs:cluster": cluster_arn}},
         ))
+        indexer_tasks = f"arn:aws:ecs:{r}:{a}:task/{p['indexing_cluster_name']}/*"
         role.add_to_policy(iam.PolicyStatement(
-            # StopTask: a curator's cancel stops the indexer task too (jobs.py, EcsDispatchIndexer.kill)
-            sid="DescribeWebCosmosTasks", actions=["ecs:DescribeTasks", "ecs:StopTask"],
-            resources=[f"arn:aws:ecs:{r}:{a}:task/{p['indexing_cluster_name']}/*"],
+            sid="DescribeWebCosmosTasks", actions=["ecs:DescribeTasks"], resources=[indexer_tasks],
+        ))
+        # L14: the indexer cluster is shared with other workloads. The engine tags every task it
+        # starts (sde_curation/backends/index.py ENGINE_TASK_TAG) and may stop only tagged tasks: a
+        # curator's cancel stops the indexer task too (jobs.py, EcsDispatchIndexer.kill).
+        role.add_to_policy(iam.PolicyStatement(
+            sid="StopEngineIndexerTasks", actions=["ecs:StopTask"], resources=[indexer_tasks],
+            conditions={"Null": {f"aws:ResourceTag/{ENGINE_TASK_TAG}": "false"}},
+        ))
+        # RunTask with tags also needs TagResource, or ECS refuses the RunTask; only on create
+        role.add_to_policy(iam.PolicyStatement(
+            sid="TagIndexerTasksOnRunTask", actions=["ecs:TagResource"], resources=[indexer_tasks],
+            conditions={"StringEquals": {"ecs:CreateAction": "RunTask"}},
         ))
         role.add_to_policy(iam.PolicyStatement(
             sid="PassEcsRoles", actions=["iam:PassRole"],

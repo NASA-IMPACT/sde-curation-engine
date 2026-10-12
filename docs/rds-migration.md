@@ -124,8 +124,9 @@ for the infrastructure. What to expect:
 2. `cdk deploy` creates the instance, security group and secret, then rolls out the new task
    definition. Budget an extra 10–15 minutes on the first deploy for instance creation. The old
    task keeps serving until the new one replaces it (then the usual ~90 s of 503).
-3. The new task connects, creates the schema, and answers `/health` with `"db": "ok"`. The
-   verify job passes as before.
+3. The new task connects and creates the schema. Signed in, `/health/db` answers `"db": "ok"`
+   (`/health` checks only that the engine answers; it has no `"db"` field). The verify job passes
+   as before.
 4. The database starts **empty**. If the environment has no data worth keeping (dev today), you
    are done: the bootstrap `admin` account is re-created from the `app_password` secret on first
    start. If it does have data, run the importer from a task shell (`rds-cutover.md`); it reads

@@ -363,3 +363,10 @@ def test_the_prompts_shown_to_curators_ask_for_exclusions_and_confidences_over_t
     assert "confidence" in prompts["metadata"]["system"]
     assert "FULL page text; cut from the end only when" in prompts["metadata"]["user"]
 
+
+
+def test_the_shared_llm_limit_defaults_to_64_calls():
+    """Raised from 32 on 2026-10-12 (Bernard): several curators' LLM jobs at once ran slower each."""
+    from sde_curation.config import Settings
+
+    assert Settings(llm_provider="fake").llm_workers_total == 64

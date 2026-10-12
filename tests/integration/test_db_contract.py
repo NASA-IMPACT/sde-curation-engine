@@ -629,7 +629,7 @@ async def test_llm_queries_and_ai_writes(store, same):
 
 async def test_duplicate_titles_and_incomplete_counts(store, same):
     await seeded(store)
-    u = {x: f"https://example.com/t/{x}" for x in "abcdefghiwxyz"}.__getitem__
+    u = {x: f"https://example.com/t/{x}" for x in "abcdefghijwxyz"}.__getitem__
     data, img = DocumentType.DATA, DocumentType.IMAGES
     es = Division.EARTH_SCIENCE
     await store.replace_curated(CID, [
@@ -650,6 +650,8 @@ async def test_duplicate_titles_and_incomplete_counts(store, same):
         delta(u("g"), renamed_from=u("z"), title="G", document_type=img, division=Division.HELIOPHYSICS),
         delta(u("h"), title="\tTab", scraped_title="Same Title", document_type=data, division=es),
         delta(u("i"), title="   ", scraped_title="Other", document_type=img, division=es),
+        # promote writes "Same Title" (its AI title is undecided); the tables show "J Own"
+        delta(u("j"), title="Same Title", title_ai="J Own", document_type=data, division=es),
     ], [])
     keys = same("title keys", await store.title_keys(CID))
     assert keys[u("a")] == keys[u("b")] == keys[u("x")] == keys[u("c")] == "same title\x1fData"
@@ -658,13 +660,16 @@ async def test_duplicate_titles_and_incomplete_counts(store, same):
     groups = same("dup groups", await store.duplicate_title_groups(CID))
     assert [[m["url"] for m in g["members"]] for g in groups] == [[u("i"), u("y")], [u("a"), u("b"), u("c"), u("x")]]
     assert groups[1]["members"][2] == {"url": u("c"), "delta": True, "pending_ai": True, "before": "Before"}
-    # promote's view: c's AI title is undecided, so only a and b collide (with x)
+    # promote's view: c's and j's AI titles are undecided, so a, b and j collide (with x);
+    # j is the one an undecided AI title would tell apart
     assert same("incomplete", await store.incomplete_counts(CID)) == {
-        "urls": 5, "title": 1, "division": 2, "general": 1, "document_type": 1, "duplicate": 3}
+        "urls": 6, "title": 1, "division": 2, "general": 1, "document_type": 1, "duplicate": 4,
+        "duplicate_undecided": 1}
     assert same("incomplete some", await store.incomplete_counts(CID, [u("d"), u("a"), "https://example.com/none"])) \
-        == {"urls": 2, "title": 1, "division": 1, "general": 0, "document_type": 1, "duplicate": 1}
+        == {"urls": 2, "title": 1, "division": 1, "general": 0, "document_type": 1, "duplicate": 1,
+            "duplicate_undecided": 0}
     assert await store.incomplete_counts(CID, []) == dict.fromkeys(
-        ("urls", "title", "division", "general", "document_type", "duplicate"), 0)
+        ("urls", "title", "division", "general", "document_type", "duplicate", "duplicate_undecided"), 0)
     assert same("none", (await store.title_keys("nope"), await store.duplicate_title_counts("nope"),
                          await store.duplicate_title_groups("nope"))) == ({}, {"urls": 0, "titles": 0, "delta_urls": 0},
                                                                             [])

@@ -299,10 +299,13 @@ Three consequences:
 1. **The service is pinned to one task.** `desired_count=1` in the CDK stack, and `README.md`
    says plainly: *do not run two replicas*. Two processes would each have their own registry and
    their own locks, so nothing would stop two recomputes interleaving on one collection.
-2. **A restart kills every running job.** `recover()` (`jobs.py:147`) runs at startup and marks
-   anything still `queued`/`running` as `failed` with *"engine restarted while job was running"* —
-   deliberately explicit rather than leaving a zombie. Since a deploy replaces the task
-   (`minHealthyPercent=0`), **deploy when idle**.
+2. **A restart pauses running jobs; it no longer kills them (Tier 5).** `recover()` runs at
+   startup and queues every job still `running` to carry on as the same job, after
+   `RESUME_START_DELAY_S`, spaced out and with a limit on heavy phases. A job fails instead (with
+   the reason) when its collection is gone, or after `RESUME_MAX_RESTARTS` restarts in a row with
+   no progress, or `RESUME_MAX_RESTARTS_TOTAL` in all. A deploy replaces the task
+   (`minHealthyPercent=0`, about 90 s without the engine); deploying when idle is still better,
+   because a resumed job repeats the step it was in.
 3. **Cancel is cooperative.** `cancel()` finds the task, calls `Task.cancel()`, and waits for the
    job to record `failed` before returning, so a caller that sees the job list never sees a
    half-cancelled job.
@@ -365,8 +368,9 @@ currently decides — 0 with matches > 0 means a newer rule superseded it).
 `run_pool` (`llm/pool.py`) is a bounded asyncio pool: `LLM_WORKERS` calls in flight, per-item
 failures counted rather than fatal, progress throttled, clean cancellation. Per-URL failures are
 recorded on the delta row (schema V4) so they are visible per URL and "Retry blanks" can re-run
-just those. There is **no limiter across jobs** — five curators classifying at once is up to 80
-in-flight calls, which is the first place the provider's rate limit bites.
+just those. One limit is shared across every LLM job in the engine (`LLM_WORKERS_TOTAL`, 64; #24):
+each call holds a place in it while it is in flight, so five curators classifying at once share 64
+calls instead of running 80. Each job still runs at most `LLM_WORKERS` (16).
 
 Metadata answers are flushed to the DB in small chunks (`AI_FLUSH_ROWS = 25`,
 `AI_FLUSH_SECONDS = 2.0`) so a cancel keeps what was already answered while commits stay few.
@@ -409,7 +413,8 @@ the stream, the ALB idle timeout is 3600 s, and uvicorn's keep-alive is 3620 s t
 | **Process memory** | job registry, per-collection locks, SSE queues | **no** |
 
 The last row is the whole of the singleton constraint. Moving it into Postgres is what would let
-the service run more than one task, make deploys non-destructive, and let a job survive a restart.
+the service run more than one task. (Jobs already survive a restart since Tier 5: their state is
+in `job_runs`, and the new task resumes them.)
 
 ---
 
@@ -422,7 +427,7 @@ the service run more than one task, make deploys non-destructive, and let a job 
 | Jobs across collections | unlimited | — |
 | Crawls | serialized on the shared crawler EC2; the engine accepts them in parallel and they queue there | `backends/scrape.py` |
 | LLM calls within a job | `LLM_WORKERS` = 16 | `llm/pool.py` |
-| LLM calls across jobs | **unbounded** — the first rate-limit risk | see `README.md` guidance |
+| LLM calls across jobs | `LLM_WORKERS_TOTAL` = 64, one limit shared by every LLM job (#24) | `jobs.py` `_llm_gate`, `llm/pool.py` `shared` |
 | Index runs | unlimited; each dispatches its own ECS task | `backends/index.py` |
 | DB connections | work pool `DB_POOL_SIZE` = 16 (jobs, actions; no statement limit) + read pool `DB_READ_POOL_SIZE` = 12 (page requests; `DB_READ_STATEMENT_TIMEOUT_S` = 30 s per statement, `DB_READ_WAIT_S` = 10 s for a connection, else 503) per process, chosen by `db.db_scope`; `Database`'s own default (8, one pool) applies only when it is built without settings; replaced wholesale after each crawl ingest (`recycle_connections`) | `config.py`, `db.py` (`Database`, `db_scope`) |
 | Same page read, many browsers | one run at a time per collection + arguments, shared (`db.SingleFlight`); a change (`Database.touch`, from any non-GET request or bus event) makes the next ask count afresh | `db.py` `_coalesced` |
@@ -444,7 +449,7 @@ What grows with what:
 | Number of collections (30, 300) | dashboard round trips (N+1 on `latest_job`); nothing else |
 | URLs in a collection | whole-set loads in recompute/promote — URL count × ~0.5–1 KB |
 | Bytes of page text | storage (`page_text`, once per hash) and time (~24 s/GB ingest on a laptop); memory only up to one chunk — the ingest, export and LLM paths all stream |
-| Concurrent curators | LLM in-flight calls (unbounded across jobs); DB pool at 16 |
+| Concurrent curators | LLM in-flight calls (64 across all jobs, so each job runs slower when many run); DB pools at 16 + 12 |
 | Job history | `job_runs` / `audit_log` growth; both indexed and read with `LIMIT` |
 
 ### Known risks, in priority order
@@ -456,9 +461,11 @@ What grows with what:
 2. **The ingest peak has a ~270 MB floor that is not the chunk.** Most likely libpq's send buffer
    growing while rows are produced faster than PostgreSQL takes them (psycopg does not flush per
    row on Linux). Only pacing the `COPY` itself would lower it; not worth it at 340 MB.
-3. **The in-process job registry** blocks replication, makes deploys destructive, and loses
-   long jobs to any task replacement.
-4. **No cross-job LLM limiter** — concurrent curators can exceed the provider's rate limit.
+3. **The in-process job registry** blocks replication (one engine task only). Since Tier 5 a deploy
+   no longer loses jobs: every job kind carries on after a restart as the same job, but it repeats
+   the step it was in, and a deploy is still about 90 s without the engine.
+4. **The shared LLM limit is per engine task** (`LLM_WORKERS_TOTAL`, 64). It keeps the engine's
+   own calls bounded; it does not know the provider's actual rate limit.
 5. **Migrations run at boot in the serving process**, so a slow `ALTER` on a large table can
    outrun the 120 s ALB health-check grace period and loop. V9 took ~21 s from container start
    to serving on dev; it is the first migration where this could bite.

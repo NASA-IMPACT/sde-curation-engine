@@ -19,6 +19,7 @@ from tests.support.engine import (
 from tests.support.fake_db import FakeDatabase
 
 RESUME_MAX_RESTARTS = 3  # Settings.resume_max_restarts and scrape_resume_after_restart default
+RESUME_MAX_RESTARTS_TOTAL = 10  # Settings.resume_max_restarts_total default: restarts in all, moving or not
 
 
 async def _running(db, kind: JobKind, *, restarts: int = 0, **fields) -> JobRun:
@@ -32,8 +33,9 @@ async def _running(db, kind: JobKind, *, restarts: int = 0, **fields) -> JobRun:
 
 @pytest.mark.parametrize(("kind", "settings", "restarts", "error"), [
     (JobKind.VALIDATE, {}, RESUME_MAX_RESTARTS - 1, None),  # the 3rd restart still resumes
-    (JobKind.VALIDATE, {}, RESUME_MAX_RESTARTS, "stopped resuming after 3 engine restarts"),  # the 4th fails
-    (JobKind.LLM_METADATA, {"llm_resume_after_restart": 1}, 1, "stopped resuming after 1 engine restarts"),
+    (JobKind.VALIDATE, {}, RESUME_MAX_RESTARTS, "stopped resuming after 3 engine restarts without progress"),
+    (JobKind.LLM_METADATA, {"llm_resume_after_restart": 1}, 1,
+     "stopped resuming after 1 engine restarts without progress"),
     (JobKind.SCRAPE, {}, RESUME_MAX_RESTARTS, "engine restarted while job was running"),
 ])
 async def test_a_restart_resumes_a_job_until_its_restart_limit_then_fails_it(tmp_path, kind, settings, restarts, error):
@@ -51,6 +53,54 @@ async def test_a_restart_resumes_a_job_until_its_restart_limit_then_fails_it(tmp
     else:
         assert (after.state, after.error) == (JobState.FAILED, error)
         assert engine.active_for(CID) is None
+
+
+async def _restart(db, tmp_path, job: JobRun, *, moved_to: int | None = None, **settings) -> JobRun:
+    """One engine restart under `job`. `moved_to`: the job counted that many pages done since the
+    restart before (it was making progress when the engine went down)."""
+    if moved_to is not None:
+        j = await db.get_job(job.id)
+        j.progress = {**j.progress, "done": moved_to}
+        await db.update_job(j)
+    await make_engine(db, tmp_path, **settings).recover()
+    return await db.get_job(job.id)
+
+
+@pytest.mark.parametrize("kind", [JobKind.VALIDATE, JobKind.SCRAPE])
+async def test_a_job_that_moved_since_the_last_restart_starts_its_restart_count_again(tmp_path, kind):
+    """Restarts count against a job only while it makes no progress between them: a long job is not
+    failed by deploys it kept working through (decided 2026-10-12)."""
+    db = FakeDatabase()
+    await collection(db, titles=["A"])
+    job = await _running(db, kind, progress={"done": 0})
+    limits = {"resume_max_restarts": 1, "scrape_resume_after_restart": 1}
+
+    first = await _restart(db, tmp_path, job, **limits)
+    moved = await _restart(db, tmp_path, job, moved_to=5, **limits)
+    stuck = await _restart(db, tmp_path, job, **limits)
+
+    assert (first.state, first.progress["restarts"]) == (JobState.RUNNING, 1)
+    assert (moved.state, moved.progress["restarts"], moved.progress["restarts_total"]) == (JobState.RUNNING, 1, 2)
+    assert stuck.state is JobState.FAILED
+
+
+async def test_a_job_that_keeps_moving_still_stops_at_the_lifetime_restart_limit(tmp_path):
+    """A job that makes a little progress and then brings the engine down again must not loop forever."""
+    db = FakeDatabase()
+    await collection(db, titles=["A"])
+    job = await _running(db, JobKind.VALIDATE, progress={"done": 0})
+    limits = {"resume_max_restarts": 20, "resume_max_restarts_total": 2}
+
+    runs = [await _restart(db, tmp_path, job, moved_to=n, **limits) for n in (1, 2, 3)]
+
+    assert [r.state for r in runs] == [JobState.RUNNING, JobState.RUNNING, JobState.FAILED]
+    assert runs[-1].error == "stopped resuming after 2 engine restarts in all"
+
+
+async def test_the_lifetime_restart_limit_defaults_to_ten():
+    from sde_curation.config import Settings
+
+    assert Settings(llm_provider="fake").resume_max_restarts_total == RESUME_MAX_RESTARTS_TOTAL
 
 
 async def test_a_cancel_while_waiting_to_resume_fails_the_job(tmp_path):

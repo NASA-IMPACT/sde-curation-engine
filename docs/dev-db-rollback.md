@@ -72,6 +72,11 @@ Whichever option you choose, follow these two rules:
    of the same branch brings nothing back. You must either revert the revert, or rebuild the work as
    new commits.
 
+6. **The revert also removes the database parameter group** (`DbParams`, added with V13). The
+   deploy detaches it, and **CloudFormation reboots the database again** (about 1–2 minutes): the
+   group holds a static parameter, and a change of `DBParameterGroupName` on such a group triggers a
+   reboot. Deploy the revert with no jobs running. Merging the work back reboots it once more.
+
 Risk: low. Cost: minutes. It does not get you a V10 database.
 
 ---
@@ -184,7 +189,10 @@ aws ecs wait services-stable --cluster $C --services $C
 ```
 
 ([CLI: ecs update-service](https://docs.aws.amazon.com/cli/latest/reference/ecs/update-service.html))
-- In-flight jobs are marked failed on the next start (`infra/README.md`, Operating notes).
+- Jobs that are running now are **not** marked failed on the next start: they carry on after a
+  restart (`infra/README.md`, Operating notes). The restored database also holds the jobs that were
+  running at the restore time, and they would carry on too. Step 8b fails them before the engine
+  starts.
 - Do this when nobody is working on dev.
 
 ### Step 5 — read the settings the restore must copy
@@ -209,7 +217,7 @@ aws rds restore-db-instance-to-point-in-time \
   --vpc-security-group-ids $SG \
   --db-parameter-group-name "$PG" \
   --no-multi-az --no-publicly-accessible \
-  --storage-type gp3 --max-allocated-storage 100 \
+  --storage-type gp3 --max-allocated-storage 200 \
   --backup-retention-period 7 \
   --no-deletion-protection \
   --copy-tags-to-snapshot \
@@ -228,6 +236,9 @@ aws rds wait db-instance-available --db-instance-identifier $DB-restored
 for i in $DB $DB-restored; do aws rds describe-db-instances --db-instance-identifier $i --query \
  'DBInstances[0].[DBInstanceClass,StorageType,MaxAllocatedStorage,MultiAZ,BackupRetentionPeriod,DBParameterGroups[0].DBParameterGroupName,VpcSecurityGroups[0].VpcSecurityGroupId,EnabledCloudwatchLogsExports,PerformanceInsightsEnabled,AutoMinorVersionUpgrade,StorageEncrypted,KmsKeyId]' --output text; done
 ```
+
+- `--max-allocated-storage 200` is dev's `db_max_storage_gib` (`infra/config.py`). Test's is 500.
+  A smaller value than the stack's makes the instance differ from the template (Step 9 drift check).
 
 ### Step 7 — swap the names
 
@@ -254,6 +265,38 @@ aws rds modify-db-instance --db-instance-identifier $DB \
 
 Also fix anything else that the comparison in Step 6 showed as different
 ([AWS: Turning Performance Insights on](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PerfInsights.Enabling.html)).
+
+### Step 8b — fail the jobs the restored database still calls running
+
+The restored database holds the jobs that were running at the restore time. On start, the engine
+carries on with every one of them as the same job, including **Index to prod**. A resumed prod
+publish runs its deletion pass against prod *as it is now*, and removes pages prod gained after the
+restore time (reproduced 2026-10-08, review finding M11). So fail them before the engine starts.
+
+The engine is stopped (Step 4), so run the update from a one-off task of the engine's own task
+definition. It has the database settings and the network access:
+
+```bash
+TD=$(aws ecs describe-services --cluster $C --services $C --query 'services[0].taskDefinition' --output text)
+NET=$(aws ecs describe-services --cluster $C --services $C --query 'services[0].networkConfiguration' --output json)
+cat > /tmp/fail-jobs.json <<'JSON'
+{"containerOverrides": [{"name": "engine", "command": ["python", "-c",
+ "import os,psycopg;c=psycopg.connect(host=os.environ['DB_HOST'],dbname=os.environ['DB_NAME'],user=os.environ['DB_USER'],password=os.environ['DB_PASSWORD'],sslmode='require',autocommit=True);print(c.execute(\"UPDATE job_runs SET state='failed',finished_at=now(),error='database restored: not resumed' WHERE state IN ('queued','running') RETURNING id,collection_id,kind,run_id\").fetchall())"]}]}
+JSON
+aws ecs run-task --cluster $C --task-definition "$TD" --launch-type FARGATE \
+  --network-configuration "$NET" --overrides file:///tmp/fail-jobs.json
+```
+
+- The task prints the jobs it failed to the engine's log group (stream prefix `engine`). Read it
+  there. An empty list `[]` means no job was running at the restore time.
+- On start, the engine closes the index runs of those jobs (`close_orphan_index_runs`).
+- If a failed job was an **Index to test** or an **Index to prod**, check the indexer's ECS
+  cluster for its task (`startedBy` = `sde-curation-engine:<collection>`) and stop it by hand. The
+  restored database may not hold its task ID.
+- This applies to Option C (snapshot) and Option D (test's data) too. With Option D it matters
+  most: test's running Index to prod jobs would otherwise resume in dev.
+- Checked on 2026-10-12 against a throwaway Postgres with the current schema: the command fails
+  the queued and running jobs, prints them, and leaves the finished ones. Not yet run on AWS.
 
 ### Step 9 — start the engine and verify
 
@@ -305,7 +348,7 @@ aws rds restore-db-instance-from-db-snapshot \
   --db-subnet-group-name "$SUBNETS" --vpc-security-group-ids $SG \
   --db-parameter-group-name "$PG" \
   --no-multi-az --no-publicly-accessible \
-  --storage-type gp3 --max-allocated-storage 100 \
+  --storage-type gp3 --max-allocated-storage 200 \
   --backup-retention-period 7 --no-deletion-protection --copy-tags-to-snapshot \
   --enable-cloudwatch-logs-exports postgresql
 ```
@@ -381,6 +424,13 @@ Compared with a restore:
 - dev keeps all its data, including curation done after the merge.
 - There is no AWS work, no downtime beyond a normal deploy, and no CDK risk.
 - It works the same in every environment, because the migration runs on boot like any other.
+
+> **Update 2026-10-12:** the branch now also has **V19** (`delta_urls.ai_job`,
+> `collections.deltas_current`). If dev runs it, the compensating migration below becomes **V20**,
+> the no-ops cover V11–V19, and it needs two more lines:
+> `ALTER TABLE delta_urls DROP COLUMN IF EXISTS ai_job;` and
+> `ALTER TABLE collections DROP COLUMN IF EXISTS deltas_current;`. Read "V19" below as "V20" and
+> "V11–V18" as "V11–V19". The examples were written before V19 existed.
 
 ### Step 1 — keep the old numbers as no-ops
 

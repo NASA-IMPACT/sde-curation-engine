@@ -23,6 +23,10 @@ ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 log = logging.getLogger(__name__)
+# Tag on every indexer task the engine starts (EcsDispatchIndexer.run_task_args). The indexer's ECS
+# cluster is shared with other workloads, and the engine's IAM role may stop only tasks carrying
+# this tag key (infra/stacks/engine_stack.py, StopEngineIndexerTasks). Changing it needs both.
+ENGINE_TASK_TAG = "sde-curation-engine"
 
 
 class IndexError_(RuntimeError):
@@ -193,6 +197,8 @@ class EcsDispatchIndexer:
                 "command": indexer_command(c, run_id, target, allow_high_deletion=allow_high_deletion),
             }]},
             "startedBy": f"sde-curation-engine:{c.collection_id}"[:36],
+            # L14: the cluster is shared, and the engine's role may stop only tasks with this tag
+            "tags": [{"key": ENGINE_TASK_TAG, "value": c.collection_id[:256]}],
         }
 
     async def dispatch(

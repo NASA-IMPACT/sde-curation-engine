@@ -41,7 +41,14 @@ class IncompleteMetadata(Exception):
             parts.append(f"{dup} sharing a title and document type with another page")
         if blank:
             fix.append("accept the AI suggestions or set the values by hand first")
-        if dup:
+        undecided = counts.get("duplicate_undecided", 0)
+        if undecided:
+            # Regenerate titles already told them apart: promote waits for the curator's decision,
+            # and Regenerate titles would find nothing (it counts undecided titles as accepted)
+            fix.append(f"{undecided} of them have an AI title waiting for a decision: accept or reject it;"
+                       " a page that still shares its title after that needs Regenerate duplicate titles"
+                       " or a title of its own by hand")
+        elif dup:
             fix.append("Regenerate duplicate titles gives the shared ones a title of their own"
                        if blank else "run Regenerate duplicate titles, or give them a title of their own by hand")
         n = counts["urls"]

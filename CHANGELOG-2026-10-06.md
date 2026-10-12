@@ -145,6 +145,9 @@ Every edit runs a full recompute of the collection, by design. The 2026-09-18 sc
 4. **RDS CPU reached 72%** with 5 jobs on 100K collections. Check again after 1–3 before upsizing.
 5. **Index jobs do not resume after a restart.** A re-run dispatches a second indexer task.
 6. **No alarms.** `pg_stat_statements` is not enabled on test, and `/health/db` is behind login.
+   *(Update 2026-10-12: branch `featuure/optimize-app` adds 9 CloudWatch alarms emailed to two
+   addresses, and the parameter group that loads `pg_stat_statements`. Not deployed yet.
+   `/health/db` is still behind login.)*
 7. **12 high-deletion refusals this week** (93–100% of a collection's documents). Investigate.
 8. **The `uavsar` indexer out-of-memory crash** (`sde-api-scrapers`). Decision pending.
 9. **Test storage:** 13 GB free of 20 GB allocated. Pre-raise it before 1–8 GB crawls.

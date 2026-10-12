@@ -2165,7 +2165,9 @@ class Database:
         the retired "General" placeholder — the same problem, but it reads differently to the
         curator. `duplicate` is the rows that would be indexed under a title + document type
         another page already has (undecided AI titles do not count: promote discards them), and it
-        overlaps the field counts — a row can be short of both. `urls`: only these rows (a promote
+        overlaps the field counts — a row can be short of both. `duplicate_undecided` is the subset
+        of `duplicate` with an AI title still undecided: accepting it may be all the row needs, and
+        Regenerate titles does not see it (it counts the AI title as accepted). `urls`: only these rows (a promote
         of a selection). One pass: the duplicate scan is a CTE, read twice, computed once."""
         where, args = "collection_id=%s AND ((" + _INCOMPLETE + ") OR url IN (SELECT url FROM dup))", [collection_id]
         if urls is not None:
@@ -2177,11 +2179,13 @@ class Database:
                 f" COUNT(*) FILTER (WHERE {_NO_DIVISION}) AS division,"
                 " COUNT(*) FILTER (WHERE division = 'General') AS general,"
                 " COUNT(*) FILTER (WHERE document_type IS NULL) AS document_type,"
-                " COUNT(*) FILTER (WHERE url IN (SELECT url FROM dup)) AS duplicate"
+                " COUNT(*) FILTER (WHERE url IN (SELECT url FROM dup)) AS duplicate,"
+                " COUNT(*) FILTER (WHERE url IN (SELECT url FROM dup) AND title_ai IS NOT NULL) AS duplicate_undecided"
                 f" FROM delta_urls WHERE {where}", [collection_id, collection_id, *args],
             )
             r = await cur.fetchone()
-        return {k: r[k] or 0 for k in ("urls", "title", "division", "general", "document_type", "duplicate")}
+        return {k: r[k] or 0 for k in ("urls", "title", "division", "general", "document_type", "duplicate",
+                                       "duplicate_undecided")}
 
     @_touches
     async def set_delta_ai_titles(self, collection_id: str, items: list[dict[str, Any]]) -> int:
