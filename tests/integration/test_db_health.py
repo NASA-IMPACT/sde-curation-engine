@@ -1,0 +1,77 @@
+import os
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from sde_curation.config import Settings
+from sde_curation.db import Database
+from sde_curation.models import Collection, Division, JobKind, JobRun, JobState, Status
+from sde_curation.web.app import create_app
+
+
+@pytest.fixture
+async def db():
+    d = await Database(os.environ["DATABASE_URL"]).connect()
+    yield d
+    await d.close()
+
+
+async def test_status_transitions_and_history(db):
+    await db.insert_collection(
+        Collection(collection_id="c1", name="c1", seed_url="https://c1.org",
+                   division=Division.GENERAL, connector="crawler2", max_pages=5)
+    )
+    await db.set_status("c1", Status.SCRAPED, note="scrape ok")
+    with pytest.raises(ValueError):
+        await db.set_status("c1", Status.LIVE)
+    hist = await db.status_history("c1")
+    assert [h.new_status for h in hist] == [Status.BACKLOG, Status.SCRAPED]
+    assert (await db.get_collection("c1")).status is Status.SCRAPED
+
+
+async def test_job_roundtrip(db):
+    await db.insert_collection(
+        Collection(collection_id="c1", name="c1", seed_url="https://c1.org",
+                   division=Division.GENERAL, connector="crawler2", max_pages=5)
+    )
+    j = await db.insert_job(JobRun(collection_id="c1", kind=JobKind.SCRAPE))
+    j.progress = {"docs": 3}
+    await db.finish_job(j, JobState.FAILED, error="boom")
+    got = await db.get_job(j.id)
+    assert got.state is JobState.FAILED and got.error == "boom" and got.progress == {"docs": 3}
+    assert await db.active_jobs() == []
+
+
+async def test_health(tmp_path):
+    app = create_app(Settings(data_dir=tmp_path))
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+    ):
+        r = await c.get("/health")
+        rdb = await c.get("/health/db")
+    assert r.status_code == 200 and r.json() == {"ok": True, "sse_clients": 0}
+    assert rdb.status_code == 200 and rdb.json()["db"] == "ok" and set(rdb.json()["pools"]) == {"work", "read"}
+
+
+async def test_health_db_reports_how_long_the_event_loop_was_blocked(tmp_path):
+    """A freeze of the event loop (work done on it without yielding) shows up in /health/db as the
+    worst lag since the previous call, and reading it starts the count again."""
+    import asyncio
+    import time
+
+    app = create_app(Settings(data_dir=tmp_path))
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+    ):
+        await asyncio.sleep(0.25)  # the probe has run a few times
+        quiet = (await c.get("/health/db")).json()["loop_lag_ms"]
+        time.sleep(0.4)  # noqa: ASYNC251 - the point: block the loop the way a heavy step would
+        await asyncio.sleep(0.25)
+        blocked = (await c.get("/health/db")).json()["loop_lag_ms"]
+        after = (await c.get("/health/db")).json()["loop_lag_ms"]
+        assert (await c.get("/health")).json() == {"ok": True, "sse_clients": 0}
+    assert quiet["max"] < 250
+    assert blocked["max"] >= 300
+    assert after["max"] < 300  # read() reset the worst value

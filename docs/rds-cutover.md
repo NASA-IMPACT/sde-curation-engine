@@ -20,7 +20,8 @@ which nothing has touched. Edits made in the meantime in PostgreSQL are lost, so
 
 1. **Deploy the new code.** Push to the environment branch (or `make deploy ENV=…`). The first
    deploy creates the instance (~10 min). The new task starts with an **empty** database: the UI
-   shows no collections until step 3. Confirm `/health` returns `"db": "ok"`.
+   shows no collections until step 3. Sign in, then open `/health/db` in the same browser: it must
+   return `"db": "ok"`. (`/health` checks only that the engine answers; it has no `"db"` field.)
 
 2. **Stop the world.** Nobody should be editing: announce it, and check the Jobs page for
    running jobs. (An idle task is fine; the import runs inside it.)

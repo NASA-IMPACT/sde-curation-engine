@@ -1,0 +1,164 @@
+"""Load an existing crawl instead of re-running the crawler."""
+import asyncio
+import json
+import time
+
+from sde_curation.engine.text import content_hash
+from sde_curation.models import Collection, Division
+from tests.support.flows import wait_job
+
+COLL = Collection(collection_id="ex.org", name="Ex", seed_url="https://ex.org", division=Division.GENERAL,
+                  connector="crawler2", max_pages=10)
+
+
+async def test_reuse_local_crawl_output(crawler_client):
+    c = crawler_client
+    await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 10})
+    r = await c.get("/api/collections/ex.org/crawl/existing")
+    assert r.json() == {"exists": False}
+    assert "Load existing crawl" not in (await c.get("/collections/ex.org/step/backlog")).text
+    # nothing to load yet → the job fails cleanly
+    await c.post("/api/collections/ex.org/scrape?reuse=true")
+    job = await wait_job(c, "ex.org")
+    assert job["state"] == "failed" and "no existing crawl" in job["error"]
+
+    # a real crawl leaves output behind; forget the collection and register it again
+    await c.post("/api/collections/ex.org/scrape"); await wait_job(c, "ex.org")
+    docs = c.app.state.settings.crawler_root / "output" / "collections" / "https_ex.org.json"
+    first_bytes = docs.read_bytes()
+    await c.app.state.db.delete_collection("ex.org")
+    await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 10})
+    ex = (await c.get("/api/collections/ex.org/crawl/existing")).json()
+    assert ex["exists"] and not ex["already_loaded"] and ex["where"].endswith("https_ex.org.json")
+    panel = (await c.get("/collections/ex.org/step/backlog")).text
+    assert "Load existing crawl (from" in panel and "scrape?reuse=true" in panel
+    assert "or load existing" in (await c.get("/collections/ex.org/header")).text
+
+    r = await c.post("/api/collections/ex.org/scrape?reuse=true")
+    assert r.status_code == 202
+    job = await wait_job(c, "ex.org")
+    assert job["state"] == "succeeded" and job["progress"]["reused"] is True and job["progress"]["docs"] == 8
+    assert docs.read_bytes() == first_bytes  # the crawler did not run again
+    col = (await c.get("/api/collections/ex.org")).json()
+    assert col["status"] == "scraped" and col["dump_count"] == 8 and col["last_scraped_at"]
+    ex = (await c.get("/api/collections/ex.org/crawl/existing")).json()
+    assert ex["exists"] and ex["already_loaded"]
+    assert "Load existing crawl" not in (await c.get("/collections/ex.org/step/scraped")).text
+    assert "loaded from existing crawl" in (await c.get("/collections/ex.org/step/scraped")).text
+    hist = (await c.get("/collections/ex.org?tab=activity")).text
+    assert "loaded existing crawl from" in hist and "scrape.reuse" in hist
+
+
+async def test_a_huge_binary_page_loads_while_the_engine_keeps_answering(crawler_client):
+    """uavsar.jpl.nasa.gov, 2026-09-28: its crawl kept a PowerPoint deck as 72M characters of
+    "text" — one 175 MB JSON string, nearly all \\uXXXX escapes. The old parser was quadratic in
+    the length of one string; the load pinned a core, /health stopped answering, and ECS killed
+    the engine, which resumed the load and died again. The page is loaded like any other, and
+    the engine answers while it is."""
+    c = crawler_client
+    await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 10})
+    junk = "".join(map(chr, range(0x20))) + '\\"{}[],' + "PK\u0003\u0004\ufffd"  # a binary file, decoded
+    deck = junk * (8_000_000 // len(junk))  # ~40 MB of JSON: ~25 s for the old parser, ~1 s now
+    pages = [
+        {"url": "https://ex.org/a", "title": "A", "full_text": "a", "content_type": "text/html"},
+        {"url": "https://ex.org/deck.pps", "title": "Deck", "full_text": deck, "content_type": "text/html"},
+        {"url": "https://ex.org/b", "title": "B", "full_text": "b", "content_type": "text/html"},
+    ]
+    docs = c.app.state.settings.crawler_root / "output" / "collections" / "https_ex.org.json"
+    docs.parent.mkdir(parents=True, exist_ok=True)
+    docs.write_text("[\n" + ",\n".join(json.dumps(p) for p in pages) + "\n]\n")  # the crawler's layout
+
+    assert (await c.post("/api/collections/ex.org/scrape?reuse=true")).status_code == 202
+    started = time.monotonic()
+    slowest = 0.0
+    while True:
+        t = time.monotonic()
+        assert (await c.get("/health")).json()["ok"]
+        slowest = max(slowest, time.monotonic() - t)
+        job = (await c.get("/api/collections/ex.org/jobs")).json()[0]
+        if job["state"] != "running" or t - started > 10:
+            break
+        await asyncio.sleep(0.05)
+    assert job["state"] == "succeeded", f"after {time.monotonic() - started:.0f}s: {job}"
+    assert slowest < 2, f"/health took {slowest:.1f}s during the load"
+
+    kept = deck.replace("\x00", "")  # PostgreSQL text cannot hold NUL; the ingest drops it
+    dump = (await c.get("/api/collections/ex.org/dump")).json()
+    assert dump["total"] == 3
+    assert {r["url"]: r["text_len"] for r in dump["items"]}["https://ex.org/deck.pps"] == len(kept)
+    stored = {r.url: r.content_hash for r in await c.app.state.db.load_dump("ex.org")}
+    assert stored["https://ex.org/deck.pps"] == content_hash(kept)
+
+
+async def test_workbench_shows_a_running_crawl_but_does_not_offer_to_load_it(crawler_client, monkeypatch):
+    from datetime import UTC, datetime
+
+    from sde_curation.backends.scrape import ExistingCrawl
+
+    c = crawler_client
+    await c.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex", "max_pages": 10})
+    ckpt = ExistingCrawl(modified=datetime(2026, 9, 14, 20, 28, tzinfo=UTC), where="s3://b/scraped_collections/https_ex.org.json",
+                         size=5715488, complete=False)
+
+    async def existing(_collection):
+        return ckpt
+
+    monkeypatch.setattr(c.app.state.jobs.scraper, "existing", existing)
+    ex = (await c.get("/api/collections/ex.org/crawl/existing")).json()
+    assert ex["exists"] and not ex["complete"] and not ex["loadable"] and not ex["already_loaded"]
+    panel = (await c.get("/collections/ex.org/step/backlog")).text
+    assert "crawl in progress" in panel and "scrape?reuse=true" not in panel
+    # and Scrape is greyed out: dropping another job would only crawl the site a second time
+    scrape = panel.split('hx-post="/api/collections/ex.org/scrape"')[0].rsplit("<button", 1)[1]
+    assert "disabled" in scrape and "already running on the crawler host" in scrape
+    header = (await c.get("/collections/ex.org/header")).text
+    assert "or load existing" not in header
+    assert 'hx-post="/api/collections/ex.org/scrape"' not in header and "crawl in progress on the host" in header
+
+    ckpt.complete = True  # the summary landed: the crawl is over
+    c.app.state.existing_cache.clear()
+    panel = (await c.get("/collections/ex.org/step/backlog")).text
+    scrape = panel.split('hx-post="/api/collections/ex.org/scrape"')[0].rsplit("<button", 1)[1]
+    assert "disabled" not in scrape and "scrape?reuse=true" in panel
+    assert 'hx-post="/api/collections/ex.org/scrape"' in (await c.get("/collections/ex.org/header")).text
+
+
+async def test_remote_crawl_streams_from_s3_into_postgres(client, aws):
+    """The whole point of the remote path: a crawl goes from the S3 object into the tables without
+    being written down on this host. The rows, their text and the crawl's failures all land, the
+    spellings of one page collapse to one row, and DATA_DIR gains nothing."""
+    import boto3
+
+    from sde_curation.backends.scrape import S3Documents
+
+    key = "scraped_collections/https_ex.org.json"
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="crawl-bkt")
+    s3.put_object(Bucket="crawl-bkt", Key=key, Body=json.dumps([
+        {"url": "https://ex.org/a", "title": "A", "full_text": "body a"},
+        {"url": "http://ex.org/a/", "title": "A (http)", "full_text": "body a"},  # the same page
+        {"url": "https://ex.org/b", "title": "B", "full_text": "body b"},
+    ]))
+    await client.post("/api/collections", json={"seed_url": "https://ex.org", "name": "Ex"})
+
+    n = await client.app.state.jobs.ingest_dump(
+        "ex.org", S3Documents(s3, "crawl-bkt", key),
+        [{"url": "https://ex.org/c", "reason": "http_403", "status": 403}],
+    )
+    assert n == 2, "the two spellings of /a are one page"
+
+    db = client.app.state.db
+    assert {d.url for d in await db.load_dump("ex.org")} == {"https://ex.org/a", "https://ex.org/b"}
+    assert await db.load_dump_failures("ex.org") == {"https://ex.org/c": "http_403"}
+    # the text came across, and is stored once per distinct page rather than once per row
+    async with db._conn() as conn:
+        cur = await conn.execute("SELECT full_text FROM page_text WHERE collection_id='ex.org'")
+        assert {r["full_text"] for r in await cur.fetchall()} == {"body a", "body b"}
+    # and reads back through the hash, which is how the LLM job gets it
+    await client.post("/api/collections/ex.org/recompute")
+    assert {r["url"]: r["text"] for r in await db.docs_for_llm("ex.org", ["https://ex.org/b"])} == {
+        "https://ex.org/b": "body b"}
+
+    # nothing was staged on the way: no copy of the crawl under DATA_DIR
+    data_dir = client.app.state.settings.data_dir
+    assert not (data_dir / "scrapes").exists()

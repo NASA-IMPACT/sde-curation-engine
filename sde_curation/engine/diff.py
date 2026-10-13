@@ -74,9 +74,19 @@ class DeltaSet:
     curated_excluded: list[tuple[str, bool]] = field(default_factory=list)
     # dump URLs the rules keep out (they have no delta row, so they are counted here)
     excluded: int = 0
+    # A recompute of a few pages only (CurationService.recompute_keys) holds just their rows; this is
+    # then the whole collection's counts after its write, which `counts` and `total` report instead.
+    whole: dict[str, int] | None = None
+
+    @property
+    def total(self) -> int:
+        """Delta URLs in the whole collection after this recompute."""
+        return self.whole["total"] if self.whole is not None else len(self.deltas)
 
     @property
     def counts(self) -> dict[str, int]:
+        if self.whole is not None:
+            return {k: v for k, v in self.whole.items() if k != "total"}
         c = {k.value: 0 for k in DeltaKind}
         for d in self.deltas:
             c[d.kind.value] += 1
@@ -123,6 +133,7 @@ def recompute(
     capped: bool = False,
     division: str | None = None,
     review_all: bool = False,
+    keep_queued: bool = False,
 ) -> DeltaSet:
     """`failures`: url -> crawler reason for every URL the crawl tried and could not fetch;
     `capped`: the crawl stopped at its page cap (unmet curated URLs are kept, not removed);
@@ -132,7 +143,11 @@ def recompute(
     is queued as a delta even where nothing differs from the curated row, so the AI passes and the
     review tables have something to work on. Exclusions are still the rules' decision, removals are
     still removals, and promoting the queue writes back what it says: an untouched row re-promotes
-    to the values it already had."""
+    to the values it already had.
+    `keep_queued`: a review round is open (a "Re-curate everything" earlier): a page that is in the
+    queue already (`previous`) stays queued as `modified` even where nothing differs, so the round is
+    not undone by the next recompute. Pages not in the queue follow the normal rules, so a page
+    promoted out of the round, or excluded by a rule, does not come back."""
     dump_by = {d.url: d for d in dump}
     cur_by = {c.url: c for c in curated}
     prev_by = {p.url: p for p in previous or []}
@@ -191,7 +206,7 @@ def recompute(
         renamed_from = cu if cu is not None and cu != u else None
         if c is None:
             kind = DeltaKind.NEW
-        elif (review_all or renamed_from or content_changed
+        elif (review_all or (keep_queued and u in prev_by) or renamed_from or content_changed
               or eff != (c.scraped_title, c.title, c.division, c.document_type, c.excluded)):
             kind = DeltaKind.MODIFIED
         else:
@@ -200,6 +215,8 @@ def recompute(
             if c.crawl_failure:  # fetched again: the flag comes down
                 curated_crawl_failure.append((u, None))
             continue
+        if c is not None and c.crawl_failure:  # fetched again, and changed: the flag comes down too (L10)
+            curated_crawl_failure.append((cu, None))  # type: ignore[arg-type]
         prev = prev_by.get(u)
         deltas.append(
             DeltaUrl(

@@ -123,6 +123,9 @@ class JobKind(StrEnum):
     RECOMPUTE = "recompute"
     BULK_ACCEPT = "bulk_accept"
     BULK_SUGGESTIONS = "bulk_suggestions"
+    # one rule added or deleted on a big collection: the full recompute it needs (2026-10-13)
+    RULE_ADD = "rule_add"
+    RULE_DELETE = "rule_delete"
 
 
 class JobState(StrEnum):
@@ -302,6 +305,15 @@ class Collection(BaseModel):
     # not counted (an exclude rule takes effect at once, so this drops as soon as one is added).
     curated_count: int = 0
     curated_rows: int = 0  # the whole curated set, included + excluded ("has anything been promoted")
+    # dump URLs the rules keep out (no delta row); stored by every recompute. None = not known yet:
+    # read it through Database.excluded_count, which counts and stores it then.
+    excluded_count: int | None = None
+    # A "Re-curate everything" round is open: recomputes keep the pages it queued (engine.diff,
+    # keep_queued) until the queue is promoted or a new crawl is ingested.
+    review_round: bool = False
+    # The delta set was built by a full recompute over the current crawl (V19). False from a crawl
+    # ingest until Start curating: a per-URL edit then recomputes the whole collection (H1).
+    deltas_current: bool = True
     # when the curated set last changed (a promote, or an exclude rule applied in place): an index
     # run older than this is behind the curated set
     curated_changed_at: datetime | None = None

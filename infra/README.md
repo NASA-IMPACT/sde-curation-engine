@@ -88,12 +88,35 @@ SMCE prod collection through `PROD_INDEX_ROLE_ARN` instead: see
 
 ## Operating notes
 - **Single task by design** (in-process job registry and locks). A deploy replaces the task
-  (`minHealthyPercent=0`), so in-flight jobs are marked failed on restart — deploy when idle.
+  (`minHealthyPercent=0`): about 90 s without the engine. Running jobs are **not** failed: every
+  job kind carries on after the restart as the same job, started `RESUME_START_DELAY_S` after the
+  engine serves. A job fails instead after `RESUME_MAX_RESTARTS` (3) restarts in a row with no
+  progress between them, or `RESUME_MAX_RESTARTS_TOTAL` (10) restarts in all. A scrape
+  keeps running on the crawler host meanwhile. Deploy when idle anyway: a resumed job repeats the
+  step it was in. **A restored database resumes its running jobs too**, including Index to prod:
+  fail them first ([dev-db-rollback.md](../docs/dev-db-rollback.md), Step 8b).
 - **Database**: RDS PostgreSQL 17, `db.m6i.large` everywhere, single-AZ in dev and test, Multi-AZ
-  in prod (`config.py`), 20 GB gp3 autoscaling to 100 GB, encrypted, not publicly accessible, only
-  the service security group may connect. Automated backups with point-in-time recovery (7 days;
-  35 in prod), deletion protection in prod, and a final snapshot on stack deletion. Performance
-  Insights and the PostgreSQL log in CloudWatch are on.
+  in prod (`config.py`), 20 GB gp3 autoscaling to `db_max_storage_gib` (200 GB; 500 GB in test),
+  encrypted, not publicly accessible, only the service security group may connect. Automated
+  backups with point-in-time recovery (7 days; 35 in prod), deletion protection in prod, and a
+  final snapshot on stack deletion. Performance Insights and the PostgreSQL log in CloudWatch are
+  on. A parameter group loads `pg_stat_statements` and logs statements over 2 s.
+- **First deploy with the parameter group (M1)**: the deploy that first attaches the parameter group
+  to an environment's database **reboots that database**, about 1–2 minutes without it.
+  CloudFormation reboots on attach because `shared_preload_libraries` is a static parameter. It
+  happens once per environment: dev on the merge to `dev`, test and prod when the change reaches
+  their branch. Before that deploy: check the Jobs page shows nothing running (a database outage
+  fails running jobs; only an engine restart resumes them), and tell the curators. After it: check
+  that the extension exists, because migration V13 creates it once and skips quietly if the library
+  was not loaded yet:
+  `python -c "…; print(c.execute(\"select extversion from pg_extension where extname='pg_stat_statements'\").fetchall())"`
+  (the `psycopg.connect(...)` from [dev-db-rollback.md](../docs/dev-db-rollback.md), Step 1). An
+  empty list means: run `CREATE EXTENSION IF NOT EXISTS pg_stat_statements` once.
+- **Alarms**: 9 CloudWatch alarms (database CPU, memory and connections; engine 5xx, slow answers,
+  unhealthy, none healthy; load-balancer 5xx; engine memory) notify the SNS topic
+  `<name>-alarms`, which emails every address in `alarm_emails` (`config.py`). After each
+  environment's first deploy, every address receives an AWS "Subscription Confirmation" email and
+  gets no alarms until someone clicks its link.
 - **Query the database**: from a shell in the task (below) — `python -c` with `psycopg` and the
   `DB_*` env, or `apt-get`-free: `python -m sde_curation.import_sqlite --help` shows the env it
   reads. For `psql` from a laptop, add an SSM-reachable bastion or a temporary ingress rule on

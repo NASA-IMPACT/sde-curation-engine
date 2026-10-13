@@ -1,0 +1,6 @@
+{#- The tab body of a collection page: collection.html includes it, and /collections/<id>/tab-body
+   renders it alone for #job-watch, so the two can never differ. -#}
+<div id="tab-body" data-tab="{{ tab }}" data-step="{{ selected }}">
+  {% if tabbed %}{% include "partials/tabs.html" %}{% endif %}
+  {% include tab_template %}
+</div>

@@ -30,11 +30,18 @@ dev = [
     "ruff>=0.6",
     "pytest-timeout>=2.4.0",
     "testcontainers[postgres]>=4.8",
+    "playwright>=1.45",
+    "coverage>=7.6",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "unit: one function or class; no database, subprocess or network (tests/unit)",
+    "integration: the engine's parts against a real PostgreSQL (tests/integration)",
+    "e2e: whole workflows with real subprocesses, S3 and restarts (tests/e2e)",
+]
 
 [tool.ruff]
 line-length = 100

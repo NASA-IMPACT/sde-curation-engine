@@ -1,4 +1,4 @@
-.PHONY: install requirements requirements-check db-up db-down db-shell run test lint docker-build docker-run infra-install infra-test infra-seed bootstrap-github synth diff deploy destroy redeploy logs
+.PHONY: install requirements requirements-check db-up db-down db-shell run test test-unit test-integration test-e2e lint docker-build docker-run infra-install infra-test infra-seed bootstrap-github synth diff deploy destroy redeploy logs
 # Dependencies: pyproject.toml + uv.lock are the source of truth; requirements*.txt are exported
 # from the lock (`make requirements`) so pip-only developers, CI and the Docker image install the
 # exact same versions. `make install` uses uv when it is on PATH and plain venv+pip otherwise;
@@ -48,10 +48,18 @@ db-compact:  ## VACUUM FULL the text-heavy tables — hands freed space back to 
 	                 -c "VACUUM (FULL, ANALYZE) page_text"
 run: db-up
 	$(VENV)/bin/uvicorn sde_curation.web.app:app --reload --port 8080
-test:  ## tests: reuse TEST_DATABASE_URL when set, else testcontainers starts a throwaway PostgreSQL
-	$(VENV)/bin/python -m pytest -q
-test-local: db-up  ## tests against the compose database (what CI does with a service container)
-	TEST_DATABASE_URL=$(DB_URL) $(VENV)/bin/python -m pytest -q
+# Tests in three levels (tests/conftest.py): unit (no database, seconds), integration (PostgreSQL),
+# end-to-end (real crawler/indexer subprocesses, S3, restarts). Integration and end-to-end reuse
+# TEST_DATABASE_URL when set, else testcontainers starts a throwaway PostgreSQL (needs Docker).
+test: test-unit test-integration test-e2e  ## all three levels, fastest first; stops at the first failing level
+test-unit:  ## unit tests: no database, no Docker
+	$(VENV)/bin/python -m pytest -q tests/unit
+test-integration:  ## integration tests: the API, database layer and jobs against PostgreSQL
+	$(VENV)/bin/python -m pytest -q tests/integration
+test-e2e:  ## end-to-end tests: whole workflows with real subprocesses, S3 and restarts
+	$(VENV)/bin/python -m pytest -q tests/e2e
+test-local: db-up  ## all levels against the compose database (what CI does with a service container)
+	TEST_DATABASE_URL=$(DB_URL) $(MAKE) test
 lint:
 	$(VENV)/bin/python -m ruff check sde_curation tests
 

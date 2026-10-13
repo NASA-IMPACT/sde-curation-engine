@@ -59,7 +59,8 @@ and pushes to any other branch only run the tests (`.github/workflows/test.yml`)
 credentials are involved, so a fork or a PR can never deploy.
 
 Doc-only commits (README, `docs/`) do not trigger a deploy. Every real deploy replaces the single
-task, so a scrape/index job running at that moment is marked failed — merge when the UI is idle.
+task: about 90 s without the engine. Jobs running at that moment carry on in the new task as the
+same job (Tier 5) and repeat the step they were in — merge when the UI is idle anyway.
 
 ## 2. One-time setup for an environment (admin, with an SSO profile)
 

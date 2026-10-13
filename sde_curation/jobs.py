@@ -4,7 +4,11 @@ records explicit success/failure in job_runs, and publishes SSE events."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ctypes
+import functools
+import hashlib
+import json
 import logging
 import tempfile
 import time
@@ -19,7 +23,7 @@ from .backends.s3 import S3
 from .backends.scrape import DocumentSource, ProgressCb, ScrapeBackend, ScrapeError, iter_documents
 from .backends.validate import NoIndexAccess, validate_direct
 from .config import Settings
-from .db import Database
+from .db import Database, work_context
 from .engine.export import (
     build_manifest,
     export_lines,
@@ -28,7 +32,7 @@ from .engine.export import (
     status_prefix,
     write_jsonl,
 )
-from .engine.patterns import match_counts
+from .engine.patterns import is_exact, match_counts, url_key_index
 from .engine.text import content_hash
 from .engine.urls import batches, dedupe_variants
 from .events import EventBus
@@ -65,8 +69,19 @@ from .models import (
 log = logging.getLogger(__name__)
 
 # Suggest metadata writes answers to the DB in small chunks (cancel keeps them, commits stay few).
+# A running job's progress is written to job_runs and announced to every open tab at most this often.
+# Each announcement used to be one UPDATE and one event per second per job (the LLM pool's pace); the
+# browser shows at most one refresh per 3 s per element anyway (base.html sseRefresh), so curators see
+# the same. Progress a restart depends on, and every change of phase or state, goes out at once.
+PROGRESS_EVERY_S = 3.0
+_URGENT_PROGRESS = frozenset({"phase", "pid", "ssm_command", "external_ref"})
 AI_FLUSH_ROWS = 25
 AI_FLUSH_SECONDS = 2.0
+DISPATCH_WAIT_ON_CANCEL_S = 60  # a cancel during the indexer dispatch waits this long to stop the task it started
+# Progress keys that the resume itself writes, or that rise and fall while a job waits: a change in
+# them does not show that the job moved since the last engine restart.
+_RESTART_BOOKKEEPING = frozenset({"restarts", "restarts_total", "restart_mark", "resumed", "resumed_from",
+                                  "resumed_watch", "inflight", "title_calls_inflight"})
 # How often the crawl ingest reports the pages it has read. Each report is one job-row UPDATE and
 # one SSE event, so it is paced by the clock rather than by the read chunks: a small crawl
 # is over before the second report, a big one ticks steadily.
@@ -84,6 +99,27 @@ DISAMBIGUATE_ROUNDS = 3
 
 class JobConflict(Exception):
     pass
+
+
+def to_ranges(numbers: set[int]) -> str:
+    """{0,1,2,5,7,8} → "0-2,5,7-8": a resume checkpoint stays a few bytes, however many batches."""
+    out: list[str] = []
+    for n in sorted(numbers):
+        if out and "-" not in out[-1].rsplit(",", 1)[-1] and int(out[-1]) == n - 1:
+            out[-1] = f"{out[-1]}-{n}"
+        elif out and "-" in out[-1] and int(out[-1].split("-")[1]) == n - 1:
+            out[-1] = f"{out[-1].split('-')[0]}-{n}"
+        else:
+            out.append(str(n))
+    return ",".join(out)
+
+
+def from_ranges(text: str | None) -> set[int]:
+    out: set[int] = set()
+    for part in filter(None, (text or "").split(",")):
+        a, _, b = part.partition("-")
+        out.update(range(int(a), int(b or a) + 1))
+    return out
 
 
 class JobManager:
@@ -105,6 +141,18 @@ class JobManager:
         self._starting: set[str] = set()  # collections with a job being created (TOCTOU guard)
         self._cancel_actor: dict[int, str] = {}  # job id → who asked for the cancel
         self._shutting_down = False  # set by shutdown(): a scrape then stays 'running' for the next start
+        # resuming after an engine restart (see recover / _run_resumes)
+        self._resume_queue: list[JobRun] = []  # jobs recover() decided to resume, in order
+        self._pending_resume: dict[str, JobRun] = {}  # collection → its job, until the resume starts
+        self._resumed: set[int] = set()  # job ids running as a resume: their heavy phases are limited
+        self._heavy = asyncio.Semaphore(settings.resume_concurrency)
+        self._resume_task: asyncio.Task | None = None
+        self._llm_gate = asyncio.Semaphore(settings.llm_workers_total)  # #24: across all LLM jobs
+        # #34: (kind, collection, stored request, actor) -> the bulk change's coroutine factory; set by
+        # the web app, which owns the curation code those jobs run
+        self.curation_work: Callable[[JobKind, Collection, dict[str, Any], str | None], Callable[[], Awaitable[Any]]] | None = None
+        self._last_progress: dict[int, float] = {}  # job id → when its progress was last published
+        self._trailing: dict[int, asyncio.Task] = {}  # job id → the pending publish of later progress
 
     # ── infrastructure ─────────────────────────────────────────────────
 
@@ -114,7 +162,44 @@ class JobManager:
 
     _lock = lock
 
+    def _resumers(self) -> dict[JobKind, Callable[[Collection, JobRun], Awaitable[None]]]:
+        """Job kinds that carry on after an engine restart, and how: (collection, job) → the job's
+        run, continued from what it saved. A kind listed here is left 'running' at shutdown and
+        resumed by the next engine (recover → _run_resumes); every other kind fails as before.
+        Scrape has its own path (_resume_scrape)."""
+        return {
+            JobKind.INDEX_TEST: self._resume_index,  # #22, #33
+            JobKind.VALIDATE: self._resume_revalidate,  # #32
+            JobKind.VALIDATE_PROD: self._resume_revalidate,  # #32
+            JobKind.INDEX_PROD: self._resume_publish_prod,  # #31
+            JobKind.LLM_PATTERNS: lambda c, job: self._run_llm_patterns(c, job, resume=True),  # #29
+            JobKind.LLM_TITLES: lambda c, job: self._run_llm_titles(c, job, resume=True),  # #30
+            JobKind.LLM_METADATA: lambda c, job: self._run_llm_metadata(  # #35; M5: a "redo all" stays one
+                c, job, bool(job.progress.get("only_missing", True)), resume=True),
+            JobKind.RECOMPUTE: self._resume_curation,  # #34
+            JobKind.BULK_ACCEPT: self._resume_curation,  # #34
+            JobKind.BULK_SUGGESTIONS: self._resume_curation,  # #34
+            JobKind.RULE_ADD: self._resume_curation,
+            JobKind.RULE_DELETE: self._resume_curation,
+        }
+
+    def resumable(self, kind: JobKind | str) -> bool:
+        return JobKind(kind) in self._resumers()
+
+    @contextlib.asynccontextmanager
+    async def heavy_phase(self, job: JobRun) -> AsyncIterator[None]:
+        """Wrap a job's heavy phase (export, prod publish pre-flight, recompute, bulk accept). For a
+        job running as a resume, at most `resume_concurrency` of these run at once; a first run is not
+        limited (it was started by a curator, one at a time)."""
+        if job.id not in self._resumed:
+            yield
+            return
+        async with self._heavy:
+            yield
+
     def active_for(self, collection_id: str) -> JobRun | None:
+        if (pending := self._pending_resume.get(collection_id)) is not None:
+            return pending  # resumes shortly: the collection is busy as for any running job
         # A job counts as active until its final state is recorded (finish_job), not until the
         # asyncio task exits: the task still emits events after that, and a caller that saw
         # "succeeded" in the DB must not be told the job is running.
@@ -126,6 +211,9 @@ class JobManager:
         return None
 
     def _emit(self, c: Collection | str, job: JobRun | None = None) -> None:
+        if job is not None and job.state not in (JobState.QUEUED, JobState.RUNNING):
+            self._forget_progress(job.id)  # its final state is out: no progress after it
+            self._resumed.discard(job.id)
         cid = c if isinstance(c, str) else c.collection_id
         data: dict[str, Any] = {"collection_id": cid}
         if not isinstance(c, str):
@@ -134,8 +222,43 @@ class JobManager:
             data["job"] = {"id": job.id, "kind": job.kind, "state": job.state, "progress": job.progress}
         self.bus.publish("collection", data)
 
+    async def _publish_progress(self, c: Collection, job: JobRun, *, urgent: bool = False) -> None:
+        """Persist and announce `job.progress` (already merged by the caller), at most once every
+        PROGRESS_EVERY_S. Progress that arrives sooner is published when the interval ends, so the
+        last value always goes out. `urgent`: now, whatever the interval."""
+        now = time.monotonic()
+        last = self._last_progress.get(job.id)
+        if urgent or last is None or now - last >= PROGRESS_EVERY_S:
+            pending = self._trailing.pop(job.id, None)
+            if pending is not None:
+                pending.cancel()
+            self._last_progress[job.id] = now
+            await self.db.update_job(job)
+            self._emit(c, job)
+        elif job.id not in self._trailing:
+            self._trailing[job.id] = asyncio.create_task(
+                self._publish_later(c, job, PROGRESS_EVERY_S - (now - last)), name=f"progress-{job.id}")
+
+    async def _publish_later(self, c: Collection, job: JobRun, delay: float) -> None:
+        await asyncio.sleep(delay)
+        if self._trailing.get(job.id) is not asyncio.current_task():
+            return
+        del self._trailing[job.id]
+        if job.state in (JobState.QUEUED, JobState.RUNNING):
+            self._last_progress[job.id] = time.monotonic()
+            await self.db.update_job(job)
+            self._emit(c, job)
+
+    def _forget_progress(self, job_id: int) -> None:
+        self._last_progress.pop(job_id, None)
+        pending = self._trailing.pop(job_id, None)
+        if pending is not None and pending is not asyncio.current_task():
+            pending.cancel()
+
     async def _spawn(self, job: JobRun, coro) -> JobRun:
-        task = asyncio.create_task(coro, name=f"job-{job.id}")
+        # the work scope: a job a page request started must not run on the read pool, under its
+        # statement timeout (a recompute on 100k URLs is minutes of legitimate work)
+        task = asyncio.create_task(coro, name=f"job-{job.id}", context=work_context())
         task.job = job  # type: ignore[attr-defined]
         self._tasks[job.id] = task
         task.add_done_callback(lambda t: self._tasks.pop(job.id, None))
@@ -143,6 +266,12 @@ class JobManager:
 
     async def cancel(self, collection_id: str, *, actor: str | None = None) -> JobRun | None:
         """Cancel the running job for a collection; waits until it has recorded 'failed'."""
+        if (pending := self._pending_resume.pop(collection_id, None)) is not None:
+            self._resume_queue = [j for j in self._resume_queue if j.id != pending.id]
+            await self._stop_index_task(pending, f"cancelled by {actor or 'shutdown'}")
+            await self.db.finish_job(pending, JobState.FAILED, error=f"cancelled by {actor or 'shutdown'}")
+            self._emit(collection_id, pending)
+            return await self.db.get_job(pending.id)
         for jid, t in list(self._tasks.items()):
             j: JobRun | None = getattr(t, "job", None)
             if j and j.collection_id == collection_id and not t.done():
@@ -155,6 +284,11 @@ class JobManager:
 
     async def shutdown(self) -> None:
         self._shutting_down = True
+        if self._resume_task is not None:  # jobs not started yet stay 'running' for the next engine
+            self._resume_task.cancel()
+            await asyncio.gather(self._resume_task, return_exceptions=True)
+        for job_id in list(self._trailing):
+            self._forget_progress(job_id)
         for t in list(self._tasks.values()):
             t.cancel()
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
@@ -162,16 +296,21 @@ class JobManager:
     async def recover(self) -> None:
         """Startup: jobs left 'running' by a previous process are dead — say so explicitly — except
         a scrape: the crawl runs on the crawler host and outlives the engine, so the SAME job carries
-        on watching it (_resume_scrape). A Suggest-metadata job the restart interrupted (killed under
-        it, or cancelled by the shutdown of a deploy) is started again for the URLs still without an
-        answer: what it had already been told is in the table, so nothing is asked or paid for twice."""
+        on watching it (_resume_scrape). Kinds in the resume registry (_resumers) are queued to carry on
+        as the same job (_queue_resume / _run_resumes). A Suggest-metadata run an older engine already
+        marked failed ("cancelled by shutdown", the first deploy of this code) is started again as a
+        new job for the URLs still without an answer: nothing is asked or paid for twice."""
         interrupted = await self.db.jobs_ended_by_shutdown()
         for j in await self.db.active_jobs():
             if j.kind == JobKind.SCRAPE and await self._resume_scrape(j):
                 continue
+            if self.resumable(j.kind) and await self._queue_resume(j):
+                continue
             await self.db.finish_job(j, JobState.FAILED, error="engine restarted while job was running")
             self._emit(j.collection_id, j)
             interrupted.append(j)
+        # index runs whose job is not carrying on are over: say so instead of leaving them 'running'
+        await self.db.close_orphan_index_runs(keep=[j.run_id for j in self._resume_queue if j.run_id])
         for j in interrupted:
             if j.kind == JobKind.SCRAPE:
                 # an engine from before 2026-09-25 recorded its scrape as failed on shutdown while
@@ -195,17 +334,106 @@ class JobManager:
             await self.db.update_job(new)
             log.info("resumed %s for %s as job %s (after job %s)", j.kind, c.collection_id, new.id, j.id)
 
+    def _count_restart(self, j: JobRun, limit: int) -> str | None:
+        """Count one more engine restart against job `j`, in its progress. `restarts` counts the
+        restarts in a row the job made no progress between: it starts again from 0 when the job's
+        progress changed since the last restart (`restart_mark`), so a long job is not failed by
+        deploys it kept working through. `restarts_total` counts them all and stops a job that moves
+        a little and then brings the engine down again. Returns why the job must fail instead, or
+        None (and `j.progress` holds the new counts)."""
+        p = j.progress
+        mark = hashlib.sha1(json.dumps({k: v for k, v in p.items() if k not in _RESTART_BOOKKEEPING},
+                                       sort_keys=True, default=str).encode()).hexdigest()[:12]
+        in_a_row = 0 if p.get("restart_mark") not in (None, mark) else int(p.get("restarts", 0))
+        total = int(p.get("restarts_total", p.get("restarts", 0)))  # jobs from before the total: their count
+        if in_a_row >= limit:
+            return f"stopped resuming after {in_a_row} engine restarts without progress"
+        if total >= self.s.resume_max_restarts_total:
+            return f"stopped resuming after {total} engine restarts in all"
+        j.progress = {**p, "restarts": in_a_row + 1, "restarts_total": total + 1, "restart_mark": mark}
+        return None
+
+    async def _queue_resume(self, j: JobRun) -> bool:
+        """Decide whether job `j` (left 'running' by the previous engine) resumes, and queue it.
+        The restart is counted and written before anything runs again, so a job that brings the
+        engine down during its resume is counted too; past `resume_max_restarts` it fails. Returns
+        False when the collection is gone (the caller then fails the job as before)."""
+        c = await self.db.get_collection(j.collection_id)
+        if c is None:
+            return False
+        # Suggest metadata keeps its own long-standing setting (same default)
+        limit = self.s.llm_resume_after_restart if j.kind == JobKind.LLM_METADATA else self.s.resume_max_restarts
+        if refused := self._count_restart(j, limit):
+            await self._stop_index_task(j, refused)
+            await self.db.finish_job(j, JobState.FAILED, error=refused)
+            self._emit(c, j)
+            return True
+        j.state, j.error, j.finished_at = JobState.RUNNING, None, None
+        await self.db.update_job(j)
+        self._resume_queue.append(j)
+        self._pending_resume[j.collection_id] = j
+        self._emit(c, j)
+        return True
+
+    async def _stop_index_task(self, job: JobRun, reason: str) -> None:
+        """An index job that ends without running again (M2): stop the indexer task it started, by
+        its saved id, and close its run. Other kinds started nothing outside the engine."""
+        if job.kind != JobKind.INDEX_TEST or not job.run_id:
+            return
+        run = await self.db.get_index_run(job.run_id)
+        ref = (run.external_ref if run else None) or job.external_ref
+        backend = self.indexer()
+        if ref and hasattr(backend, "kill"):
+            await backend.kill(Dispatch(external_ref=ref, detail={}))
+        if run is not None and run.state == "running":
+            run.state, run.error, run.finished_at = "failed", reason, utcnow()
+            await self.db.update_index_run(run)
+
+    def start_resumes(self) -> None:
+        """Start the jobs recover() queued, in the background: called once the engine serves."""
+        if self._resume_queue and self._resume_task is None:
+            self._resume_task = asyncio.create_task(self._run_resumes(), name="resumes", context=work_context())
+
+    async def _run_resumes(self) -> None:
+        """The queued resumes, `resume_start_delay_s` after startup and `resume_stagger_s` apart."""
+        await asyncio.sleep(self.s.resume_start_delay_s)
+        resumers = self._resumers()
+        while self._resume_queue:
+            j = self._resume_queue.pop(0)
+            try:
+                c = await self.db.get_collection(j.collection_id)
+                if self._pending_resume.get(j.collection_id) is not j:
+                    continue  # cancelled meanwhile
+                if c is None:
+                    self._pending_resume.pop(j.collection_id, None)
+                    await self.db.finish_job(j, JobState.FAILED, error="collection gone")
+                    continue
+                self._resumed.add(j.id)
+                await self._spawn(j, resumers[JobKind(j.kind)](c, j))
+                self._pending_resume.pop(j.collection_id, None)
+                log.info("%s job %s for %s resumes after an engine restart (restart %s)",
+                         j.kind, j.id, j.collection_id, j.progress.get("restarts"))
+            except Exception as e:  # one job's error must not strand the others (M3)
+                log.exception("job %s for %s could not resume", j.id, j.collection_id)
+                if self._pending_resume.get(j.collection_id) is j:
+                    self._pending_resume.pop(j.collection_id, None)
+                    self._resumed.discard(j.id)
+                    with contextlib.suppress(Exception):
+                        await self.db.finish_job(j, JobState.FAILED,
+                                                 error=f"could not resume: {type(e).__name__}: {e}"[:500])
+                        self._emit(j.collection_id, j)
+            if self._resume_queue:
+                await asyncio.sleep(self.s.resume_stagger_s)
+
     async def _resume_scrape(self, j: JobRun) -> bool:
         """Carry on the scrape job `j` in place — same job, still running — after an engine restart.
         A deploy stops only the watcher: ScrapeBackend.resume follows the crawl if it is still going
         and ingests it if it finished meanwhile, and never starts a second crawl. False when it
         cannot be resumed (restarted too many times in a row, collection gone)."""
-        restarts = int(j.progress.get("restarts", 0))
         c = await self.db.get_collection(j.collection_id)
-        if not c or restarts >= self.s.scrape_resume_after_restart:
+        if not c or self._count_restart(j, self.s.scrape_resume_after_restart):
             return False
         j.state, j.error, j.finished_at = JobState.RUNNING, None, None
-        j.progress = {**j.progress, "restarts": restarts + 1}
         await self.db.update_job(j)
         self._emit(c, j)
         reuse = bool(j.progress.get("reused"))
@@ -240,8 +468,7 @@ class JobManager:
                     job.progress = {**job.progress, **p}
                     if "pid" in p or "ssm_command" in p:
                         job.external_ref = str(p.get("pid") or p.get("ssm_command"))
-                    await self.db.update_job(job)
-                    self._emit(c, job)
+                    await self._publish_progress(c, job, urgent=not _URGENT_PROGRESS.isdisjoint(p))
 
                 if reuse:
                     result = await self.scraper.fetch_existing(c, on_progress)
@@ -307,14 +534,16 @@ class JobManager:
             raise LLMError("no LLM provider configured")
         return self._llm() if callable(self._llm) and not hasattr(self._llm, "complete") else self._llm  # type: ignore[return-value]
 
-    async def _start(self, c: Collection, kind: JobKind, coro_factory, *, actor: str | None = None) -> JobRun:
+    async def _start(self, c: Collection, kind: JobKind, coro_factory, *, actor: str | None = None,
+                     progress: dict[str, Any] | None = None) -> JobRun:
         cid = c.collection_id
         if cid in self._starting or self.active_for(cid) or self.lock(cid).locked():
             raise JobConflict(f"a job is already running for {cid}")
         self._starting.add(cid)
         try:
             job = await self.db.insert_job(
-                JobRun(collection_id=cid, kind=kind, state=JobState.RUNNING, started_by=actor)
+                JobRun(collection_id=cid, kind=kind, state=JobState.RUNNING, started_by=actor,
+                       progress=dict(progress or {}))
             )
             self._emit(c, job)
             return await self._spawn(job, coro_factory(job))
@@ -322,23 +551,45 @@ class JobManager:
             self._starting.discard(cid)
 
     async def start_curation(self, c: Collection, kind: JobKind, work: Callable[[], Awaitable[Any]], what: str,
-                             *, actor: str | None = None) -> JobRun:
+                             *, actor: str | None = None, request: dict[str, Any] | None = None) -> JobRun:
         """Run a bulk curation change (`work`: the same coroutine the request would have awaited) as
-        a job. Other edits on the collection are refused while it runs (ensure_idle), as for any job."""
-        return await self._start(c, kind, lambda job: self._run_curation(c, job, work, what), actor=actor)
+        a job. Other edits on the collection are refused while it runs (ensure_idle), as for any job.
+
+        `request`: the change's own arguments (small: flags, a field name). Stored on the job row at
+        once, so an engine restart can build the same change again (curation_work) and resume it (#34)."""
+        progress = {"curation": what} | ({"request": request} if request is not None else {})
+        return await self._start(c, kind, lambda job: self._run_curation(c, job, work, what), actor=actor,
+                                 progress=progress)
+
+    async def _resume_curation(self, c: Collection, job: JobRun) -> None:
+        """#34: Recompute, bulk accept and bulk suggestions run again from their stored arguments. Each
+        change is safe to run twice and ends with a full recompute, so the result equals a run that
+        was never interrupted."""
+        req = job.progress.get("request")
+        if req is None or self.curation_work is None:  # started by an engine that did not store it
+            await self.db.finish_job(job, JobState.FAILED, error="engine restarted while job was running")
+            self._emit(c, job)
+            return
+        work = self.curation_work(job.kind, c, req, job.started_by)
+        await self._run_curation(c, job, work, job.progress.get("curation") or str(job.kind))
 
     async def _run_curation(self, c: Collection, job: JobRun, work: Callable[[], Awaitable[Any]], what: str) -> None:
         # not under the collection lock: the curation service takes it for each of its writes, and an
         # asyncio.Lock is not re-entrant
         try:
             await self._progress_cb(c, job)({"curation": what})
-            result = await work()
+            async with self.heavy_phase(job):  # a resumed one waits its turn (RESUME_CONCURRENCY)
+                result = await work()
             if isinstance(result, dict):
                 job.progress = {**job.progress, "result": {k: v for k, v in result.items() if isinstance(v, int | str | bool)}}
                 await self.db.update_job(job)
             await self.db.finish_job(job, JobState.SUCCEEDED)
             self._emit(await self.db.get_collection(c.collection_id) or c, job)
         except asyncio.CancelledError:
+            if self._leaving_running(job):  # a deploy / restart: the next engine runs it again
+                self._forget_progress(job.id)
+                await self.db.update_job(job)
+                raise
             await self.db.finish_job(job, JobState.FAILED, error=f"cancelled by {self._cancel_actor.pop(job.id, None) or 'shutdown'}")
             self._emit(c, job)
             raise
@@ -364,8 +615,7 @@ class JobManager:
         """Merge a progress dict into the job, persist it and publish it over SSE."""
         async def on_progress(p: dict[str, Any]) -> None:
             job.progress = {**job.progress, **p}
-            await self.db.update_job(job)
-            self._emit(c, job)
+            await self._publish_progress(c, job, urgent=not _URGENT_PROGRESS.isdisjoint(p))
         return on_progress
 
     async def _guarded(self, c: Collection, job: JobRun, body) -> None:
@@ -375,6 +625,12 @@ class JobManager:
                 await self.db.finish_job(job, JobState.SUCCEEDED)
                 self._emit(await self.db.get_collection(c.collection_id) or c, job)
             except asyncio.CancelledError:
+                if self._leaving_running(job):
+                    # a deploy / restart: the job stays 'running' and the next engine resumes it, from
+                    # its latest progress (held back by the 3 s throttle until now)
+                    self._forget_progress(job.id)
+                    await self.db.update_job(job)
+                    raise
                 await self.db.finish_job(job, JobState.FAILED, error=f"cancelled by {self._cancel_actor.pop(job.id, None) or 'shutdown'}")
                 self._emit(c, job)
                 raise
@@ -390,7 +646,7 @@ class JobManager:
     def _retry(self) -> dict[str, Any]:
         return {"retry_passes": self.s.llm_retry_passes, "retry_delay_s": self.s.llm_retry_delay_s}
 
-    async def _run_llm_patterns(self, c: Collection, job: JobRun) -> None:
+    async def _run_llm_patterns(self, c: Collection, job: JobRun, *, resume: bool = False) -> None:
         """Exclude-only suggestions over the included delta URLs (on a first pass that is the
         whole crawl; after a promote only what changed): the global exclude list first
         (deterministic), then one model call per batch of URLs, merged by (type, match). Match
@@ -405,22 +661,47 @@ class JobManager:
                 raise LLMError("no delta URLs to look at — Start curating first (or every delta URL is already excluded)")
             cand_urls = [u for u, _ in pending]
             titles = dict(pending)
-            await self.db.clear_pending_pattern_suggestions(cid)
-            gl = global_exclude_hits(load_global_excludes(self.s.global_excludes_path), cand_urls, count_over=all_urls)
-            n_global = await self.db.add_pattern_suggestions(cid, gl)
+            # pure Python over every URL (the global globs over the candidates, then over the whole
+            # crawl): on a worker thread, or the event loop froze for ~1.2 s at 100K URLs
+            excludes = load_global_excludes(self.s.global_excludes_path)
+            gl = await asyncio.to_thread(global_exclude_hits, excludes, cand_urls, count_over=all_urls)
+            if resume:  # #29: the suggestions so far are saved; only the batches not answered yet are asked
+                n_global = int(job.progress.get("global", 0))
+            else:
+                await self.db.clear_pending_pattern_suggestions(cid)
+                n_global = await self.db.add_pattern_suggestions(cid, gl)
             # every global glob that matched: the model must not repeat them, and a suggestion
             # whose URLs they already cover is dropped (tasks.suggest_patterns_batch)
             examples = [g["match"] for g in sorted(gl, key=lambda g: (-g["matches"], g["match"]))]
             if not examples:  # nothing matched: still show the style
                 examples = [g.match for g in load_global_excludes(self.s.global_excludes_path).patterns[:10]]
-            unique = dedupe_variants(cand_urls)
-            chunks = batches([{"url": u, "scraped_title": titles.get(u)} for u in unique],
-                             self.s.llm_pattern_batch_urls)
+            def plan() -> tuple[list[str], list]:
+                unique = dedupe_variants(cand_urls)
+                return unique, batches([{"url": u, "scraped_title": titles.get(u)} for u in unique],
+                                       self.s.llm_pattern_batch_urls)
+
+            unique, chunks = await asyncio.to_thread(plan)  # also every URL: off the event loop
+            answered: set[int] = set()
             progress = self._progress_cb(c, job)
-            await progress({"llm": "patterns", "urls": len(all_urls), "candidates": len(cand_urls), "unique": len(unique),
-                            "calls": len(chunks), "total": len(chunks), "done": 0, "failed": 0, "global": n_global,
-                            "suggestions": n_global, "tokens_in": 0, "tokens_out": 0, "tokens_reasoning": 0})
+            if resume:
+                if len(chunks) != job.progress.get("calls"):
+                    raise LLMError("the delta URLs changed while it was interrupted; run Suggest patterns again")
+                answered = from_ranges(job.progress.get("done_batches"))
+                base_done, base_failed = len(answered), int(job.progress.get("failed", 0))
+            else:
+                base_done = base_failed = 0
+                await progress({"llm": "patterns", "urls": len(all_urls), "candidates": len(cand_urls), "unique": len(unique),
+                                "calls": len(chunks), "total": len(chunks), "done": 0, "failed": 0, "global": n_global,
+                                "suggestions": n_global, "tokens_in": 0, "tokens_out": 0, "tokens_reasoning": 0})
+
+            async def pool_progress(p: dict[str, Any]) -> None:
+                """The pool counts this run's batches; the job shows the whole job's."""
+                await progress({**p, "total": len(chunks), "done": base_done + p.get("done", 0),
+                                "failed": base_failed + p.get("failed", 0)})
+
             llm = self.llm()
+            count_one_at_a_time = asyncio.Lock()
+            url_index: dict[str, list[str]] | None = None
 
             async def one(item):
                 i, chunk = item
@@ -428,14 +709,23 @@ class JobManager:
                                                     batches=len(chunks))
 
             async def on_result(item, result):
+                nonlocal url_index
                 kept, done = result
-                counts = await asyncio.to_thread(
-                    match_counts,
-                    [Pattern(id=i, collection_id=cid, type=s.type, match=s.match) for i, s in enumerate(kept)],
-                    all_urls)
+                # one batch's rules counted over the whole crawl, on a worker thread. One at a time:
+                # several threads of pure Python starved the event loop of the interpreter lock (a
+                # 0.3 s freeze at 100K URLs), and in parallel they are no faster
+                async with count_one_at_a_time:
+                    if url_index is None and any(is_exact(s.match) for s in kept):
+                        url_index = await asyncio.to_thread(url_key_index, all_urls)  # once per job
+                    counts = await asyncio.to_thread(functools.partial(
+                        match_counts,
+                        [Pattern(id=i, collection_id=cid, type=s.type, match=s.match) for i, s in enumerate(kept)],
+                        all_urls, by_key=url_index))
                 rows = [{"type": s.type, "match": s.match, "rationale": s.rationale, "matches": counts.get(i, 0)}
                         for i, s in enumerate(kept)]
                 added = await self.db.add_pattern_suggestions(cid, rows)
+                answered.add(item[0])
+                job.progress["done_batches"] = to_ranges(answered)
                 job.progress["suggestions"] = job.progress.get("suggestions", 0) + added
                 job.progress["tokens_in"] = job.progress.get("tokens_in", 0) + done.tokens_in
                 job.progress["tokens_out"] = job.progress.get("tokens_out", 0) + done.tokens_out
@@ -443,26 +733,46 @@ class JobManager:
                                                       + done.tokens_cache_write)
                 job.progress["tokens_reasoning"] = job.progress.get("tokens_reasoning", 0) + done.tokens_reasoning
 
-            await run_pool(list(enumerate(chunks)), one, workers=self.s.llm_workers, on_result=on_result,
-                           on_progress=progress, total=len(chunks), **self._retry())
+            todo = [(i, chunk) for i, chunk in enumerate(chunks) if i not in answered]
+            await run_pool(todo, one, workers=self.s.llm_workers, shared=self._llm_gate, on_result=on_result,
+                           on_progress=pool_progress, total=len(todo), **self._retry())
             await progress({"suggestions": await self.db.count_pending_pattern_suggestions(cid)})
         await self._guarded(c, job, body)
 
-    async def _run_llm_metadata(self, c: Collection, job: JobRun, only_missing: bool) -> None:
+    async def _run_llm_metadata(self, c: Collection, job: JobRun, only_missing: bool, *, resume: bool = False) -> None:
         """One call per included delta URL with the full page text, LLM_WORKERS at a time.
         Results are written in small chunks as they arrive, so a cancel keeps what finished and
         a re-run (only_missing) resumes with the rest. One bad URL never fails the job: calls the
         provider turned away are retried once at the end, and a URL that still fails gets its
-        error recorded on the row (the next Suggest metadata picks it up again)."""
+        error recorded on the row (the next Suggest metadata picks it up again).
+        `resume` (#35): the same job carries on after an engine restart with the URLs it has not
+        answered or failed on yet (each row records the job that settled it, V19 ai_job, so nothing is
+        asked or counted twice, and a "redo all" run stays one); its counters carry on from where
+        they stopped and `total` stays the run's total. A run stopped during its duplicate-title
+        pass carries on with that pass, over every page the job titled."""
         async def body():
             cid = c.collection_id
-            total = await self.db.count_deltas_for_llm(cid, only_missing=only_missing)
-            if not total:
-                raise LLMError("no delta URLs to classify — Start curating (recompute) first (or all already have suggestions)")
+            skip = job.id if resume else None
+            total = await self.db.count_deltas_for_llm(cid, only_missing=only_missing, skip_job=skip)
             progress = self._progress_cb(c, job)
-            await progress({"llm": "metadata", "total": total, "done": 0, "failed": 0, "inflight": 0,
-                            "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
-                            "tokens_cache_write": 0, "tokens_reasoning": 0})
+            if resume:
+                base_done, base_failed = int(job.progress.get("done", 0)), int(job.progress.get("failed", 0))
+                base_classified = int(job.progress.get("classified", 0))
+                whole = int(job.progress.get("total", total + base_done))
+            else:
+                if not total:
+                    raise LLMError("no delta URLs to classify — Start curating (recompute) first (or all already have suggestions)")
+                base_done = base_failed = base_classified = 0
+                whole = total
+                await progress({"llm": "metadata", "only_missing": only_missing, "total": total, "done": 0,
+                                "failed": 0, "inflight": 0,
+                                "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
+                                "tokens_cache_write": 0, "tokens_reasoning": 0})
+
+            async def pool_progress(p: dict[str, Any]) -> None:
+                """The pool counts this run's URLs; the job shows the whole job's."""
+                await progress({**p, "total": whole, "done": base_done + p.get("done", 0),
+                                "failed": base_failed + p.get("failed", 0)})
             llm = self.llm()
             buf: list[dict[str, Any]] = []
             errs: list[tuple[str, str]] = []
@@ -473,13 +783,24 @@ class JobManager:
             async def flush() -> None:
                 nonlocal last_flush, written
                 last_flush = time.monotonic()
+                # A write the engine's shutdown interrupts hands its rows back, and the flush in the
+                # `finally` below writes them (L17): else the resume asks for them again, and pays.
                 if errs:
                     failed, errs[:] = list(errs), []
-                    await self.db.set_delta_ai_errors(cid, failed)
+                    try:
+                        await self.db.set_delta_ai_errors(cid, failed, job=job.id)
+                    except BaseException:
+                        errs[:0] = failed
+                        raise
                 if buf:
                     rows, buf[:] = list(buf), []
-                    n = await self.db.set_delta_ai(cid, rows)
+                    try:
+                        n = await self.db.set_delta_ai(cid, rows, job=job.id)
+                    except BaseException:
+                        buf[:0] = rows
+                        raise
                     written += n  # never `written += await …`: two flushes overlap and one is lost
+                    job.progress["classified"] = base_classified + written  # what a resume carries on from
 
             async def on_error(doc, e: Exception) -> None:
                 errs.append((doc["url"], f"{type(e).__name__}: {e}"))
@@ -495,30 +816,38 @@ class JobManager:
                     await flush()
 
             try:
-                await run_pool(
-                    self.db.iter_deltas_for_llm(cid, only_missing=only_missing),
-                    lambda d: suggest_metadata_one(llm, d, settings=self.s, collection=c),
-                    workers=self.s.llm_workers, on_result=on_result, on_error=on_error, on_progress=progress,
-                    total=total, **self._retry(),
-                )
+                if total and job.progress.get("llm_phase") != "titles":  # a resume may find every URL answered
+                    await run_pool(
+                        self.db.iter_deltas_for_llm(cid, only_missing=only_missing, skip_job=skip),
+                        lambda d: suggest_metadata_one(llm, d, settings=self.s, collection=c),
+                        workers=self.s.llm_workers, shared=self._llm_gate, on_result=on_result, on_error=on_error, on_progress=pool_progress,
+                        total=total, **self._retry(),
+                    )
             finally:
                 await flush()  # a cancel still keeps every answer that arrived
-            await progress({"classified": written, "inflight": 0})
+            await progress({"classified": base_classified + written, "inflight": 0})
+            in_titles = resume and job.progress.get("llm_phase") == "titles"
+            if resume:  # M4: the pages titled before the restart are in the pass too
+                titled |= await self.db.urls_titled_by_job(cid, job.id)
             if self.s.llm_dedupe_titles and titled:
                 try:
-                    await self._retitle_duplicates(c, job, llm, touching=titled)
+                    await self._retitle_duplicates(c, job, llm, touching=titled, resume=in_titles)
                 except LLMError as e:  # the classification stands; the duplicates stay flagged
                     log.warning("titles %s: telling duplicate titles apart failed: %s", cid, e)
                     await progress({"titles_error": str(e)[:500]})
         await self._guarded(c, job, body)
 
-    async def _run_llm_titles(self, c: Collection, job: JobRun) -> None:
+    async def _run_llm_titles(self, c: Collection, job: JobRun, *, resume: bool = False) -> None:
         """Regenerate duplicate titles, on demand: the same pass Suggest metadata ends with, over every title +
-        document type that a delta URL shares with another page (whoever set them: AI, a rule, a curator)."""
+        document type that a delta URL shares with another page (whoever set them: AI, a rule, a curator).
+        `resume` (#30): carry on after an engine restart. Every title already written is saved, and each
+        pass plans from the duplicates that remain, so groups fixed before the restart are not asked
+        again; the pass and round numbers carry on, so a restart never adds passes."""
         async def body():
-            await self._progress_cb(c, job)({"llm": "titles", "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
-                                                 "tokens_cache_write": 0, "tokens_reasoning": 0})
-            if not await self._retitle_duplicates(c, job, self.llm()):
+            if not resume:
+                await self._progress_cb(c, job)({"llm": "titles", "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
+                                                     "tokens_cache_write": 0, "tokens_reasoning": 0})
+            if not await self._retitle_duplicates(c, job, self.llm(), resume=resume) and not resume:
                 raise LLMError("no delta URL shares its title and document type with another page")
         await self._guarded(c, job, body)
 
@@ -550,7 +879,7 @@ class JobManager:
         return plan
 
     async def _retitle_duplicates(self, c: Collection, job: JobRun, llm: LLMProvider, *,
-                                  touching: set[str] | None = None) -> int:
+                                  touching: set[str] | None = None, resume: bool = False) -> int:
         """Pages of one collection that will be indexed under the same title AND document type are
         told apart, and this pass owns the outcome: when it ends, no delta URL it was allowed to
         touch still shares a title + document type with another page. The curator is never handed a
@@ -575,12 +904,18 @@ class JobManager:
         asked = sum(len(g["rewrite"]) for g in plan)
         # `titles_total` counts URLs (what the curator is told); the pool runs over GROUPS, so its
         # own done / failed / inflight are reported as calls.
-        await progress({"llm_phase": "titles", "titles_total": asked, "title_groups": len(plan),
-                        "title_calls": 0, "title_calls_done": 0, "title_calls_failed": 0,
-                        "retitled": 0, "disambiguated": 0})
+        if resume:  # carry on: the totals so far stay, the groups left are what is planned now
+            await progress({"llm_phase": "titles", "title_groups": len(plan), "title_calls_done": 0})
+            retitled = int(job.progress.get("retitled", 0))
+            disambiguated = int(job.progress.get("disambiguated", 0))
+            calls = int(job.progress.get("title_calls", 0))
+        else:
+            await progress({"llm_phase": "titles", "titles_total": asked, "title_groups": len(plan),
+                            "title_calls": 0, "title_calls_done": 0, "title_calls_failed": 0,
+                            "retitled": 0, "disambiguated": 0})
+            retitled = disambiguated = calls = 0
         if not plan:
             return 0
-        retitled = disambiguated = calls = 0
 
         # Every title + document type the collection already uses. A group told apart within itself
         # still collides if it picks a title another group — or a page that was never in a group —
@@ -659,21 +994,29 @@ class JobManager:
         async def pool_progress(p: dict[str, Any]) -> None:
             await progress({f"title_calls_{k}": v for k, v in p.items()})
 
-        for attempt in range(self.s.llm_title_passes + 1):
-            if attempt:  # only the groups the last pass could not tell apart go round again
+        first_pass = int(job.progress.get("title_pass_index", 0)) if resume else 0
+        for attempt in range(first_pass, self.s.llm_title_passes + 1):
+            await progress({"title_pass_index": attempt})  # a resume carries on from this pass
+            if attempt > first_pass:  # only the groups the last pass could not tell apart go round again
                 plan = await self._plan_retitle(cid, touching)
                 if not plan:
                     break
                 await progress({"title_pass": attempt + 1, "title_groups": len(plan), "title_calls_done": 0})
-            await run_pool(plan, one, workers=self.s.llm_workers, on_result=on_result, on_error=on_error,
-                           on_progress=pool_progress, total=len(plan), **self._retry())
+            try:
+                await run_pool(plan, one, workers=self.s.llm_workers, shared=self._llm_gate, on_result=on_result,
+                               on_error=on_error, on_progress=pool_progress, total=len(plan), **self._retry())
+            except LLMError as e:  # every call of this pass failed: the URLs below still tell the pages apart (N2)
+                log.warning("titles %s: pass %d failed: %s", cid, attempt + 1, e)
+                await progress({"titles_error": str(e)[:500]})
             await progress({"retitled": retitled, "title_calls": calls})
 
         # The floor: whatever the model could not tell apart, the URLs do. This is what makes one
         # click enough — the pass never ends leaving the curator a group to send back again. One
         # round settles it, because the claim check is over the whole collection; the second is
         # there only in case a group's pages were themselves re-grouped by what the first wrote.
-        for _ in range(DISAMBIGUATE_ROUNDS):
+        first_round = int(job.progress.get("disambiguate_round", 0)) if resume else 0
+        for round_no in range(first_round, DISAMBIGUATE_ROUNDS):
+            await progress({"disambiguate_round": round_no})
             groups = await self._plan_retitle(cid, touching)
             if not groups:
                 break
@@ -729,25 +1072,90 @@ class JobManager:
                 actor=actor,
             )
         job.run_id = run.run_id
+        if allow_high_deletion:  # a resume dispatches with the same consent (#22 / #33)
+            job.progress = {**job.progress, "allow_high_deletion": True}
         await self.db.update_job(job)
         return job, run
 
     async def _run_index(
-        self, c: Collection, job: JobRun, run: IndexRun, *, allow_high_deletion: bool = False
+        self, c: Collection, job: JobRun, run: IndexRun, *, allow_high_deletion: bool = False,
+        resume: bool = False,
     ) -> None:
+        """Export → dispatch → wait for status.json → validate. `resume`: the job carries on after an
+        engine restart (_resume_index) from what its index run records: no dispatch yet → export
+        again with the same run id (#33; the files are overwritten, the manifest still goes last);
+        dispatched → follow the same indexer task; indexed → validate (it only reads the index)."""
         async def body():
             s3 = S3(self.s.cosmos_index_bucket, region=self.s.aws_region)
-            await self.db.insert_index_run(run)
+            if not resume:
+                await self.db.insert_index_run(run)
             backend = self.indexer()
 
             async def progress(p: dict[str, Any]) -> None:
                 job.progress = {**job.progress, **p}
-                await self.db.update_job(job)
-                self._emit(c, job)
+                await self._publish_progress(c, job, urgent=not _URGENT_PROGRESS.isdisjoint(p))
 
-            # 1. pin the OpenSearch collection this indexes as, then export: stream curated
-            #    (non-excluded) rows — with the text they were approved with — to a temp jsonl,
-            #    upload, THEN the manifest
+            try:
+                if run.state == "succeeded":  # resumed after the indexer reported: only validation is left
+                    await self._validate(c, job, run, s3, backend, progress)
+                    return
+                if not run.external_ref:
+                    d = await self._export_and_dispatch(c, job, run, s3, backend, progress, allow_high_deletion,
+                                                         resume=resume)
+                else:  # resumed after the dispatch: the indexer task kept going without us
+                    d = Dispatch(external_ref=run.external_ref, detail={})
+                    await progress({"phase": "indexing", "external_ref": run.external_ref, "resumed_watch": True})
+
+                # 3. wait for status.json (+ validation.json on test)
+                try:
+                    status, validation = await wait_for_status(
+                        s3, self.s, c, run.run_id, backend, d, progress, target=run.target
+                    )
+                except asyncio.CancelledError:
+                    if not self._leaving_running(job) and hasattr(backend, "kill"):
+                        await backend.kill(d)  # a curator's cancel stops the indexer task too
+                    raise
+                run.status = status.model_dump()
+                run.validation = validation.model_dump() if validation else None
+                run.validated_by = "indexer" if validation else None
+                job.progress = {**job.progress, "phase": "done", "status": run.status, "validation": run.validation}
+                if status.state != "succeeded":
+                    run.state, run.error, run.finished_at = "failed", status.error or "indexer reported failure", utcnow()
+                    await self.db.update_index_run(run)
+                    raise IndexError_(f"indexer failed: {status.error}{(' — ' + status.error_detail) if status.error_detail else ''}")
+                run.state, run.finished_at = "succeeded", utcnow()
+                await self.db.update_index_run(run)
+
+                await self.db.set_status(
+                    c.collection_id, Status.CONFIG_GENERATED, force=True, actor=SYSTEM_ACTOR,
+                    note=f"test index run {run.run_id}: {status.indexed} indexed, {status.deleted} deleted",
+                )
+                # 4. validation gate — the indexer's own validation.json is pre-refresh; re-check after a delay
+                await self._validate(c, job, run, s3, backend, progress)
+            except asyncio.CancelledError:
+                if not self._leaving_running(job) and run.state == "running":
+                    # a curator's cancel (or a kind that does not resume): the run is over too
+                    run.state, run.finished_at = "failed", utcnow()
+                    run.error = f"cancelled by {self._cancel_actor.get(job.id) or 'shutdown'}"
+                    await self.db.update_index_run(run)
+                raise
+
+        await self._guarded(c, job, body)
+
+    async def _export_and_dispatch(self, c: Collection, job: JobRun, run: IndexRun, s3: S3, backend: IndexBackend,
+                                   progress, allow_high_deletion: bool, *, resume: bool = False) -> Dispatch:
+        """1. pin the OpenSearch collection this indexes as, then export: stream curated (non-excluded)
+        rows — with the text they were approved with — to a temp jsonl, upload, THEN the manifest.
+        2. dispatch the indexer, with the run id as its token (H2): an engine that stopped during the
+        dispatch cannot know whether the task started, so the resume dispatches again with the same
+        token, which starts nothing new, and does not export again (`run.exported` is saved only once
+        the manifest is up), so a task already reading the files is not given new ones."""
+        if resume and run.exported:
+            d = await self._dispatch(c, job, run, backend, allow_high_deletion)
+            await progress({"external_ref": d.external_ref, "phase": "indexing",
+                            **{k: v for k, v in d.detail.items() if k != "log"}})
+            return d
+        async with self.heavy_phase(job):
             await self._pin_index_key(c, progress)
             # (a server-side cursor, a few hundred rows at a time: the approved text of 100k pages is
             # never in memory at once, and each batch is serialised off the event loop)
@@ -765,47 +1173,49 @@ class JobManager:
                 await s3.put_json(f"{prefix}/manifest.json", manifest.model_dump(mode="json"))
             finally:
                 tmp.unlink(missing_ok=True)
-            run.exported = n
-            await self.db.update_index_run(run)
-            await progress({"exported": n, "export": s3.url(prefix), "phase": "dispatch"})
+        run.exported = n
+        await self.db.update_index_run(run)
+        await progress({"exported": n, "export": s3.url(prefix), "phase": "dispatch"})
 
-            # 2. dispatch
-            d: Dispatch = await backend.dispatch(
-                c, run.run_id, run.target, allow_high_deletion=allow_high_deletion
-            )
-            run.external_ref = d.external_ref
-            job.external_ref = d.external_ref
-            await self.db.update_index_run(run)
-            await progress({"external_ref": d.external_ref, "phase": "indexing", **{k: v for k, v in d.detail.items() if k != "log"}})
+        d = await self._dispatch(c, job, run, backend, allow_high_deletion)
+        await progress({"external_ref": d.external_ref, "phase": "indexing", **{k: v for k, v in d.detail.items() if k != "log"}})
+        return d
 
-            # 3. wait for status.json (+ validation.json on test)
-            try:
-                status, validation = await wait_for_status(
-                    s3, self.s, c, run.run_id, backend, d, progress, target=run.target
-                )
-            except asyncio.CancelledError:
-                if hasattr(backend, "kill"):
-                    await backend.kill(d)
-                raise
-            run.status = status.model_dump()
-            run.validation = validation.model_dump() if validation else None
-            run.validated_by = "indexer" if validation else None
-            job.progress = {**job.progress, "phase": "done", "status": run.status, "validation": run.validation}
-            if status.state != "succeeded":
-                run.state, run.error, run.finished_at = "failed", status.error or "indexer reported failure", utcnow()
-                await self.db.update_index_run(run)
-                raise IndexError_(f"indexer failed: {status.error}{(' — ' + status.error_detail) if status.error_detail else ''}")
-            run.state, run.finished_at = "succeeded", utcnow()
-            await self.db.update_index_run(run)
+    async def _dispatch(self, c: Collection, job: JobRun, run: IndexRun, backend: IndexBackend,
+                        allow_high_deletion: bool) -> Dispatch:
+        """Start the indexer task and save its id. A curator's cancel during the dispatch waits for
+        it and stops the task it started; at shutdown the resume finds the task by its token (H2)."""
+        dispatching = asyncio.ensure_future(backend.dispatch(c, run.run_id, run.target,
+                                                             allow_high_deletion=allow_high_deletion, token=run.run_id))
+        try:
+            d: Dispatch = await asyncio.shield(dispatching)
+        except asyncio.CancelledError:
+            if self._leaving_running(job):
+                dispatching.cancel()  # the RunTask call goes on in its thread; the resume adopts the task
+            else:
+                with contextlib.suppress(Exception):
+                    d = await asyncio.wait_for(dispatching, DISPATCH_WAIT_ON_CANCEL_S)
+                    if hasattr(backend, "kill"):
+                        await backend.kill(d)
+            raise
+        run.external_ref = d.external_ref
+        job.external_ref = d.external_ref
+        await self.db.update_index_run(run)
+        return d
 
-            await self.db.set_status(
-                c.collection_id, Status.CONFIG_GENERATED, force=True, actor=SYSTEM_ACTOR,
-                note=f"test index run {run.run_id}: {status.indexed} indexed, {status.deleted} deleted",
-            )
-            # 4. validation gate — the indexer's own validation.json is pre-refresh; re-check after a delay
-            await self._validate(c, job, run, s3, backend, progress)
+    async def _resume_index(self, c: Collection, job: JobRun) -> None:
+        """An index-to-test job the previous engine left running: carry on from its index run."""
+        run = await self.db.get_index_run(job.run_id) if job.run_id else None
+        if run is None:
+            await self.db.finish_job(job, JobState.FAILED, error="engine restarted before the index run was recorded")
+            self._emit(c, job)
+            return
+        await self._run_index(c, job, run, allow_high_deletion=bool(job.progress.get("allow_high_deletion")),
+                              resume=True)
 
-        await self._guarded(c, job, body)
+    def _leaving_running(self, job: JobRun) -> bool:
+        """The engine is shutting down under a job that resumes: leave it, and what it started, running."""
+        return self._shutting_down and job.id not in self._cancel_actor and self.resumable(job.kind)
 
     async def _pin_index_key(self, c: Collection, progress) -> None:
         """Record the key this collection is indexed as, so a later rename cannot silently move it to
@@ -822,34 +1232,59 @@ class JobManager:
         log.info("%s: indexed as '%s' (%s)", c.collection_id, key, name)
 
     async def _run_publish_prod(
-        self, c: Collection, job: JobRun, run: IndexRun, *, allow_high_deletion: bool = False
+        self, c: Collection, job: JobRun, run: IndexRun, *, allow_high_deletion: bool = False,
+        resume: bool = False,
     ) -> None:
         """Index to prod: publish the vectors of the latest validated test run straight into the
         production index (backends/publish.py) — no export, no indexer task, no re-vectorizing —
         then run the same validation gate as test against prod. The collection only becomes `live`
         once that passes; a failed or impossible check sends it back to `config_generated`, flagged
-        (the documents that were written stay in prod)."""
+        (the documents that were written stay in prod).
+        `resume` (#31): the job carries on after an engine restart. The publisher is safe to run
+        again — it scans prod first and writes only documents whose version differs, and decides
+        deletions from that scan — so it simply runs again for the same run and source test run.
+        What the interrupted attempts wrote is added up so the report shows the whole publish. A run
+        that had finished publishing only needs its validation."""
         async def body():
-            source = await self.db.last_index_run(c.collection_id, "test")
-            if not source or source.state != "succeeded" or not source.validation_passes(self.s.validation_title_match_threshold):
-                raise IndexError_("prod indexing requires a successful, validated test run first")
-            tested_as = (source.status or {}).get("collection_key")
-            if tested_as and tested_as != c.collection_key:
-                raise IndexError_(f"the latest test run was indexed as '{tested_as}' but this collection is now "
-                                  f"'{c.collection_key}' — index to test again first")
-            publisher = self.publisher()
-            run.exported = source.exported
-            run.external_ref = job.external_ref = f"publish:{source.run_id}"
-            await self.db.insert_index_run(run)
-
             async def progress(p: dict[str, Any]) -> None:
                 job.progress = {**job.progress, **p}
+                await self._publish_progress(c, job, urgent=not _URGENT_PROGRESS.isdisjoint(p))
+
+            if resume:
+                source = await self.db.get_index_run((run.external_ref or "").removeprefix("publish:"))
+                if source is None:
+                    raise IndexError_("the test run this publish came from is gone")
+                if run.state == "succeeded":  # interrupted during the prod validation
+                    await self._validate_prod(c, job, run, progress, note=job.progress.get("publish_note"))
+                    return
+                attempts = [*job.progress.get("attempts", []),
+                            {"indexed": job.progress.get("indexed", 0), "failed": job.progress.get("failed", 0)}]
+                # the counters now belong to this attempt: a restart before it reports must not add
+                # the last one's again (L1)
+                job.progress = {**job.progress, "attempts": attempts, "indexed": 0, "failed": 0}
                 await self.db.update_job(job)
-                self._emit(c, job)
+            else:
+                source = await self.db.last_index_run(c.collection_id, "test")
+                if not source or source.state != "succeeded" or not source.validation_passes(self.s.validation_title_match_threshold):
+                    raise IndexError_("prod indexing requires a successful, validated test run first")
+                tested_as = (source.status or {}).get("collection_key")
+                if tested_as and tested_as != c.collection_key:
+                    raise IndexError_(f"the latest test run was indexed as '{tested_as}' but this collection is now "
+                                      f"'{c.collection_key}' — index to test again first")
+                run.exported = source.exported
+                run.external_ref = job.external_ref = f"publish:{source.run_id}"
+                await self.db.insert_index_run(run)
+            publisher = self.publisher()
 
             await progress({"source_test_run": source.run_id, "exported": source.exported})
-            st = await publisher.run(c.collection_key, run.run_id, source.run_id, progress,
-                                     allow_high_deletion=allow_high_deletion)
+            async with self.heavy_phase(job):
+                st = await publisher.run(c.collection_key, run.run_id, source.run_id, progress,
+                                         allow_high_deletion=allow_high_deletion)
+            if earlier := sum(a.get("indexed", 0) for a in job.progress.get("attempts", [])):
+                # documents an interrupted attempt wrote are "unchanged" to this one: count them as written
+                st = {**st, "indexed": st.get("indexed", 0) + earlier, "changed": st.get("changed", 0) + earlier,
+                      "unchanged": max(0, st.get("unchanged", 0) - earlier),
+                      "attempts": len(job.progress["attempts"]) + 1}
             status = IndexStatus.model_validate(st)
             run.status = st
             job.progress = {**job.progress, "phase": "done", "status": st}
@@ -859,15 +1294,24 @@ class JobManager:
                 detail = st.get("error_detail") or (f"{st.get('missing')} documents have no vectors in S3 or the test index, "
                                                     f"e.g. {', '.join(st.get('missing_urls', [])[:3])}" if st.get("missing") else "")
                 raise IndexError_(f"publish to prod failed: {status.error}{(' — ' + detail) if detail else ''}")
+            note = (f"prod publish {run.run_id} from test run {source.run_id}: {status.indexed} docs promoted from the test index, "
+                    f"{st.get('unchanged', 0)} unchanged, {status.deleted} removed")
+            job.progress = {**job.progress, "publish_note": note}
             run.state, run.finished_at = "succeeded", utcnow()
             await self.db.update_index_run(run)
-            await self._validate_prod(
-                c, job, run, progress,
-                note=(f"prod publish {run.run_id} from test run {source.run_id}: {status.indexed} docs promoted from the test index, "
-                      f"{st.get('unchanged', 0)} unchanged, {status.deleted} removed"),
-            )
+            await self._validate_prod(c, job, run, progress, note=note)
 
         await self._guarded(c, job, body)
+
+    async def _resume_publish_prod(self, c: Collection, job: JobRun) -> None:
+        """An Index-to-prod job the previous engine left running (#31)."""
+        run = await self.db.get_index_run(job.run_id) if job.run_id else None
+        if run is None:
+            await self.db.finish_job(job, JobState.FAILED, error="engine restarted before the prod run was recorded")
+            self._emit(c, job)
+            return
+        await self._run_publish_prod(c, job, run, allow_high_deletion=bool(job.progress.get("allow_high_deletion")),
+                                     resume=True)
 
     async def _validate_prod(self, c: Collection, job: JobRun, run: IndexRun, progress, note: str | None = None) -> None:
         """The test gate, against prod: wait, poll directly until visible or timed out, same pass rule.
@@ -918,7 +1362,7 @@ class JobManager:
             # would return the stale (pre-refresh) validation immediately
             prefix = status_prefix(c.collection_key, run.run_id)
             await s3.delete(f"{prefix}/status.json", f"{prefix}/validation.json")
-            d = await backend.dispatch(c, run.run_id, run.target)
+            d = await backend.dispatch(c, run.run_id, run.target, token=f"{run.run_id}:validate")
             status, validation = await wait_for_status(s3, self.s, c, run.run_id, backend, d, progress, target=run.target)
             if status.state != "succeeded" or validation is None:
                 raise IndexError_(f"second-pass validation failed: {status.error or 'no validation.json'}")
@@ -978,10 +1422,23 @@ class JobManager:
         if run.target == "prod":
             if not self.s.opensearch_endpoint_prod:
                 raise IndexError_("OPENSEARCH_ENDPOINT_PROD is not set — nothing to validate against")
-            return await self._start(c, JobKind.VALIDATE_PROD, lambda job: self._run_revalidate(c, job, run), actor=actor)
-        return await self._start(
-            c, JobKind.VALIDATE, lambda job: self._run_revalidate(c, job, run), actor=actor
-        )
+            job = await self._start(c, JobKind.VALIDATE_PROD, lambda job: self._run_revalidate(c, job, run), actor=actor)
+        else:
+            job = await self._start(c, JobKind.VALIDATE, lambda job: self._run_revalidate(c, job, run), actor=actor)
+        if job.run_id != run.run_id:  # recorded at once: a resume (#32) needs to know which run it checks
+            job.run_id = run.run_id
+            await self.db.update_job(job)
+        return job
+
+    async def _resume_revalidate(self, c: Collection, job: JobRun) -> None:
+        """A validate / validate-prod job the previous engine left running: check the same run again
+        from the start. Validation only reads the index, so repeating it is safe."""
+        run = await self.db.get_index_run(job.run_id) if job.run_id else None
+        if run is None:
+            await self.db.finish_job(job, JobState.FAILED, error="engine restarted before the run to check was recorded")
+            self._emit(c, job)
+            return
+        await self._run_revalidate(c, job, run)
 
     async def _run_revalidate(self, c: Collection, job: JobRun, run: IndexRun) -> None:
         async def body():
@@ -989,8 +1446,7 @@ class JobManager:
 
             async def progress(p: dict[str, Any]) -> None:
                 job.progress = {**job.progress, **p}
-                await self.db.update_job(job)
-                self._emit(c, job)
+                await self._publish_progress(c, job, urgent=not _URGENT_PROGRESS.isdisjoint(p))
 
             job.run_id = run.run_id
             await self.db.update_job(job)
