@@ -57,6 +57,8 @@ async def counts_match_tables(c, cid: str, step: str) -> None:
     token = db_scope.set("work")  # count straight from the tables, as a job would
     try:
         for key, stored in rows[0]["counts"].items():
+            if key.startswith("_"):  # bookkeeping (_since), not a count
+                continue
             name, rest = key[:key.index("[")], key[key.index("["):]
             args, kwargs = json.loads(rest)
             fresh = json.loads(json.dumps(await getattr(db, name)(cid, *args, **dict(kwargs))))

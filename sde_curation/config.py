@@ -192,6 +192,10 @@ class Settings(BaseSettings):
     # the last restart starts its count again). This one counts every restart of a job, moving or
     # not, so a job that works a little and then brings the engine down again still stops.
     resume_max_restarts_total: int = Field(default=10, ge=1, le=50)
+    # While a job runs on a collection, its open tabs' tables: "live" = refreshed every 10 s (a hidden
+    # tab waits until it is shown); "on_request" = left as they are, with a notice that the job is
+    # changing the collection and a "Show the latest" button. The job's end refreshes them either way.
+    job_table_refresh: Literal["live", "on_request"] = "live"
     llm_retry_delay_s: float = Field(default=30.0, ge=0)
     # Suggest metadata sends the full page text — cut from the end only when the call would pass
     # llm_max_input_tokens — one call per URL. Suggest patterns sends every crawled URL (+ title) in batches of this size.

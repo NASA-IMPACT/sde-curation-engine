@@ -15,10 +15,22 @@
    hx-sync="#tab-body:drop": the poll shares #tab-body's queue with the curator's own swaps of it
    (stepper clicks, the filter forms — all `#tab-body:replace`), and gives way to them: a poll is
    skipped while one of them loads, and a click replaces a poll in flight. Otherwise a poll for the
-   old address could land after the click and put the previous step back. #}
+   old address could land after the click and put the previous step back.
+   2026-10-12: a hidden tab skips the poll and catches up once when shown (visibleOrLater,
+   shownAgain); the server shares one render among the tabs while a job runs (collection_tab_body);
+   JOB_TABLE_REFRESH=on_request replaces the poll with #job-news and "Show the latest". #}
+{% if settings.job_table_refresh == "on_request" %}
+{# JOB_TABLE_REFRESH=on_request: during a job the table is left as it is; #job-news says so and
+   "Show the latest" asks for it (showLatest). The job's end refreshes it, by SSE or, with a dead
+   stream, by jobEndPollDue. #}
 <div id="job-watch" hx-get="/collections/{{ c.collection_id }}/tab-body?{{ request.url.query }}" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:drop"
      hx-on::config-request="event.detail.path = '/collections/{{ c.collection_id }}/tab-body' + location.search"
-     hx-trigger="sse:collection[detail.data.includes('&quot;{{ c.collection_id }}&quot;') && sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded&quot;') || detail.data.includes('&quot;state&quot;: &quot;failed&quot;'))], every 2s [jobPollDue(this, 10000, 4000)], sseReopen from:body"></div>
+     hx-trigger="sse:collection[detail.data.includes('&quot;{{ c.collection_id }}&quot;') && sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded&quot;') || detail.data.includes('&quot;state&quot;: &quot;failed&quot;')) && visibleOrLater(this)], every 2s [jobEndPollDue(this)], showLatest, shownAgain, sseReopen from:body"></div>
+{% else %}
+<div id="job-watch" hx-get="/collections/{{ c.collection_id }}/tab-body?{{ request.url.query }}" hx-select="#tab-body" hx-target="#tab-body" hx-swap="outerHTML" hx-sync="#tab-body:drop"
+     hx-on::config-request="event.detail.path = '/collections/{{ c.collection_id }}/tab-body' + location.search"
+     hx-trigger="sse:collection[detail.data.includes('&quot;{{ c.collection_id }}&quot;') && sseSeen(this) && (detail.data.includes('&quot;state&quot;: &quot;succeeded&quot;') || detail.data.includes('&quot;state&quot;: &quot;failed&quot;')) && visibleOrLater(this)], every 2s [jobPollDue(this, 10000, 4000)], shownAgain, sseReopen from:body"></div>
+{% endif %}
 
 <div id="wb-header" hx-get="/collections/{{ c.collection_id }}/header"
      hx-trigger="sse:collection[detail.data.includes('&quot;{{ c.collection_id }}&quot;') && sseRefresh(this)], sseRefresh, every 10s [jobLive() && sseQuiet(this, 10000)], sseReopen from:body" hx-sync="this:replace" hx-swap="innerHTML">
@@ -28,5 +40,8 @@
 {# The pipeline stepper is always visible; clicking a step swaps #tab-body (and the URL) to that step. #}
 {% include "partials/pipeline.html" %}
 
-{% include "partials/tab_body.html" %}
+{% if settings.job_table_refresh == "on_request" %}{# JOB_TABLE_REFRESH=on_request: the notice sits right above the table it is about #}
+<div id="job-news" class="banner info" hidden data-cid="{{ c.collection_id }}">↻ <span class="job-news-text"></span>
+  <button type="button" class="secondary mini" onclick="showLatest()">Show the latest</button></div>
+{% endif %}{% include "partials/tab_body.html" %}
 {% endblock %}

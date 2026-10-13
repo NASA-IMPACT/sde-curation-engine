@@ -35,9 +35,9 @@ def _free_port() -> int:
 
 
 @pytest.fixture
-def server(fresh_database, tmp_path):
+def server(fresh_database, tmp_path, request):
     """The engine on a free port, login enabled. A clean environment: no .env (the working directory
-    is empty), no OpenAI key, no webhook, no AWS."""
+    is empty), no OpenAI key, no webhook, no AWS. Parametrize indirectly with a dict for more settings."""
     crawler = tmp_path / "crawler"
     crawler.mkdir()
     (crawler / "run.py").write_text(FAKE_RUN_PY)
@@ -48,6 +48,7 @@ def server(fresh_database, tmp_path):
         "CRAWLER_PYTHON": sys.executable, "SCRAPE_BACKEND": "local", "SCRAPE_POLL_INTERVAL_S": "0.2",
         "LLM_PROVIDER": "fake", "LLM_RETRY_DELAY_S": "0", "LLM_PATTERN_BATCH_URLS": "50", "OPENAI_API_KEY": "", "NOTIFY_WEBHOOK_URL": "",
         "APP_PASSWORD": ADMIN_PASSWORD, "SESSION_SECRET": "browser-test-secret",
+        **getattr(request, "param", {}),
     }
     log = (tmp_path / "server.log").open("w")
     proc = subprocess.Popen(
@@ -159,6 +160,75 @@ async def test_b1_a_step_opens_while_a_job_runs_and_its_page_is_slow(server, api
     await page.wait_for_function("document.querySelector('#tab-body')?.dataset.step === 'backlog'", timeout=15_000)
     assert page.url.endswith("step=backlog")
     assert await page.locator(".pipeline li.selected a[href$='step=backlog']").count() == 1
+
+
+# ── B4: a hidden tab does not refresh its table while a job runs (2026-10-12) ──────────────────────
+
+HIDE = """() => { Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => '%s'});
+                  document.dispatchEvent(new Event('visibilitychange')); }"""
+
+
+async def test_b4_a_hidden_tab_does_not_refresh_its_table_while_a_job_runs(server, api, browser):
+    """Every open tab refreshed its table every 10 s during a job, hidden or not: on 100K collections
+    that held the dev database at 100 % CPU (stress run A, 2026-10-12). A hidden tab (another tab in
+    front, a minimised window) now waits, and catches up the moment it is shown again."""
+    cid = "hidden.example.org"
+    await create(api, cid, 2000)  # 2000 pages at 0.02 s each: about 40 s of progress events
+    assert (await api.post(f"/api/collections/{cid}/scrape")).status_code == 202
+    page = await browser.new_page()
+    await sign_in(page, server, "admin", ADMIN_PASSWORD)
+    await page.goto(f"{server}/collections/{cid}")
+    await page.wait_for_timeout(1500)  # the event stream is connected; the job is live
+    fetched: list[str] = []
+    page.on("request", lambda r: fetched.append(r.url) if "/tab-body" in r.url else None)
+
+    await page.evaluate(HIDE % "hidden")
+    await page.wait_for_timeout(14_000)  # longer than the 10 s refresh: a visible tab fetches at least once
+    while_hidden = len(fetched)
+    await page.evaluate(HIDE % "visible")
+    await page.wait_for_timeout(2_000)
+
+    assert while_hidden == 0, f"the hidden tab refreshed its table {while_hidden} times"
+    assert len(fetched) >= 1, "the tab did not catch up when it was shown again"
+    await job_ends(api, cid)
+
+
+# ── B5: JOB_TABLE_REFRESH=on_request: the table waits for the curator during a job (2026-10-12) ──────
+
+
+@pytest.mark.parametrize("server", [{"JOB_TABLE_REFRESH": "on_request"}], indirect=True)
+async def test_b5_during_a_job_the_table_waits_and_a_notice_offers_the_latest(server, api, browser):
+    """With on_request, an open tab does not refresh its table while a job runs, visible or not. A
+    notice says the job is changing the collection; "Show the latest" refreshes the table once. The
+    job's end refreshes it as before."""
+    cid = "notice.example.org"
+    await create(api, cid, 2000)  # about 40 s of progress events
+    assert (await api.post(f"/api/collections/{cid}/scrape")).status_code == 202
+    page = await browser.new_page()
+    await sign_in(page, server, "admin", ADMIN_PASSWORD)
+    await page.goto(f"{server}/collections/{cid}")
+    fetched: list[str] = []
+    page.on("request", lambda r: fetched.append(r.url) if "/tab-body" in r.url else None)
+
+    await page.wait_for_timeout(14_000)  # longer than the 10 s live refresh
+    without_asking = len(fetched)
+    notice = page.locator("#job-news")
+    shown = await notice.is_visible()
+    # the tab's own progress line follows the header's (it is not part of the table that waits)
+    live_text = await page.locator("#wb-header [data-job-progress]").first.inner_text()
+    tab_texts = await page.locator("#tab-body [data-job-progress]").all_inner_texts()
+    await page.click("#job-news button")
+    await page.wait_for_timeout(2_000)
+    after_asking = len(fetched)
+    hidden_after_click = not await notice.is_visible()
+    await job_ends(api, cid)
+    await page.wait_for_timeout(3_000)
+
+    assert without_asking == 0, f"the table refreshed {without_asking} times without being asked"
+    assert tab_texts and all(t == live_text for t in tab_texts), f"tab progress {tab_texts} vs header {live_text!r}"
+    assert shown, "no notice while the job ran"
+    assert after_asking == 1 and hidden_after_click, "Show the latest did not refresh the table once"
+    assert len(fetched) >= 2, "the job's end did not refresh the table"
 
 
 # ── B2: accept and reject suggestions in the review tables ─────────────────────────────────────────

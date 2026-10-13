@@ -431,9 +431,12 @@ after `RESUME_MAX_RESTARTS_TOTAL` (10) restarts in all. A job a curator cancelle
   and curator actions, with no time limit, and the read pool (`DB_READ_POOL_SIZE`, default 12) for
   page requests (GET), whose statements stop after `DB_READ_STATEMENT_TIMEOUT_S`. A page that
   slow, or one that waits `DB_READ_WAIT_S` for a free connection, answers 503 + `Retry-After`
-  instead of piling up behind itself; jobs and pages never starve each other. Identical page
-  reads of one collection's counts run once at a time and are shared (a refresh after a change
-  always counts afresh). Every `Database` method is one transaction, and status transitions lock the collection row. The job registry
+  instead of piling up behind itself; jobs and pages never starve each other. A page's counts are
+  stored between changes (`collection_stats`) and identical reads run once at a time and are shared
+  (a refresh after a change always counts afresh). **While a job runs** on a collection its pages
+  show the counts stored before the job, renewed at most once a minute, and recount once when it
+  ends ("counts as of HH:MM:SSZ" on the Curate step); one tab-body render is shared for 10 s by
+  everyone viewing the same page. Editing is locked during a job, so nobody's own change is hidden. Every `Database` method is one transaction, and status transitions lock the collection row. The job registry
   and per-collection locks still live in memory, so the ECS service is pinned to one task —
   **do not run two replicas** until those move into the database.
 - Curation edits have no stale-edit check. Two curators editing the same row on the same
@@ -449,6 +452,11 @@ after `RESUME_MAX_RESTARTS_TOTAL` (10) restarts in all. A job a curator cancelle
 - Another person's pattern/metadata edits are pushed as a `collection` event (header, stepper and
   dashboard row refresh); the curate table body only reloads when a job finishes or the page is
   refreshed.
+- **During a job** (`JOB_TABLE_REFRESH`): with `live` (the default) a visible tab refreshes its table
+  every 10 s and a hidden tab (another tab in front, a minimised window) waits and catches up when
+  it is shown; with `on_request` no table refreshes during the job, a notice says what has changed
+  since the table was shown, and **Show the latest** refreshes it. Either way the table refreshes
+  when the job ends, and every progress line follows the header's live progress.
 
 **Guidance**
 - Assign curators to distinct collections — that is the model the app is built around.
@@ -485,6 +493,7 @@ after `RESUME_MAX_RESTARTS_TOTAL` (10) restarts in all. A job a curator cancelle
 | `LLM_PROVIDER` (`openai`\|`fake`), `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-6-luna`), `OPENAI_BASE_URL`, `LLM_TIMEOUT_S` (per attempt), `LLM_MAX_RETRIES`, `LLM_TEMPERATURE` (unset = model default; reasoning models reject any other value) | LLM assist; any OpenAI-compatible endpoint |
 | `LLM_REASONING_EFFORT` (unset = model default, medium on gpt-5.6+), `LLM_MAX_COMPLETION_TOKENS` (4000), `LLM_SERVICE_TIER` (unset; `flex` ≈ 50% off, slower) | reasoning effort per call; the output budget (answer + reasoning; a call cut off by it is asked again with 4×, then recorded as failed); OpenAI service tier. Reasoning tokens show in the job's token counts |
 | `PROMOTE_REMOVAL_WARN_RATIO` (0.25) | share of the curated set that must vanish from a crawl before Promote warns |
+| `JOB_TABLE_REFRESH` (`live`) | tables during a job: `live` = refreshed every 10 s in visible tabs; `on_request` = left as they are, with a notice and **Show the latest** |
 | `LLM_WORKERS_TOTAL` (64) | LLM calls in flight across every LLM job in the engine together; each job also stays within `LLM_WORKERS` |
 | `RESUME_START_DELAY_S` (15), `RESUME_STAGGER_S` (10), `RESUME_CONCURRENCY` (2), `RESUME_MAX_RESTARTS` (3), `RESUME_MAX_RESTARTS_TOTAL` (10), `LLM_RESUME_AFTER_RESTART` (3), `SCRAPE_RESUME_AFTER_RESTART` (3) | jobs that carry on after an engine restart: they start this long after the engine serves, this far apart, at most this many in a heavy phase at once; a job fails after this many restarts in a row with no progress (per kind), or this many in all |
 | `LLM_WORKERS` (16), `LLM_RETRY_PASSES` (1), `LLM_RETRY_DELAY_S` (30), `LLM_PATTERN_BATCH_URLS` (1000), `LLM_DEDUPE_TITLES` (false), `GLOBAL_EXCLUDES_PATH` | calls in flight per LLM job; end-of-job retries of rate-limited / 5xx / timed-out calls (a quarter of the workers, after the delay); URLs per Suggest-patterns call; true: Suggest metadata re-titles same title + doc type pages by itself (default: flag only); override the packaged global exclude YAML |

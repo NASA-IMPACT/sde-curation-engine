@@ -42,10 +42,15 @@ def _sorted_title(m: re.Match) -> str:
     return 'title="' + "&#10;".join(sorted(lines)) + '&#10;"'
 
 
+# the time a running job's counts were taken (tab_curate.html: "counts as of 22:02:27Z")
+_COUNTS_AS_OF = re.compile(r"counts as of \d\d:\d\d:\d\dZ")
+
+
 def normalize(html: str, tmp_root: str) -> str:
     html = html.replace(tmp_root, "<TMP>")
     html = _TIMESTAMP.sub("<TS>", html)
     html = _SHORT_TIMESTAMP.sub("<TS>", html)
+    html = _COUNTS_AS_OF.sub("counts as of <TIME>", html)
     html = _JOB_DURATION.sub('<td class="num"><DUR></td>', html)
     html = _STATIC_VERSION.sub("?v=<V>", html)
     html = _MULTILINE_TITLE.sub(_sorted_title, html)

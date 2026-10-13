@@ -67,7 +67,7 @@
   <li class="{{ s1 }}"><a href="{{ anchor }}#exclusions"><span class="n">1</span> Exclusions</a></li>
   <li class="{{ s2 }}"><a href="{{ anchor }}#metadata"><span class="n">2</span> Metadata</a></li>
   <li class="{{ s3 }}"><a href="{{ anchor }}#promote"><span class="n">3</span> Promote</a></li>
-  {% if running %}<li class="warn" title="editing is locked until the job finishes"><span class="spinner"></span> {{ job.kind }} · {{ job_progress(job) }} · locked <button class="mini" hx-post="/api/collections/{{ cid }}/jobs/cancel" hx-swap="none" hx-confirm="Cancel the running {{ job.kind }} job?">✕</button></li>{% endif %}
+  {% if running %}<li class="warn" title="editing is locked until the job finishes"><span class="spinner"></span> {{ job.kind }} · <span data-job-progress="{{ job.id }}">{{ job_progress(job) }}</span> · locked{% if counts_as_of %} · <span class="muted" title="while a job runs, the counts on this page are counted at most once a minute: they can lag the job and disagree with each other until it ends">counts as of {{ counts_as_of }}</span>{% endif %} <button class="mini" hx-post="/api/collections/{{ cid }}/jobs/cancel" hx-swap="none" hx-confirm="Cancel the running {{ job.kind }} job?">✕</button></li>{% endif %}
 </ol>
 {% if job and job.state == 'failed' and job.kind in ('llm_patterns', 'llm_metadata', 'llm_titles') %}<div class="banner err">Last {{ job.kind }} failed: {{ job.error }}</div>{% endif %}
 
@@ -89,7 +89,7 @@
 
 — user message —
 {{ prompts.patterns.user }}</pre></details>
-      {% if last_patterns_job %}<br><small class="muted">Last run {{ last_patterns_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_patterns_job.state }}">{{ last_patterns_job.state }}</span> · {{ job_progress(last_patterns_job) }}</small>{% endif %}
+      {% if last_patterns_job %}<br><small class="muted">Last run {{ last_patterns_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_patterns_job.state }}">{{ last_patterns_job.state }}</span> · <span data-job-progress="{{ last_patterns_job.id }}">{{ job_progress(last_patterns_job) }}</span></small>{% endif %}
     </div>
     <button class="{{ 'primary' if not suggestion_counts.total and s1 == 'current' else 'secondary' }}" {% if running or c.dump_count == 0 or pattern_candidates == 0 %}disabled{% endif %}
             title="{% if c.dump_count == 0 %}scrape first{% elif running %}wait for the running job{% elif not c.delta_count %}Start curating first — suggestions are drawn from the delta URLs{% elif pattern_candidates == 0 %}every delta URL is already excluded{% else %}{{ pattern_candidates }} delta URLs in {{ pattern_calls }} call{{ 's' if pattern_calls != 1 }}{% endif %}"
@@ -164,7 +164,7 @@
 — user message —
 {{ prompts.metadata.user }}</pre></details>
       {% if not patterns_ever_run %}<br><small class="muted">Tip: run <b>Suggest exclusions</b> first — excluding what should not be indexed means fewer URLs to classify.</small>{% endif %}
-      {% if last_metadata_job %}<br><small class="muted">Last run {{ last_metadata_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_metadata_job.state }}">{{ last_metadata_job.state }}</span> · {{ job_progress(last_metadata_job) }}</small>{% endif %}
+      {% if last_metadata_job %}<br><small class="muted">Last run {{ last_metadata_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_metadata_job.state }}">{{ last_metadata_job.state }}</span> · <span data-job-progress="{{ last_metadata_job.id }}">{{ job_progress(last_metadata_job) }}</span></small>{% endif %}
       {% if ai_counts.failed %}<br><small title="the call failed even after a retry; the error is shown under each URL">⚠ <a href="/collections/{{ cid }}?tab=delta&ai=failed">{{ ai_counts.failed }} URL{{ 's' if ai_counts.failed != 1 }} failed</a> to classify — Suggest metadata tries {{ 'it' if ai_counts.failed == 1 else 'them' }} again.</small>{% endif %}
       {% if dedupe_titles %}<br><small class="muted">Pages it gives the same title and document type as another page of the collection are then sent back, one call each with the other URLs, for a new title (only) that tells them apart.</small>{% else %}<br><small class="muted">Pages it gives the same title and document type as another page are flagged with the title as generated: edit them yourself, or send them back with <b>✨ Regenerate duplicate titles</b>.</small>{% endif %}
       {% if classifiable == 0 and classifiable_all %}<br><small class="muted">Every included URL already has suggestions — <a href="#" hx-post="/api/collections/{{ cid }}/suggest/metadata?all=true" hx-swap="none" hx-confirm="Re-classify all {{ classifiable_all }} included URLs? Existing AI suggestions are replaced.">redo all {{ classifiable_all }}</a>.</small>{% endif %}
@@ -187,7 +187,7 @@
 
 — user message —
 {{ prompts.titles.user }}</pre></details>
-      {% if last_titles_job %}<br><small class="muted">Last run {{ last_titles_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_titles_job.state }}">{{ last_titles_job.state }}</span> · {{ job_progress(last_titles_job) }}</small>{% endif %}
+      {% if last_titles_job %}<br><small class="muted">Last run {{ last_titles_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_titles_job.state }}">{{ last_titles_job.state }}</span> · <span data-job-progress="{{ last_titles_job.id }}">{{ job_progress(last_titles_job) }}</span></small>{% endif %}
     </div>
     {% if dup_counts.delta_urls %}<button class="secondary" {% if running or not curating %}disabled{% endif %}
             title="{% if running %}wait for the running job{% elif not curating %}start curating first{% else %}{{ dup_counts.delta_urls }} call{{ 's' if dup_counts.delta_urls != 1 }} at most{% endif %}"
@@ -195,7 +195,7 @@
   </div></div>
   {% elif last_titles_job %}
   {# the panel above is gone with the duplicates: say how the run that cleared them went #}
-  <p class="small muted">↻ Last regenerate {{ last_titles_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_titles_job.state }}">{{ last_titles_job.state }}</span> · {{ job_progress(last_titles_job) }} — no delta URL shares a title + document type with another page.</p>
+  <p class="small muted">↻ Last regenerate {{ last_titles_job.started_at.strftime('%Y-%m-%d %H:%M') }}Z · <span class="job j-{{ last_titles_job.state }}">{{ last_titles_job.state }}</span> · <span data-job-progress="{{ last_titles_job.id }}">{{ job_progress(last_titles_job) }}</span> — no delta URL shares a title + document type with another page.</p>
   {% endif %}
 
   {# The review table outlives the suggestions: a row that shares its title + document type with
