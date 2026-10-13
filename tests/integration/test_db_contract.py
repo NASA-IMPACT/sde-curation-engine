@@ -824,3 +824,34 @@ def test_every_implemented_method_is_exercised_here():
     assert set(IMPLEMENTED) == used | {"insert_collection"}
     source = Path(__file__).read_text()
     assert [m for m in IMPLEMENTED if not re.search(rf"\.{m}\(", source)] == []
+
+
+async def test_ai_answers_and_failures_land_on_their_own_rows(store, same):
+    """set_delta_ai / set_delta_ai_errors: every value on the row it names, nothing elsewhere."""
+    await seeded(store)
+    await seeded(store, "other.org")
+    await store.replace_deltas(CID, [delta(A), delta(B), delta(C)], [])
+    await store.replace_deltas("other.org", [delta(A, cid="other.org")], [])
+    assert await store.set_delta_ai_errors(CID, [(B, "timeout"), (C, "x" * 1500)], job=3) == 2
+    assert await store.set_delta_ai_errors(CID, [(C, "again")], job=4) == 1
+
+    assert await store.set_delta_ai(CID, [
+        {"url": A, "title": "Title A", "title_conf": "high", "division": "Heliophysics", "division_conf": "low",
+         "document_type": "Data", "document_type_conf": "medium", "model": "m1", "content_hash": "hA"},
+        {"url": B, "title": "Title B", "model": "m2", "division_skipped": True},
+        {"url": D, "title": "not a delta row"},
+    ], job=5) == 3
+    assert await store.set_delta_ai(CID, []) == 0
+    assert await store.set_delta_ai_errors(CID, []) == 0
+
+    fields = ("title_ai", "division_ai", "document_type_ai", "title_ai_conf", "division_ai_conf",
+              "document_type_ai_conf", "ai_model", "ai_content_hash", "ai_error", "ai_failures",
+              "division_skipped", "title_ai_before")
+    rows = {d.url: tuple(getattr(d, f) for f in fields) for d in await store.load_deltas(CID)}
+    same("rows", rows)
+    assert rows[A][:8] == ("Title A", "Heliophysics", "Data", "high", "low", "medium", "m1", "hA")
+    assert rows[B][0] == "Title B" and rows[B][8:11] == (None, 0, True)  # an answer clears the failure
+    assert rows[C][0] is None and rows[C][8:10] == ("again", 2)  # failures count up; the answer list missed C
+    other = (await store.load_deltas("other.org"))[0]
+    assert (other.title_ai, other.ai_failures) == (None, 0)
+

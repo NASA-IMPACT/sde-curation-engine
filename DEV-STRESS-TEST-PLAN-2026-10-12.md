@@ -425,11 +425,15 @@ Step 6: a plain `make deploy ENV=dev PROFILE=sde-dev` (or the next push to `dev`
 - ~~Shared tab-body renders did not happen in R3 (0 of 196)~~: the tabs asked together and each
   started its own render. Fixed locally 2026-10-13, not on dev yet: a request that arrives while the
   same render runs waits for it and shares it.
-- A glob add or delete on a 100K collection runs a 48 s recompute inside the request: run it as a
-  job above BULK_JOB_MIN_URLS (audit R6).
+- ~~A glob add or delete on a 100K collection runs a 48 s recompute inside the request.~~ Fixed
+  locally 2026-10-13 after Run B, not on dev yet: adding or deleting a rule on a collection with at
+  least BULK_JOB_MIN_URLS dump URLs is a job (`rule_add`, `rule_delete`); no other edit is taken
+  until it ends. Still in the request: accepting one pattern suggestion, renaming the collection and
+  setting its division (each a full recompute).
 - One request with no answer in 90 s in Run A: cause not found.
-- Suggest metadata saves one UPDATE per page (most of step 4's database load): one statement per
-  batch (architecture review §4.2).
+- ~~Suggest metadata saves one UPDATE per page~~ (33 % of Run B's database load). Fixed locally
+  2026-10-13, not on dev yet: each batch of answers (and of failures) is one statement. Regenerate
+  titles still writes one UPDATE per page.
 
 ## Results
 
@@ -448,4 +452,8 @@ Fill in as the run goes; the details go in each run's `RUNLOG.md`.
 | R2 Stress-mode redeploy | 2026-10-13 14:03–14:12 | **passed** | rev 46, LLM_PROVIDER=fake, one task, /health 200, WAF 20000, V19, no RDS event, no jobs, 4 collections; `~/projects/sde-curation-stress/results/dev-20261013T140252Z/` |
 | R2 smoke: no OpenAI calls | 2026-10-13 15:13–15:21 | **passed** | Suggest patterns + Suggest metadata, 2,000 pages each (`--mix patterns,metadata`): 2/2 ok, 0 errors; guard rev 46 fake; 0 OpenAI lines in the engine log; cleanup done, 4 collections; `~/projects/sde-curation-stress/results/dev-20261013T151332Z/` |
 | R3 Re-run of Run A | 2026-10-13 15:23–15:38 | **no crash; limits failed** | pages p95 7.83 s (was 8.32), DB CPU 95–100 % for 4 min, 13 × 503 around the glob delete (was 7), 0 requests > 90 s (was 1), no restart/PoolTimeout; **X-Tab-Body shared 0 of 196**: concurrent tabs all miss (the render is stored only when it ends). Run B not run. `~/projects/sde-curation-stress/results/dev-20261013T152328Z/` |
+| R1 again: merge PR #71 | 2026-10-13 16:09 | done (by Bernard) | glob delete keeps the excluded count; tabs wait for the running render; CI deploy rev 47 |
+| R2 again | 2026-10-13 16:27–16:35 | **passed** | rev 48, fake, one task, /health 200, WAF 20000, V19, no RDS event; Elb5xx alarm from the 1-minute deploy gap (16 ALB 503s, two open tabs); `~/projects/sde-curation-stress/results/dev-20261013T162748Z/` |
+| R3 again | 2026-10-13 16:38–16:53 | **passed** | pages p95 2.33 s (was 7.83), DB CPU peak 65 % (was 100 %), 0 errors / 503 (was 13), shared 67 of 220 (was 0), accept 38 s and glob delete 16 s (were 141 / 48 s), no restart/PoolTimeout, no alarm; DB load now led by the metadata per-row UPDATE. Run B not run. `~/projects/sde-curation-stress/results/dev-20261013T163840Z/` |
+| Run B (after R3 passed) | 2026-10-13 16:54–17:12 | **no crash, 0 errors; limits failed** | 4 × 100K (2 bulk-exclude + 2 metadata): 4/4 jobs, 0 503, shared 276 of 636, no restart/PoolTimeout; but DB CPU 99 % for ≈ 4 min (DbCpu alarm 17:08–17:09), tabs p95 7.27 s, pages p95 4.96 s; one glob delete 51 s in the request; one /health answer 18 s (cause not found). Largest DB load: metadata per-row UPDATE (33 %). `~/projects/sde-curation-stress/results/dev-20261013T165403Z/` |
 | R4–R5 | | | not started |

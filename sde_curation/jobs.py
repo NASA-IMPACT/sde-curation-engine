@@ -179,6 +179,8 @@ class JobManager:
             JobKind.RECOMPUTE: self._resume_curation,  # #34
             JobKind.BULK_ACCEPT: self._resume_curation,  # #34
             JobKind.BULK_SUGGESTIONS: self._resume_curation,  # #34
+            JobKind.RULE_ADD: self._resume_curation,
+            JobKind.RULE_DELETE: self._resume_curation,
         }
 
     def resumable(self, kind: JobKind | str) -> bool:

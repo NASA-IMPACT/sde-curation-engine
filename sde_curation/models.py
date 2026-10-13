@@ -123,6 +123,9 @@ class JobKind(StrEnum):
     RECOMPUTE = "recompute"
     BULK_ACCEPT = "bulk_accept"
     BULK_SUGGESTIONS = "bulk_suggestions"
+    # one rule added or deleted on a big collection: the full recompute it needs (2026-10-13)
+    RULE_ADD = "rule_add"
+    RULE_DELETE = "rule_delete"
 
 
 class JobState(StrEnum):

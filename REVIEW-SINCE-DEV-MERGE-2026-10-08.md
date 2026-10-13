@@ -622,6 +622,7 @@ commit, re-run Run A, then put dev back: the plan's section "Re-run after the fi
 **R3 (2026-10-13, after c, d, e1 on dev):** no crash, limits still failed (pages p95 7.83 s, DB CPU 100 % for 4 min, 13 × 503 around the glob delete); 0 of 196 tab refreshes were shared, because the tabs asked together. Both fixed locally the same day (shared render waits for one in progress; a glob delete keeps the stored excluded count), not on dev yet.
 
 **Still open from Run A:** ~~the excluded count after a glob delete~~ (fixed locally 2026-10-13); a
-glob add or delete on 100K URLs runs 48 s inside the request (should be a job); one request with no
-answer in 90 s (cause not found); Suggest metadata's one UPDATE per page.
+~~glob add or delete on 100K URLs runs 48 s inside the request~~ (a job since 2026-10-13, local); one
+request with no answer in 90 s (cause not found); ~~Suggest metadata's one UPDATE per page~~ (one
+statement per batch since 2026-10-13, local).
 

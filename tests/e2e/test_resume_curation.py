@@ -1,5 +1,6 @@
-"""#34: Recompute, bulk AI accept and bulk suggestions accept carry on across an engine restart, and
-the result equals a run that was never interrupted.
+"""#34: Recompute, bulk AI accept, bulk suggestions accept and (2026-10-13) a rule added or deleted on
+a big collection carry on across an engine restart, and the result equals a run that was never
+interrupted.
 
 Two twin collections are crawled the same way (the fake crawler's pages are relative to the seed).
 The first runs the bulk change without a break. On the second, the change is held at one of its
@@ -103,7 +104,8 @@ async def _prepare(c, cid: str, kind: str) -> None:
     assert (await c.post(f"/api/collections/{cid}/recompute")).status_code == 202
     await _done(c, cid)
     r = await c.post(f"/api/collections/{cid}/patterns", json={"type": "exclude", "match": "*/p9"})  # an SME rule
-    assert r.status_code == 201, r.text
+    assert r.status_code == 202, r.text  # a job: the collection is over bulk_job_min_urls
+    await _done(c, cid)
     if kind == "bulk_accept":
         assert (await c.post(f"/api/collections/{cid}/suggest/metadata")).status_code == 202
         await _done(c, cid)
@@ -118,6 +120,11 @@ async def _act(c, cid: str, kind: str) -> int:
         r = await c.post(f"/api/collections/{cid}/recompute?all=true")
     elif kind == "bulk_accept":
         r = await c.post(f"/api/collections/{cid}/ai/bulk", json={"decision": "accept"})
+    elif kind == "rule_add":
+        r = await c.post(f"/api/collections/{cid}/patterns", json={"type": "exclude", "match": "*/p7*"})
+    elif kind == "rule_delete":
+        rule = next(p for p in (await c.get(f"/api/collections/{cid}/patterns")).json() if p["match"] == "*/p9")
+        r = await c.delete(f"/api/collections/{cid}/patterns/{rule['id']}")
     else:
         r = await c.post(f"/api/collections/{cid}/suggestions/bulk", json={"decision": "accept"})
     assert r.status_code == 202 and r.json()["kind"] == kind, r.text
@@ -136,6 +143,10 @@ STEPS = [
     ("bulk_suggestions", CurationService, "_recompute", 1),  # rules written, no recompute yet
     ("bulk_suggestions", Database, "set_pattern_suggestions_state", 1),  # recomputed, still 'pending'
     ("bulk_suggestions", Database, "audit", 1),  # marked accepted: nothing pending on resume
+    ("rule_add", CurationService, "_recompute", 1),  # rule written, no recompute yet
+    ("rule_add", Database, "audit", 1),  # recomputed, no audit line yet: the rerun finds its own rule
+    ("rule_delete", CurationService, "_recompute", 1),  # rule deleted, no recompute yet
+    ("rule_delete", Database, "audit", 1),  # recomputed, no audit line yet: the rerun finds no rule
 ]
 
 
@@ -164,7 +175,9 @@ async def test_a_bulk_change_interrupted_at_any_step_resumes_to_the_same_result(
         db = app.state.db
         got, want = await snapshot(db, CID), await snapshot(db, REF)
     assert got == want
-    assert want["deltas"] and want["rules"]  # the twins had something to compare
+    assert want["deltas"] and (want["rules"] or kind == "rule_delete")  # the twins had something to compare
+    if kind == "rule_delete":  # the deleted rule's page is back in the queue, on both
+        assert any("/p9" in str(d) for d in want["deltas"])
 
 
 async def test_a_bulk_job_from_an_engine_that_stored_no_arguments_fails_as_before(engines):
