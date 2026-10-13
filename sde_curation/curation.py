@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 from .db import Database
@@ -266,17 +267,20 @@ class CurationService:
             ds = await self._recompute_keys(c, [key], excluded_before=before)
             return ds if ds is not None else await self._recompute(c)
 
-    async def delete_pattern(self, c: Collection, pattern_id: int) -> DeltaSet | None:
+    async def delete_pattern(self, c: Collection, pattern_id: int, *, rerun: bool = False) -> DeltaSet | None:
         """Delete one rule and recompute, under the lock as one step. The stored excluded count stays
         until the recompute stores the exact one (keep_count): page views never count it from the
-        tables meanwhile. If the recompute fails the count is forgotten, so it is never left wrong."""
+        tables meanwhile. If the recompute fails the count is forgotten, so it is never left wrong.
+        No such rule: None, unless `rerun` (a job running again after a restart, whose first run
+        may have deleted it already): then the recompute still runs."""
         async with self._lock_for(c.collection_id):
-            if not await self.db.delete_pattern(c.collection_id, pattern_id, keep_count=True):
+            if not await self.db.delete_pattern(c.collection_id, pattern_id, keep_count=True) and not rerun:
                 return None
             try:
                 return await self._recompute(c)
             except BaseException:
-                await self.db.forget_excluded_count(c.collection_id)
+                with contextlib.suppress(Exception):  # the recompute's own error is the one to report
+                    await self.db.forget_excluded_count(c.collection_id)
                 raise
 
     @staticmethod

@@ -141,6 +141,7 @@ _ORDER = {st: i for i, (st, _, _, _) in enumerate(PIPELINE)}
 STEP_FOR_KIND = {
     "scrape": Status.BACKLOG, "llm_patterns": Status.CURATING, "llm_metadata": Status.CURATING, "llm_titles": Status.CURATING,
     "recompute": Status.CURATING, "bulk_accept": Status.CURATING, "bulk_suggestions": Status.CURATING,
+    "rule_add": Status.CURATING, "rule_delete": Status.CURATING,
     "index_test": Status.CONFIG_GENERATED, "validate": Status.CONFIG_GENERATED, "index_prod": Status.LIVE,
     "validate_prod": Status.LIVE,
 }
@@ -649,6 +650,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return lambda: _ai_bulk_work(r, c, body, resumed=True)
         if kind is JobKind.BULK_SUGGESTIONS:
             return lambda: _suggestions_work(r, c, args["decision"], args.get("type"))
+        if kind is JobKind.RULE_ADD:
+            rule = PatternCreate(**args)
+            return lambda: _add_rule_work(r, c, rule, rerun=True)
+        if kind is JobKind.RULE_DELETE:
+            return lambda: _delete_rule_work(r, c, args["pattern_id"], args["detail"], rerun=True)
         raise ValueError(f"{kind} is not a bulk curation change")
 
     # ── identity (set by auth.AuthMiddleware; absent when login is off) ─
@@ -1646,27 +1652,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/collections/{collection_id}/patterns", status_code=201)
     async def api_add_pattern(request: Request, collection_id: str, body: PatternCreate):
+        """Add a rule, then the full recompute it needs: a job on a big collection (run_or_job), where
+        it took 16-51 s on 100K pages inside the request (dev Run B, 2026-10-13). A rule that is
+        already there is refused here, before any job."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
+        if await db(request).find_pattern(collection_id, body.type, body.match):
+            raise HTTPException(409, "pattern already exists")
+        return await run_or_job(request, c, JobKind.RULE_ADD, f"adding the rule {_pattern_detail(body)}",
+                                lambda: _add_rule_work(request, c, body), body.model_dump(mode="json"))
+
+    async def _add_rule_work(request: Request, c: Collection, body: PatternCreate, *, rerun: bool = False) -> dict:
+        """Safe to run twice: a rerun after a restart finds the rule its first run added and recomputes."""
         try:
             p, ds = await curation(request).add_pattern(c, body, actor=actor(request))
         except ConflictError as e:
-            raise HTTPException(409, "pattern already exists") from e
+            if not rerun:
+                raise HTTPException(409, "pattern already exists") from e
+            p = await db(request).find_pattern(c.collection_id, body.type, body.match)
+            ds = await curation(request).recompute(c)
         await _after_curation_change(request, c, ds)
-        await audit(request, "pattern.add", collection_id, _pattern_detail(p))
-        return htmx_done(request, {"pattern": p.model_dump(mode="json"), "deltas": ds.counts})
+        await audit(request, "pattern.add", c.collection_id, _pattern_detail(p or body))
+        return {"pattern": p.model_dump(mode="json") if p else None, "deltas": ds.counts}
 
     @app.delete("/api/collections/{collection_id}/patterns/{pattern_id}")
     async def api_delete_pattern(request: Request, collection_id: str, pattern_id: int):
+        """Delete a rule, then the full recompute it needs: a job on a big collection, as an add."""
         c = await must_get(request, collection_id)
         ensure_idle(request, c)
         gone = await db(request).get_pattern(collection_id, pattern_id)
-        ds = await curation(request).delete_pattern(c, pattern_id)
-        if ds is None or gone is None:
+        if gone is None:
+            raise HTTPException(404, "pattern not found")
+        detail = _pattern_detail(gone)
+        return await run_or_job(request, c, JobKind.RULE_DELETE, f"deleting the rule {detail}",
+                                lambda: _delete_rule_work(request, c, pattern_id, detail),
+                                {"pattern_id": pattern_id, "detail": detail})
+
+    async def _delete_rule_work(request: Request, c: Collection, pattern_id: int, detail: str, *,
+                                rerun: bool = False) -> dict:
+        """Safe to run twice: a rerun after a restart recomputes even if its first run deleted the rule."""
+        ds = await curation(request).delete_pattern(c, pattern_id, rerun=rerun)
+        if ds is None:
             raise HTTPException(404, "pattern not found")
         await _after_curation_change(request, c, ds)
-        await audit(request, "pattern.delete", collection_id, _pattern_detail(gone))
-        return htmx_done(request, ds.counts)
+        await audit(request, "pattern.delete", c.collection_id, detail)
+        return ds.counts
 
     @app.post("/api/collections/{collection_id}/urls")
     async def api_url_edit(request: Request, collection_id: str, body: UrlEdit):

@@ -275,7 +275,8 @@
     }
     const JOB_LABELS = {scrape: 'The crawl', llm_metadata: 'Suggest metadata', llm_patterns: 'Suggest exclusions',
       llm_titles: 'Regenerate titles', index_test: 'Index to test', index_prod: 'Index to prod', validate: 'Validation',
-      recompute: 'Recompute', bulk_suggestions: 'Accepting suggestions', bulk_ai: 'Accepting AI metadata'};
+      recompute: 'Recompute', bulk_suggestions: 'Accepting suggestions', bulk_accept: 'Accepting AI metadata',
+      rule_add: 'Adding a rule', rule_delete: 'Deleting a rule'};
     const jobNewsState = {shownAt: new Date(), doneAt: null, lastDone: null};
     function jobNews(data) {
       const box = document.getElementById('job-news');

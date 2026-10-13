@@ -1546,20 +1546,27 @@ class Database:
     async def set_delta_ai(self, collection_id: str, items: list[dict[str, Any]], *, job: int | None = None) -> int:
         """Bulk-write AI suggestions for whole rows (never touches the effective fields). A
         re-classification replaces the previous answer, confidence included, and clears any
-        recorded failure. `job`: the Suggest-metadata job answering (V19 ai_job)."""
+        recorded failure. `job`: the Suggest-metadata job answering (V19 ai_job).
+        One statement per batch: one UPDATE per page was a third of the database's load with two
+        jobs on 100K collections (dev Run B, 2026-10-13)."""
         if not items:
             return 0
-        async with self._conn() as conn, conn.cursor() as cur:
-            await cur.executemany(
-                """UPDATE delta_urls SET title_ai=%s, division_ai=%s, document_type_ai=%s,
-                   title_ai_conf=%s, division_ai_conf=%s, document_type_ai_conf=%s,
-                   ai_model=%s, ai_content_hash=%s, ai_error=NULL, ai_failures=0, title_ai_before=NULL,
-                   division_skipped=%s, ai_job=%s
-                   WHERE collection_id=%s AND url=%s""",
-                [(i.get("title"), i.get("division"), i.get("document_type"),
-                  i.get("title_conf"), i.get("division_conf"), i.get("document_type_conf"),
-                  i.get("model"), i.get("content_hash"), bool(i.get("division_skipped")), job,
-                  collection_id, i["url"]) for i in items],
+        rows = list({i["url"]: i for i in items}.values())  # a URL twice: the last answer, as row by row
+        cols = ("url", "title", "division", "document_type", "title_conf", "division_conf",
+                "document_type_conf", "model", "content_hash")
+        async with self._conn() as conn:
+            await conn.execute(
+                """UPDATE delta_urls d SET title_ai=v.title, division_ai=v.division, document_type_ai=v.document_type,
+                   title_ai_conf=v.title_conf, division_ai_conf=v.division_conf,
+                   document_type_ai_conf=v.document_type_conf, ai_model=v.model, ai_content_hash=v.content_hash,
+                   ai_error=NULL, ai_failures=0, title_ai_before=NULL, division_skipped=v.division_skipped, ai_job=%s
+                   FROM unnest(%s::text[], %s::text[], %s::text[], %s::text[], %s::text[], %s::text[], %s::text[],
+                               %s::text[], %s::text[], %s::boolean[])
+                     AS v(url, title, division, document_type, title_conf, division_conf, document_type_conf,
+                          model, content_hash, division_skipped)
+                   WHERE d.collection_id=%s AND d.url=v.url""",
+                [job, *([i.get(k) for i in rows] for k in cols),
+                 [bool(i.get("division_skipped")) for i in rows], collection_id],
             )
         return len(items)
 
@@ -1570,11 +1577,16 @@ class Database:
         a failed re-classification does not throw away what the model said last time."""
         if not items:
             return 0
-        async with self._conn() as conn, conn.cursor() as cur:
-            await cur.executemany(
-                "UPDATE delta_urls SET ai_error=%s, ai_failures=ai_failures+1, ai_job=%s"
-                " WHERE collection_id=%s AND url=%s",
-                [(err[:1000], job, collection_id, url) for url, err in items],
+        last: dict[str, str] = {}
+        times: dict[str, int] = {}
+        for url, err in items:  # a URL twice: its last error, and both failures counted, as row by row
+            last[url], times[url] = err[:1000], times.get(url, 0) + 1
+        async with self._conn() as conn:  # one statement per batch, as set_delta_ai
+            await conn.execute(
+                "UPDATE delta_urls d SET ai_error=v.error, ai_failures=d.ai_failures + v.times, ai_job=%s"
+                " FROM unnest(%s::text[], %s::text[], %s::int[]) AS v(url, error, times)"
+                " WHERE d.collection_id=%s AND d.url=v.url",
+                (job, list(last), list(last.values()), [times[u] for u in last], collection_id),
             )
         return len(items)
 
@@ -2473,6 +2485,15 @@ class Database:
         async with self._conn() as conn:
             cur = await conn.execute(
                 "SELECT * FROM patterns WHERE collection_id=%s AND id=%s", (collection_id, pattern_id)
+            )
+            row = await cur.fetchone()
+            return Pattern(**row) if row else None
+
+    async def find_pattern(self, collection_id: str, type_: str, match: str) -> Pattern | None:
+        """The rule with this type and match (the table's unique key), if there is one."""
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM patterns WHERE collection_id=%s AND type=%s AND match=%s", (collection_id, str(type_), match)
             )
             row = await cur.fetchone()
             return Pattern(**row) if row else None

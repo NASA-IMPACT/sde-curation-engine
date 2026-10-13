@@ -402,10 +402,12 @@ are in flight — the ceilings come from the systems behind it.
 - *Index runs* — each dispatches its own ECS task and polls S3. Nothing limits how many run at
   once; runs on different collections are fine as long as the indexer tolerates it.
 - *Bulk curation changes* — on a collection with at least `BULK_JOB_MIN_URLS` (20 000) dump URLs,
-  **Start curating / recompute**, **accept all pattern suggestions** and **accept all AI metadata**
-  answer `202` with a job (`recompute`, `bulk_suggestions`, `bulk_accept`) and show progress like
-  any other job; smaller collections are answered in the request as before. A request has 60 s
-  behind CloudFront. Single edits are always answered in the request.
+  **Start curating / recompute**, **accept all pattern suggestions**, **accept all AI metadata** and
+  (since 2026-10-13) **adding or deleting a rule** answer `202` with a job (`recompute`,
+  `bulk_suggestions`, `bulk_accept`, `rule_add`, `rule_delete`) and show progress like any other job;
+  no other edit on the collection is taken until it ends. Smaller collections are answered in the
+  request as before. A request has 60 s behind CloudFront. Per-URL edits are always answered in the
+  request.
 - *One process, one event loop.* The whole-collection CPU work (diff + rule resolution, match
   counts, promote, parsing the crawl, writing `patterns.yaml`) runs in threads so that one
   curator's recompute does not freeze everyone else's pages, polls and SSE streams.
@@ -475,7 +477,7 @@ after `RESUME_MAX_RESTARTS_TOTAL` (10) restarts in all. A job a curator cancelle
 | `DB_READ_STATEMENT_TIMEOUT_S` (30) | a page request's statement is cancelled after this long → 503 |
 | `DB_READ_WAIT_S` (10) | how long a page request waits for a free read connection → 503 |
 | `HEALTH_DB_TIMEOUT_S` (3) | `/health/db` answers 503 when no read connection answers within this long |
-| `BULK_JOB_MIN_URLS` (20000) | dump URLs from which recompute / accept-all run as background jobs (0 = always) |
+| `BULK_JOB_MIN_URLS` (20000) | dump URLs from which recompute / accept-all / rule add and delete run as background jobs (0 = always) |
 | `DATA_DIR` | `collections/<id>/{collection,patterns}.yaml`, index logs, scrape jobs |
 | `CRAWLER_ROOT`, `CRAWLER_PYTHON` | crawl4ai repo and its interpreter |
 | `INDEXER_ROOT`, `INDEXER_PYTHON` | sde-api-scrapers repo (Phase 5) |
@@ -516,7 +518,7 @@ Everything the UI does is a JSON endpoint (`/docs` for OpenAPI). HTMX callers ge
 | `POST …/scrape` | run the crawl → job (202; 409 if busy) |
 | `POST …/jobs/cancel` | cancel the running job |
 | `POST …/recompute` | diff dump vs curated + apply patterns (idempotent); 202 + job on a big collection (`BULK_JOB_MIN_URLS`) |
-| `GET/POST /…/patterns`, `DELETE …/patterns/{pid}` | pattern CRUD with match counts; `GET …?exact_limit=&exact_offset=` pages the per-URL rules |
+| `GET/POST /…/patterns`, `DELETE …/patterns/{pid}` | pattern CRUD with match counts; `GET …?exact_limit=&exact_offset=` pages the per-URL rules; POST / DELETE: 202 + job on a big collection (`BULK_JOB_MIN_URLS`) |
 | `POST …/urls` | per-URL edit `{url, type, value?}`; exclude/include toggles |
 | `GET …/dump?q&excluded`, `…/delta?kind&excluded&division&document_type&q&edited&renamed&limit&offset` (`…/deltas` still works), `…/curated?q&excluded&edited&unreachable` | the three URL sets, paginated |
 | `GET /collections/{id}/urls/{dump\|delta\|curated}?format=csv&…` | CSV export of the filtered set |
