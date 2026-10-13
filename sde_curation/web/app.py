@@ -1235,6 +1235,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # (collection, query, admin) → (expires, job id, html): see collection_tab_body
     shared_tab_bodies: dict[tuple[str, str, bool], tuple[float, int, bytes]] = {}
+    # (collection, query, admin) → (job id, the render in progress): see collection_tab_body
+    tab_body_renders: dict[tuple[str, str, bool], tuple[int, asyncio.Future[bytes]]] = {}
 
     @app.get("/collections/{collection_id}/tab-body", response_class=HTMLResponse)
     async def collection_tab_body(request: Request, collection_id: str, tab: str = "overview", set: str | None = None,
@@ -1245,20 +1247,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         While a job runs on the collection, one render is shared for TAB_BODY_SHARE_S by every viewer
         of the same page, filters and role (X-Tab-Body: shared). Every open tab refreshes every 10 s
         during a job, and on a 100K collection each render cost 11-12 s of database time under load
-        (dev stress run A, 2026-10-12). Nothing is shared outside a job, so a curator's own edit
-        always shows at once; a new job never reuses the render of the one before."""
+        (dev stress run A, 2026-10-12). A request that arrives while that render is still running
+        waits for it: the tabs of a collection ask within the same second, and without this each
+        started its own render (dev, R3, 2026-10-13: 0 of 196 shared). If the render fails, all of
+        them get its error (503 when the database is busy) and the next request renders again.
+        Nothing is shared outside a job, so a curator's own edit always shows at once; a new job
+        never reuses the render of the one before."""
         job_id = db(request).live_job(collection_id)
+        if job_id is None:
+            ctx = await collection_context(request, collection_id, tab, set, step)
+            return templates.TemplateResponse(request, "partials/tab_body.html", ctx, headers={"X-Tab-Body": "rendered"})
         key = (collection_id, str(request.url.query), is_admin(request))
         now = time.monotonic()
-        if job_id is not None and (hit := shared_tab_bodies.get(key)) and hit[0] > now and hit[1] == job_id:
+        if (hit := shared_tab_bodies.get(key)) and hit[0] > now and hit[1] == job_id:
             return HTMLResponse(hit[2], headers={"X-Tab-Body": "shared"})
-        ctx = await collection_context(request, collection_id, tab, set, step)
-        resp = templates.TemplateResponse(request, "partials/tab_body.html", ctx, headers={"X-Tab-Body": "rendered"})
-        if job_id is not None and resp.status_code == 200:
+        if (running := tab_body_renders.get(key)) and running[0] == job_id:
+            return HTMLResponse(await asyncio.shield(running[1]), headers={"X-Tab-Body": "shared"})
+
+        async def render() -> bytes:
+            ctx = await collection_context(request, collection_id, tab, set, step)
+            body = bytes(templates.TemplateResponse(request, "partials/tab_body.html", ctx).body)
             for k in [k for k, v in shared_tab_bodies.items() if v[0] <= now]:
                 del shared_tab_bodies[k]
-            shared_tab_bodies[key] = (now + TAB_BODY_SHARE_S, job_id, resp.body)
-        return resp
+            shared_tab_bodies[key] = (now + TAB_BODY_SHARE_S, job_id, body)
+            return body
+
+        def done(t: asyncio.Future[bytes]) -> None:
+            if tab_body_renders.get(key, (0, None))[1] is t:
+                del tab_body_renders[key]
+            if not t.cancelled():
+                t.exception()  # retrieved: a failure every waiter has gone from is not logged as unhandled
+
+        task = asyncio.ensure_future(render())  # its own task: a waiter that goes away does not cancel it
+        tab_body_renders[key] = (job_id, task)
+        task.add_done_callback(done)
+        return HTMLResponse(await asyncio.shield(task), headers={"X-Tab-Body": "rendered"})
 
     @app.get("/collections/{collection_id}/header", response_class=HTMLResponse)
     async def collection_header(request: Request, collection_id: str):

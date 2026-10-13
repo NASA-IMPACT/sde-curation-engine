@@ -619,7 +619,9 @@ Plan, checks and results: `DEV-STRESS-TEST-PLAN-2026-10-12.md`; run folders unde
 **Next:** commit and merge to `dev` (CI deploys normal mode), redeploy stress mode from the merged
 commit, re-run Run A, then put dev back: the plan's section "Re-run after the fixes" (R1–R5).
 
-**Still open from Run A:** the excluded count after a glob delete (17–30+ s at 97K exclusions); a
+**R3 (2026-10-13, after c, d, e1 on dev):** no crash, limits still failed (pages p95 7.83 s, DB CPU 100 % for 4 min, 13 × 503 around the glob delete); 0 of 196 tab refreshes were shared, because the tabs asked together. Both fixed locally the same day (shared render waits for one in progress; a glob delete keeps the stored excluded count), not on dev yet.
+
+**Still open from Run A:** ~~the excluded count after a glob delete~~ (fixed locally 2026-10-13); a
 glob add or delete on 100K URLs runs 48 s inside the request (should be a job); one request with no
 answer in 90 s (cause not found); Suggest metadata's one UPDATE per page.
 

@@ -395,6 +395,62 @@ async def test_deleting_an_exclude_rule_queues_its_pages_again():
     assert await queued(db) == dict.fromkeys(URLS, DeltaKind.NEW)
 
 
+async def test_deleting_an_exclude_glob_keeps_the_stored_excluded_count_until_its_recompute_stores_the_new_one():
+    """Unknown (NULL), the count is taken over the whole collection by the first page view: 17-30+ s on
+    100K pages with 97K excluded, and the 30 s read limit turned those views into 503s (dev, R3,
+    2026-10-13). The recompute that follows the delete stores the exact count, so the old one stays
+    until then."""
+    db, service = await build()
+    p = await rule(db, EXCLUDE, P1_GLOB)
+    await service.recompute(await fresh(db))
+    seen: list[int | None] = []
+    load_dump = db.load_dump
+
+    async def watching_load_dump(*a, **k):  # the recompute's first read
+        seen.append((await fresh(db)).excluded_count)
+        return await load_dump(*a, **k)
+
+    db.load_dump = watching_load_dump
+
+    await service.delete_pattern(await fresh(db), p.id)
+
+    assert (seen, (await fresh(db)).excluded_count) == ([1], 0)
+
+
+async def test_when_the_recompute_after_a_glob_delete_fails_the_excluded_count_becomes_unknown():
+    db, service = await build()
+    p = await rule(db, EXCLUDE, P1_GLOB)
+    await service.recompute(await fresh(db))
+
+    async def failing_replace_deltas(*a, **k):
+        raise RuntimeError("database gone")
+
+    db.replace_deltas = failing_replace_deltas
+    with pytest.raises(RuntimeError):
+        await service.delete_pattern(await fresh(db), p.id)
+
+    assert (await fresh(db)).excluded_count is None
+
+
+async def test_deleting_a_glob_waits_for_the_collection_lock():
+    """The delete and its recompute are one step under the lock: no per-page recompute in between
+    adds to a count the delete has made wrong."""
+    import asyncio
+
+    db, _ = await build()
+    lock = asyncio.Lock()
+    service = CurationService(db, lock_for=lambda cid: lock)
+    p = await rule(db, EXCLUDE, P1_GLOB)
+    await service.recompute(await fresh(db))
+
+    async with lock:
+        delete = asyncio.create_task(service.delete_pattern(await fresh(db), p.id))
+        await asyncio.sleep(0.05)
+        assert [x.id for x in await db.list_patterns(CID, types=[EXCLUDE])] == [p.id]
+    await delete
+    assert await db.list_patterns(CID, types=[EXCLUDE]) == []
+
+
 async def test_deleting_a_rule_that_does_not_exist_returns_none_and_changes_nothing():
     db, service = await started()
     before = await snapshot(db)

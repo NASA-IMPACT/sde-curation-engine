@@ -2576,20 +2576,30 @@ class Database:
                 "by_source": {r["source"]: r["n"] for r in rows}}
 
     @_touches
-    async def delete_pattern(self, collection_id: str, pattern_id: int) -> bool:
+    async def delete_pattern(self, collection_id: str, pattern_id: int, *, keep_count: bool = False) -> bool:
         """Delete one rule. Every caller recomputes next (CurationService), and that recompute stores
         the excluded count. A per-URL rule leaves the stored count as it is until then: it decides
         one page, which the per-page recompute counts before and after (excluded_before). Clearing
         it sent that recompute to the full one (L4), and let a page view store a count in between
-        that the ✓ then subtracted from again (M10). A glob rule clears it."""
+        that the ✓ then subtracted from again (M10). A glob rule clears it, unless `keep_count`: the
+        caller runs a full recompute next (it stores the exact count) and forgets the count if that
+        fails. Unknown, the count is taken by the next page view over the whole collection: 17-30+ s
+        on 100K pages, past the 30 s read limit (dev, R3, 2026-10-13)."""
         async with self._conn() as conn:
             cur = await conn.execute(
                 "DELETE FROM patterns WHERE id=%s AND collection_id=%s RETURNING type, match",
                 (pattern_id, collection_id),
             )
-            await self._forget_excluded_count(
-                conn, collection_id, [r["type"] for r in await cur.fetchall() if not is_exact(r["match"])])
+            gone = await cur.fetchall()
+            if not keep_count:
+                await self._forget_excluded_count(
+                    conn, collection_id, [r["type"] for r in gone if not is_exact(r["match"])])
             return cur.rowcount > 0
+
+    async def forget_excluded_count(self, collection_id: str) -> None:
+        """The stored excluded count is no longer known to be right: the next reader counts it."""
+        async with self._conn() as conn:
+            await self._forget_excluded_count(conn, collection_id, ["exclude"])
 
     @staticmethod
     async def _forget_excluded_count(conn, collection_id: str, deleted_types: list[str]) -> None:

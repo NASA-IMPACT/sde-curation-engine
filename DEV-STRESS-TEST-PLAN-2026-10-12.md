@@ -265,7 +265,9 @@ and open tabs refreshed by job progress piled those counts up until `/health` fa
    URLs become excluded by rules.
 3. **Delete the `/login` glob** (`DELETE …/patterns/{id}`, a full recompute in the request).
    Deleting a glob clears the stored excluded count, so page views until the recompute stores it
-   again count it over the whole collection: the 7 s count of 2026-10-06.
+   again count it over the whole collection: the 7 s count of 2026-10-06. (Since the local fix of
+   2026-10-13, the stored count stays until the recompute replaces it: this step should then give
+   no 503.)
 4. **Keep the tabs refreshing** for `--bulk-after-s` seconds.
 
 All along, the collection's tabs (`--tabs-per-job`) refresh the Curate page, the stepper and the
@@ -417,8 +419,12 @@ Step 6: a plain `make deploy ENV=dev PROFILE=sde-dev` (or the next push to `dev`
 
 ### Still open after these fixes (from Run A)
 
-- The excluded count still runs (17–30+ s at 97K exclusions) when a glob delete clears it: keep the
-  stored count on a glob delete; the recompute that follows stores the right value.
+- ~~The excluded count still runs (17–30+ s at 97K exclusions) when a glob delete clears it.~~
+  Fixed locally 2026-10-13 after R3, not on dev yet: a glob delete keeps the stored count; its full
+  recompute (now under the lock with the delete) stores the exact one, or forgets it if it fails.
+- ~~Shared tab-body renders did not happen in R3 (0 of 196)~~: the tabs asked together and each
+  started its own render. Fixed locally 2026-10-13, not on dev yet: a request that arrives while the
+  same render runs waits for it and shares it.
 - A glob add or delete on a 100K collection runs a 48 s recompute inside the request: run it as a
   job above BULK_JOB_MIN_URLS (audit R6).
 - One request with no answer in 90 s in Run A: cause not found.
@@ -437,5 +443,9 @@ Fill in as the run goes; the details go in each run's `RUNLOG.md`.
 | 3 Small run | 2026-10-12 19:29–19:32 | **passed** | 2/2 jobs, 0 errors, cleanup complete, no OpenAI in the engine log; harness default mix fixed (see run log); `/Users/bbenson/projects/sde-curation-stress/results/dev-20261012T192851Z/` |
 | 4 Full ramp | 2026-10-12 19:33–20:23 | **passed** | 111/111 jobs, 1 laptop-side connection error, no 5xx/503, no restart, pages p95 ≤ 3.9 s, RDS CPU ≤ 73 %, no alarm; better than 2026-10-06 at the heavy levels; open points in the run log; `~/projects/sde-curation-stress/results/dev-20261012T193310Z/` |
 | 5 Crash pattern | 2026-10-12 20:28–20:43 (Run A) | **no crash; limits failed** | no restart, no PoolTimeout, /health fine; but pages p95 8.3 s, DB CPU 100 % for ~3 min, 7 × 503 (the excluded count hit the 30 s limit), 1 request > 90 s; glob delete 48 s in-request. Run B not run. `~/projects/sde-curation-stress/results/dev-20261012T202747Z/` |
-| 6 Dev put back | | | not yet: dev is in stress mode (rev 44) until R1 or R5 |
-| R1–R5 Re-run after the fixes | | | not started |
+| 6 Dev put back | | | R1 put dev back in normal mode (rev 45); R2 put it in stress mode again (rev 46) until R5 |
+| R1 Merge to dev | 2026-10-13 | done (by Bernard) | origin/dev 27e59ec (PR #70), rev 45, normal mode |
+| R2 Stress-mode redeploy | 2026-10-13 14:03–14:12 | **passed** | rev 46, LLM_PROVIDER=fake, one task, /health 200, WAF 20000, V19, no RDS event, no jobs, 4 collections; `~/projects/sde-curation-stress/results/dev-20261013T140252Z/` |
+| R2 smoke: no OpenAI calls | 2026-10-13 15:13–15:21 | **passed** | Suggest patterns + Suggest metadata, 2,000 pages each (`--mix patterns,metadata`): 2/2 ok, 0 errors; guard rev 46 fake; 0 OpenAI lines in the engine log; cleanup done, 4 collections; `~/projects/sde-curation-stress/results/dev-20261013T151332Z/` |
+| R3 Re-run of Run A | 2026-10-13 15:23–15:38 | **no crash; limits failed** | pages p95 7.83 s (was 8.32), DB CPU 95–100 % for 4 min, 13 × 503 around the glob delete (was 7), 0 requests > 90 s (was 1), no restart/PoolTimeout; **X-Tab-Body shared 0 of 196**: concurrent tabs all miss (the render is stored only when it ends). Run B not run. `~/projects/sde-curation-stress/results/dev-20261013T152328Z/` |
+| R4–R5 | | | not started |
