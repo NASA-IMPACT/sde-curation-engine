@@ -267,9 +267,17 @@ class CurationService:
             return ds if ds is not None else await self._recompute(c)
 
     async def delete_pattern(self, c: Collection, pattern_id: int) -> DeltaSet | None:
-        if not await self.db.delete_pattern(c.collection_id, pattern_id):
-            return None
-        return await self.recompute(c)
+        """Delete one rule and recompute, under the lock as one step. The stored excluded count stays
+        until the recompute stores the exact one (keep_count): page views never count it from the
+        tables meanwhile. If the recompute fails the count is forgotten, so it is never left wrong."""
+        async with self._lock_for(c.collection_id):
+            if not await self.db.delete_pattern(c.collection_id, pattern_id, keep_count=True):
+                return None
+            try:
+                return await self._recompute(c)
+            except BaseException:
+                await self.db.forget_excluded_count(c.collection_id)
+                raise
 
     @staticmethod
     def rows_set(c: Collection) -> str:

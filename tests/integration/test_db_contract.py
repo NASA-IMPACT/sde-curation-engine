@@ -359,6 +359,23 @@ async def test_replace_deltas_twice_keeps_ai_columns_and_effects(store, same):
     same.done()
 
 
+async def test_a_glob_delete_keeps_the_excluded_count_only_when_asked(store, same):
+    """CurationService.delete_pattern asks (keep_count=True): its full recompute stores the new count.
+    Anyone else deleting an exclude / include glob makes the count unknown."""
+    await seeded(store)
+    kept = (await store.insert_pattern(pat(PatternType.EXCLUDE, "*/docs/*"))).id
+    forgot = (await store.insert_pattern(pat(PatternType.INCLUDE, "*/docs/a*"))).id
+    await store.replace_deltas(CID, [], [], excluded_count=4)
+
+    assert same("kept", await store.delete_pattern(CID, kept, keep_count=True)) is True
+    assert same("count kept", (await store.get_collection(CID)).excluded_count) == 4
+    assert same("forgot", await store.delete_pattern(CID, forgot)) is True
+    assert same("count forgotten", (await store.get_collection(CID)).excluded_count) is None
+    await store.replace_deltas(CID, [], [], excluded_count=4)
+    await store.forget_excluded_count(CID)
+    assert same("forget", (await store.get_collection(CID)).excluded_count) is None
+
+
 async def test_replace_deltas_scoped_and_excluded_counts(store, same):
     await seeded(store)
     await store.replace_dump(CID, [dump(A, "a"), dump(B, "b"), dump(C, "c")])

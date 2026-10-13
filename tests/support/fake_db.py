@@ -962,14 +962,17 @@ class FakeDatabase:
             rows = sorted(rows, key=lambda p: ("*" not in p["match"], p["id"]))
         return [self._pattern(p) for p in rows[offset:offset + limit]], len(rows)
 
-    async def delete_pattern(self, collection_id: str, pattern_id: int) -> bool:
+    async def delete_pattern(self, collection_id: str, pattern_id: int, *, keep_count: bool = False) -> bool:
         p = self._patterns.get(pattern_id)
         if p is None or p["collection_id"] != collection_id:
             return False
         types = self._delete_pattern_rows([pattern_id])
-        if "*" in p["match"]:  # a per-URL rule keeps the stored count (Database.delete_pattern)
+        if "*" in p["match"] and not keep_count:  # a per-URL rule keeps the stored count (Database.delete_pattern)
             self._forget_excluded_count(collection_id, types)
         return True
+
+    async def forget_excluded_count(self, collection_id: str) -> None:
+        self._forget_excluded_count(collection_id, ["exclude"])
 
     # ── jobs ───────────────────────────────────────────────────────────
 
