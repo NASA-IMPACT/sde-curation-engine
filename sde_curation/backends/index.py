@@ -128,7 +128,7 @@ class LocalSubprocessIndexer:
         d.detail["exit_code"] = proc.returncode
         return False
 
-    async def kill(self, d: Dispatch) -> None:
+    async def kill(self, d: Dispatch, reason: str | None = None) -> None:
         for p in self._procs.values():
             if f"pid:{p.pid}" == d.external_ref and p.returncode is None:
                 p.kill()
@@ -136,6 +136,18 @@ class LocalSubprocessIndexer:
 
 
 # ── ECS run-task ───────────────────────────────────────────────────────
+
+
+STOP_REASON_DEFAULT = "cancelled in the curation engine"
+STOP_REASON_MAX = 255  # ECS StopTask rejects a longer reason
+
+
+def cancel_reason(actor: str | None) -> str:
+    return f"cancelled by {actor} in the curation engine" if actor else STOP_REASON_DEFAULT
+
+
+def give_up_reason(error: BaseException) -> str:
+    return f"the curation engine gave up on the run: {error}"
 
 
 class EcsDispatchIndexer:
@@ -228,12 +240,13 @@ class EcsDispatchIndexer:
             return False
         return True
 
-    async def kill(self, d: Dispatch) -> None:
-        """Stop the indexer task (a curator cancelled the run). Already stopped: nothing to do."""
+    async def kill(self, d: Dispatch, reason: str | None = None) -> None:
+        """Stop the indexer task (a curator cancelled the run, or the engine gave up on it). `reason`
+        is what ECS shows as the task's stop reason. Already stopped: nothing to do."""
         ecs = self._client()
         try:
             await asyncio.to_thread(ecs.stop_task, cluster=self.s.indexing_ecs_cluster, task=d.external_ref,
-                                    reason="cancelled in the curation engine")
+                                    reason=(reason or STOP_REASON_DEFAULT)[:STOP_REASON_MAX])
         except Exception as e:  # noqa: BLE001 - the run is marked cancelled either way; say why the task may live on
             log.warning("could not stop indexer task %s: %s", d.external_ref, e)
 

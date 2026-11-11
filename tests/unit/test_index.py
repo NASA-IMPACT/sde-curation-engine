@@ -243,3 +243,40 @@ async def test_an_indexer_that_writes_no_new_batch_for_the_stall_timeout_is_stal
     with pytest.raises(IndexError_, match=r"no new vectorized batch for \d+s \(2 batches written\)"):
         await wait_for_status(s3, _stall_settings(), COLL, "r1", _RunningTask(), Dispatch("t", {}),
                               _ignore_progress, target="prod")
+
+
+
+# ── the reason an engine-stopped task shows in ECS ───────────────────────────────────────────────
+
+class _StopRecorder:
+    def __init__(self):
+        self.stops = []
+
+    def stop_task(self, **kw):
+        self.stops.append(kw)
+
+
+@pytest.mark.parametrize(("reason", "shown"), [
+    ("cancelled by alice in the curation engine", "cancelled by alice in the curation engine"),
+    ("x" * 300, "x" * 255),  # ECS StopTask accepts at most 255 characters
+])
+async def test_an_engine_stop_tells_ecs_why(reason, shown):
+    from sde_curation.backends.index import Dispatch
+
+    ecs = _StopRecorder()
+    s = Settings(index_backend="ecs", indexing_subnets=["subnet-1"], indexing_ecs_cluster="c", llm_provider="fake")
+
+    await EcsDispatchIndexer(s, ecs=ecs).kill(Dispatch("arn:task/1", {}), reason=reason)
+
+    assert ecs.stops == [{"cluster": "c", "task": "arn:task/1", "reason": shown}]
+
+
+async def test_an_engine_stop_without_a_reason_keeps_the_old_text():
+    from sde_curation.backends.index import Dispatch
+
+    ecs = _StopRecorder()
+    s = Settings(index_backend="ecs", indexing_subnets=["subnet-1"], indexing_ecs_cluster="c", llm_provider="fake")
+
+    await EcsDispatchIndexer(s, ecs=ecs).kill(Dispatch("arn:task/1", {}))
+
+    assert ecs.stops[0]["reason"] == "cancelled in the curation engine"
