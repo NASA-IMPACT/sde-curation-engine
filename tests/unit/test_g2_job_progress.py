@@ -64,3 +64,26 @@ def test_an_index_job_says_validating_until_its_own_check_has_a_result(kind, pro
     """The indexer's own report is stored before the engine's post-refresh check ends; until that
     check has a result the job says "validating", never a pass or a fail."""
     assert progress_text(kind, progress) == expected
+
+
+# ── an index run shows the batches the indexer has vectorized (no-progress stall, LPI 2026-11-04) ──
+
+@pytest.mark.parametrize(("batches", "tail"), [
+    (614, " · 614 batches vectorized"),
+    (1, " · 1 batch vectorized"),
+    (0, " · 0 batches vectorized"),     # dispatched, nothing vectorized yet
+])
+def test_an_index_run_shows_how_many_batches_it_has_vectorized(batches, tail):
+    """A long run is moving when this number grows; it stalls after 4 h without a new batch."""
+    text = progress_text(JobKind.INDEX_TEST, {"phase": "indexing", "exported": 30682, "waiting_s": 7260,
+                                              "batches_written": batches})
+
+    assert text == f"indexing 30682 docs · 121m{tail}"
+
+
+@pytest.mark.parametrize("progress", [
+    {"phase": "indexing", "exported": 707, "waiting_s": 120},                        # an engine before the count
+    {"phase": "indexing", "exported": 707, "waiting_s": 120, "batches_written": None},  # S3 could not say yet
+])
+def test_an_index_run_without_a_batch_count_shows_no_batch_part(progress):
+    assert progress_text(JobKind.INDEX_TEST, progress) == "indexing 707 docs · 2m"

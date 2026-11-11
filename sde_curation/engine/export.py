@@ -64,3 +64,9 @@ def export_prefix(collection_key: str, run_id: str) -> str:
 
 def status_prefix(collection_key: str, run_id: str) -> str:
     return f"index_runs/{collection_key}/{run_id}"
+
+
+def vectorized_prefix(collection_key: str, run_id: str) -> str:
+    """Where the indexer writes one batch_NNNN.jsonl per batch it vectorized (sde-api-scrapers
+    web/web_pipeline.py vectorized_batch_key). A new object is the indexer's progress signal."""
+    return f"vectorized/{collection_key}/{run_id}/"

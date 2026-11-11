@@ -17,7 +17,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .backends.index import Dispatch, IndexBackend, IndexError_, wait_for_status
+from .backends.index import (
+    Dispatch,
+    IndexBackend,
+    IndexError_,
+    cancel_reason,
+    give_up_reason,
+    wait_for_status,
+)
 from .backends.publish import ProdPublisher
 from .backends.s3 import S3
 from .backends.scrape import DocumentSource, ProgressCb, ScrapeBackend, ScrapeError, iter_documents
@@ -384,7 +391,7 @@ class JobManager:
         ref = (run.external_ref if run else None) or job.external_ref
         backend = self.indexer()
         if ref and hasattr(backend, "kill"):
-            await backend.kill(Dispatch(external_ref=ref, detail={}))
+            await backend.kill(Dispatch(external_ref=ref, detail={}), reason=f"curation engine: {reason}")
         if run is not None and run.state == "running":
             run.state, run.error, run.finished_at = "failed", reason, utcnow()
             await self.db.update_index_run(run)
@@ -1113,7 +1120,16 @@ class JobManager:
                     )
                 except asyncio.CancelledError:
                     if not self._leaving_running(job) and hasattr(backend, "kill"):
-                        await backend.kill(d)  # a curator's cancel stops the indexer task too
+                        # a curator's cancel stops the indexer task too
+                        await backend.kill(d, reason=cancel_reason(self._cancel_actor.get(job.id)))
+                    raise
+                except Exception as e:
+                    # the engine gave up on the run (a stall, a lost S3 read): close the run, and leave
+                    # no task writing to the index that no one watches (LPI, 2026-11-04)
+                    if hasattr(backend, "kill"):
+                        await backend.kill(d, reason=give_up_reason(e))
+                    run.state, run.error, run.finished_at = "failed", str(e)[:500], utcnow()
+                    await self.db.update_index_run(run)
                     raise
                 run.status = status.model_dump()
                 run.validation = validation.model_dump() if validation else None
@@ -1196,7 +1212,7 @@ class JobManager:
                 with contextlib.suppress(Exception):
                     d = await asyncio.wait_for(dispatching, DISPATCH_WAIT_ON_CANCEL_S)
                     if hasattr(backend, "kill"):
-                        await backend.kill(d)
+                        await backend.kill(d, reason=cancel_reason(self._cancel_actor.get(job.id)))
             raise
         run.external_ref = d.external_ref
         job.external_ref = d.external_ref
@@ -1363,7 +1379,19 @@ class JobManager:
             prefix = status_prefix(c.collection_key, run.run_id)
             await s3.delete(f"{prefix}/status.json", f"{prefix}/validation.json")
             d = await backend.dispatch(c, run.run_id, run.target, token=f"{run.run_id}:validate")
-            status, validation = await wait_for_status(s3, self.s, c, run.run_id, backend, d, progress, target=run.target)
+            try:
+                status, validation = await wait_for_status(s3, self.s, c, run.run_id, backend, d, progress,
+                                                           target=run.target)
+            except asyncio.CancelledError:
+                # as the first pass: a curator's cancel stops the validate task; a shutdown leaves it
+                # running for the resume
+                if not self._leaving_running(job) and hasattr(backend, "kill"):
+                    await backend.kill(d, reason=cancel_reason(self._cancel_actor.get(job.id)))
+                raise
+            except Exception as e:
+                if hasattr(backend, "kill"):
+                    await backend.kill(d, reason=give_up_reason(e))
+                raise
             if status.state != "succeeded" or validation is None:
                 raise IndexError_(f"second-pass validation failed: {status.error or 'no validation.json'}")
             report = validation.model_dump()

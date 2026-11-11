@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..config import Settings
-from ..engine.export import status_prefix
+from ..engine.export import status_prefix, vectorized_prefix
 from ..models import Collection, IndexStatus, ValidationReport
 from .s3 import S3
 
@@ -128,7 +128,7 @@ class LocalSubprocessIndexer:
         d.detail["exit_code"] = proc.returncode
         return False
 
-    async def kill(self, d: Dispatch) -> None:
+    async def kill(self, d: Dispatch, reason: str | None = None) -> None:
         for p in self._procs.values():
             if f"pid:{p.pid}" == d.external_ref and p.returncode is None:
                 p.kill()
@@ -136,6 +136,18 @@ class LocalSubprocessIndexer:
 
 
 # ── ECS run-task ───────────────────────────────────────────────────────
+
+
+STOP_REASON_DEFAULT = "cancelled in the curation engine"
+STOP_REASON_MAX = 255  # ECS StopTask rejects a longer reason
+
+
+def cancel_reason(actor: str | None) -> str:
+    return f"cancelled by {actor} in the curation engine" if actor else STOP_REASON_DEFAULT
+
+
+def give_up_reason(error: BaseException) -> str:
+    return f"the curation engine gave up on the run: {error}"
 
 
 class EcsDispatchIndexer:
@@ -228,12 +240,13 @@ class EcsDispatchIndexer:
             return False
         return True
 
-    async def kill(self, d: Dispatch) -> None:
-        """Stop the indexer task (a curator cancelled the run). Already stopped: nothing to do."""
+    async def kill(self, d: Dispatch, reason: str | None = None) -> None:
+        """Stop the indexer task (a curator cancelled the run, or the engine gave up on it). `reason`
+        is what ECS shows as the task's stop reason. Already stopped: nothing to do."""
         ecs = self._client()
         try:
             await asyncio.to_thread(ecs.stop_task, cluster=self.s.indexing_ecs_cluster, task=d.external_ref,
-                                    reason="cancelled in the curation engine")
+                                    reason=(reason or STOP_REASON_DEFAULT)[:STOP_REASON_MAX])
         except Exception as e:  # noqa: BLE001 - the run is marked cancelled either way; say why the task may live on
             log.warning("could not stop indexer task %s: %s", d.external_ref, e)
 
@@ -251,10 +264,15 @@ async def wait_for_status(
     s3: S3, settings: Settings, c: Collection, run_id: str, backend: IndexBackend, d: Dispatch,
     on_progress: ProgressCb, *, target: str,
 ) -> tuple[IndexStatus, ValidationReport | None]:
-    """Poll status.json; treat a backend that has stopped without writing it as failed."""
+    """Poll status.json; treat a backend that has stopped without writing it as failed.
+
+    Stalled = no new vectorized batch for `index_stall_timeout_s`. Time since dispatch is not a
+    stall: a 30,682-page run takes over a day at the vectorizer's rate (LPI, 2026-11-04)."""
     prefix = status_prefix(c.collection_key, run_id)
     t0 = time.monotonic()
     stopped_at: float | None = None
+    batches = await _batches_written(s3, c, run_id)
+    last_progress = t0
     while True:
         st = await s3.get_json(f"{prefix}/status.json")
         if st is not None:
@@ -270,8 +288,23 @@ async def wait_for_status(
             stopped_at = stopped_at or time.monotonic()
             if time.monotonic() - stopped_at > 30:
                 raise IndexError_(f"indexer stopped without writing status.json: {d.detail}")
-        elapsed = time.monotonic() - t0
-        await on_progress({"waiting_s": int(elapsed), **{k: v for k, v in d.detail.items() if k != "log"}})
-        if elapsed > settings.index_stall_timeout_s:
-            raise IndexError_(f"indexer stalled: no status.json after {int(elapsed)}s ({d.detail})")
+        now_batches = await _batches_written(s3, c, run_id)
+        if now_batches is not None and now_batches != batches:
+            batches, last_progress = now_batches, time.monotonic()
+        idle = time.monotonic() - last_progress
+        await on_progress({"waiting_s": int(time.monotonic() - t0), "batches_written": batches,
+                           **{k: v for k, v in d.detail.items() if k != "log"}})
+        if idle > settings.index_stall_timeout_s:
+            raise IndexError_(f"indexer stalled: no new vectorized batch for {int(idle)}s "
+                              f"({batches or 0} batches written) ({d.detail})")
         await asyncio.sleep(settings.index_poll_interval_s)
+
+
+async def _batches_written(s3: S3, c: Collection, run_id: str) -> int | None:
+    """How many vectorized batches the run has written, or None if S3 cannot say (that poll then
+    counts as no progress)."""
+    try:
+        return await s3.count(vectorized_prefix(c.collection_key, run_id))
+    except Exception as e:  # noqa: BLE001 - a listing error must not fail a run that may be fine
+        log.warning("could not list vectorized batches for %s/%s: %s", c.collection_key, run_id, e)
+        return None
