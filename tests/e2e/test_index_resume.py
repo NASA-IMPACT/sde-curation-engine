@@ -190,9 +190,9 @@ async def test_a_cancel_stops_the_indexer_and_closes_the_run(env, monkeypatch):
     killed = []
     original = LocalSubprocessIndexer.kill
 
-    async def kill(self, d):
+    async def kill(self, d, reason=None):
         killed.append(d.external_ref)
-        await original(self, d)
+        await original(self, d, reason)
 
     monkeypatch.setattr(LocalSubprocessIndexer, "kill", kill)
     app, c = env.engine()

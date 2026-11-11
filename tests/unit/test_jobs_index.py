@@ -151,7 +151,25 @@ async def test_a_curator_cancel_during_indexing_stops_the_indexer_task_and_fails
 
     assert (cancelled.id, cancelled.state, cancelled.error) == (job.id, JobState.FAILED, "cancelled by alice")
     assert indexer.stopped == ["task/1"]
+    assert indexer.stop_reasons == ["cancelled by alice in the curation engine"]
     assert ((r := await db.get_index_run(run.run_id)).state, r.error) == ("failed", "cancelled by alice")
+
+
+async def test_a_stalled_indexer_fails_the_job_and_stops_its_task(tmp_path, monkeypatch, s3):
+    """LPI, 2026-11-04: the engine gave up on a stalled run but left its ECS task writing to the
+    index for another day. When the engine gives up on a run, it stops the task too."""
+    db = FakeDatabase()
+    await promoted(db, titles=["A"])
+    indexer = Indexer()  # RUNNING, writes no batch and no status.json
+
+    done, run = await _index(db, tmp_path, monkeypatch, index=Index(report(1, 1)), indexer=indexer,
+                             index_stall_timeout_s=0.05)
+
+    assert done.state == JobState.FAILED and "stalled" in done.error
+    assert indexer.stopped == ["task/1"]
+    assert run.state == "failed"
+    (reason,) = indexer.stop_reasons
+    assert reason.startswith("the curation engine gave up on the run: indexer stalled")
 
 
 async def _started(indexer):
@@ -362,3 +380,50 @@ async def test_the_first_index_run_records_the_key_it_pins_in_the_audit_ledger(t
 
     pinned = [(a["actor"], a["collection_id"], a["detail"]) for a in db._audit if a["action"] == "index.key"]
     assert pinned == [("system", CID, f"indexed as '{KEY}' ({CID}), from the collection name")]
+
+
+
+# ── the second validation pass stops its task too ────────────────────────────────────────────────
+
+class _SecondPassHangs(StatusIndexer):
+    """The first pass finishes; the second (validate-only) pass starts a task that never reports."""
+
+    async def dispatch(self, c, run_id, target, *, allow_high_deletion=False, token=None):
+        if token and token.endswith(":validate"):
+            return await Indexer.dispatch(self, c, run_id, target, allow_high_deletion=allow_high_deletion,
+                                          token=token)
+        return await super().dispatch(c, run_id, target, allow_high_deletion=allow_high_deletion, token=token)
+
+
+async def test_a_stalled_second_validation_pass_stops_its_task(tmp_path, monkeypatch, s3):
+    db = FakeDatabase()
+    await promoted(db, titles=["A"])
+    indexer = _SecondPassHangs(validation=report(1, 1))
+
+    done, _ = await _index(db, tmp_path, monkeypatch, indexer=indexer,
+                           index=Index(error=NoIndexAccess("403 from the test collection")),
+                           index_stall_timeout_s=0.05)
+
+    assert done.state == JobState.FAILED and "stalled" in done.error
+    assert indexer.stopped == ["task/2"]  # the validate task; the first pass had already ended
+    assert indexer.stop_reasons[0].startswith("the curation engine gave up on the run")
+
+
+async def test_a_curator_cancel_during_the_second_validation_pass_stops_its_task(tmp_path, monkeypatch, s3):
+    db = FakeDatabase()
+    await promoted(db, titles=["A"])
+    indexer = _SecondPassHangs(validation=report(1, 1))
+    monkeypatch.setattr(jobs_mod, "validate_direct", Index(error=NoIndexAccess("403 from the test collection")))
+    engine = make_engine(db, tmp_path, indexer=indexer, **{**QUICK_GATE, **PROD})
+    await engine.start_index(await db.get_collection(CID), "test")
+    await until(lambda: _second_started(indexer))
+
+    await engine.cancel(CID, actor="alice")
+
+    assert indexer.stopped == ["task/2"]
+    assert indexer.stop_reasons == ["cancelled by alice in the curation engine"]
+    await engine.shutdown()
+
+
+async def _second_started(indexer):
+    return len(indexer.started) == 2

@@ -106,6 +106,7 @@ class Indexer:
     def __init__(self, *, slow_first_answer: bool = False):
         self.started: list[str] = []
         self.stopped: list[str] = []
+        self.stop_reasons: list[str | None] = []  # the reason given with each stop, as ECS records it
         self.slow_first_answer = slow_first_answer
         self.dispatching = asyncio.Event()
         self.answer = asyncio.Event()  # set: the slow first answer comes back
@@ -126,8 +127,9 @@ class Indexer:
     async def still_running(self, d) -> bool:
         return True
 
-    async def kill(self, d) -> None:
+    async def kill(self, d, reason: str | None = None) -> None:
         self.stopped.append(d.external_ref)
+        self.stop_reasons.append(reason)
 
 
 async def promoted(db, *, titles: list[str], excluded: bool = False) -> Collection:
