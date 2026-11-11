@@ -154,6 +154,21 @@ async def test_a_curator_cancel_during_indexing_stops_the_indexer_task_and_fails
     assert ((r := await db.get_index_run(run.run_id)).state, r.error) == ("failed", "cancelled by alice")
 
 
+async def test_a_stalled_indexer_fails_the_job_and_stops_its_task(tmp_path, monkeypatch, s3):
+    """LPI, 2026-11-04: the engine gave up on a stalled run but left its ECS task writing to the
+    index for another day. When the engine gives up on a run, it stops the task too."""
+    db = FakeDatabase()
+    await promoted(db, titles=["A"])
+    indexer = Indexer()  # RUNNING, writes no batch and no status.json
+
+    done, run = await _index(db, tmp_path, monkeypatch, index=Index(report(1, 1)), indexer=indexer,
+                             index_stall_timeout_s=0.05)
+
+    assert done.state == JobState.FAILED and "stalled" in done.error
+    assert indexer.stopped == ["task/1"]
+    assert run.state == "failed"
+
+
 async def _started(indexer):
     return bool(indexer.started)
 

@@ -104,6 +104,8 @@ class Settings(BaseSettings):
     # remove more than this share of the collection's prod documents, unless the curator confirms
     # (allow_high_deletion, as the indexer's --allow-high-deletion). No cap on the absolute count.
     publish_deletion_abort_ratio: float = Field(default=0.90, ge=0.0, le=1.0)
+    # No progress for this long = stalled: no new vectorized batch (index), no log activity (scrape).
+    # Not a cap on a run's length.
     index_stall_timeout_s: float = 4 * 3600
     scrape_poll_interval_s: float = 15.0
 

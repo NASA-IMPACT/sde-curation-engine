@@ -1115,6 +1115,14 @@ class JobManager:
                     if not self._leaving_running(job) and hasattr(backend, "kill"):
                         await backend.kill(d)  # a curator's cancel stops the indexer task too
                     raise
+                except Exception as e:
+                    # the engine gave up on the run (a stall, a lost S3 read): close the run, and leave
+                    # no task writing to the index that no one watches (LPI, 2026-11-04)
+                    if hasattr(backend, "kill"):
+                        await backend.kill(d)
+                    run.state, run.error, run.finished_at = "failed", str(e)[:500], utcnow()
+                    await self.db.update_index_run(run)
+                    raise
                 run.status = status.model_dump()
                 run.validation = validation.model_dump() if validation else None
                 run.validated_by = "indexer" if validation else None

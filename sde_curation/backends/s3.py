@@ -46,6 +46,14 @@ class S3:
         except self.client.exceptions.ClientError:
             return False
 
+    async def count(self, prefix: str) -> int:
+        """How many objects are under `prefix` (every page of the listing)."""
+        def _count() -> int:
+            pages = self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix)
+            return sum(page.get("KeyCount", 0) for page in pages)
+
+        return await asyncio.to_thread(_count)
+
     async def delete(self, *keys: str) -> None:
         for k in keys:
             await asyncio.to_thread(self.client.delete_object, Bucket=self.bucket, Key=k)

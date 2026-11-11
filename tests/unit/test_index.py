@@ -170,3 +170,76 @@ def test_every_indexer_task_the_engine_starts_carries_the_engine_tag():
 
     assert args["tags"] == [{"key": ENGINE_TASK_TAG, "value": COLL.collection_id}]
     assert ENGINE_TASK_TAG == "sde-curation-engine"  # infra/stacks/engine_stack.py grants StopTask on this key
+
+
+# ── stall detection: progress, not wall-clock time ───────────────────────────────────────────────
+
+STALL_BUCKET = "index-bucket"
+STALL_S = 0.3  # the no-progress window under test (index_stall_timeout_s)
+BATCH_EVERY_S = 0.1  # an indexer that writes a batch this often is making progress
+WORKS_FOR_S = 3 * STALL_S  # longer than one stall window, so a wall-clock timeout would fire
+
+
+class _RunningTask:
+    """A backend whose task stays RUNNING: only S3 shows what it is doing."""
+
+    async def still_running(self, d):
+        return True
+
+
+def _stall_settings() -> Settings:
+    return Settings(llm_provider="fake", cosmos_index_bucket=STALL_BUCKET, index_poll_interval_s=0.02,
+                    index_stall_timeout_s=STALL_S)
+
+
+def _s3(aws) -> S3:
+    import boto3
+
+    client = boto3.client("s3", region_name="us-east-1")
+    client.create_bucket(Bucket=STALL_BUCKET)
+    return S3(STALL_BUCKET, client=client)
+
+
+async def _write_batches(s3: S3, run_id: str, n: int) -> None:
+    for i in range(1, n + 1):
+        await s3.put_json(f"vectorized/{COLL.collection_key}/{run_id}/batch_{i:04d}.jsonl", {})
+        await asyncio.sleep(BATCH_EVERY_S)
+
+
+async def _ignore_progress(p):
+    pass
+
+
+async def test_an_indexer_still_writing_batches_is_not_stalled_after_the_stall_timeout(aws):
+    """LPI, 2026-11-04: a 30,682-page run wrote a batch every few minutes, but the engine gave up
+    after a fixed 4 h. Time without a new vectorized batch is the stall, not time since dispatch."""
+    from sde_curation.backends.index import Dispatch, wait_for_status
+
+    s3 = _s3(aws)
+    n = int(WORKS_FOR_S / BATCH_EVERY_S)
+
+    async def indexer():
+        await _write_batches(s3, "r1", n)
+        await s3.put_json(f"index_runs/{COLL.collection_key}/r1/status.json",
+                          {"run_id": "r1", "collection_key": COLL.collection_key, "target": "prod",
+                           "state": "succeeded"})
+
+    work = asyncio.create_task(indexer())
+    status, _ = await wait_for_status(s3, _stall_settings(), COLL, "r1", _RunningTask(), Dispatch("t", {}),
+                                      _ignore_progress, target="prod")
+    await work
+
+    assert status.state == "succeeded"
+
+
+async def test_an_indexer_that_writes_no_new_batch_for_the_stall_timeout_is_stalled(aws):
+    """The other side of the rule: a task that is RUNNING but has written nothing new for the whole
+    window is stalled, and the error says how many batches it wrote."""
+    from sde_curation.backends.index import Dispatch, wait_for_status
+
+    s3 = _s3(aws)
+    await _write_batches(s3, "r1", 2)
+
+    with pytest.raises(IndexError_, match=r"no new vectorized batch for \d+s \(2 batches written\)"):
+        await wait_for_status(s3, _stall_settings(), COLL, "r1", _RunningTask(), Dispatch("t", {}),
+                              _ignore_progress, target="prod")

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..config import Settings
-from ..engine.export import status_prefix
+from ..engine.export import status_prefix, vectorized_prefix
 from ..models import Collection, IndexStatus, ValidationReport
 from .s3 import S3
 
@@ -251,10 +251,15 @@ async def wait_for_status(
     s3: S3, settings: Settings, c: Collection, run_id: str, backend: IndexBackend, d: Dispatch,
     on_progress: ProgressCb, *, target: str,
 ) -> tuple[IndexStatus, ValidationReport | None]:
-    """Poll status.json; treat a backend that has stopped without writing it as failed."""
+    """Poll status.json; treat a backend that has stopped without writing it as failed.
+
+    Stalled = no new vectorized batch for `index_stall_timeout_s`. Time since dispatch is not a
+    stall: a 30,682-page run takes over a day at the vectorizer's rate (LPI, 2026-11-04)."""
     prefix = status_prefix(c.collection_key, run_id)
     t0 = time.monotonic()
     stopped_at: float | None = None
+    batches = await _batches_written(s3, c, run_id)
+    last_progress = t0
     while True:
         st = await s3.get_json(f"{prefix}/status.json")
         if st is not None:
@@ -270,8 +275,23 @@ async def wait_for_status(
             stopped_at = stopped_at or time.monotonic()
             if time.monotonic() - stopped_at > 30:
                 raise IndexError_(f"indexer stopped without writing status.json: {d.detail}")
-        elapsed = time.monotonic() - t0
-        await on_progress({"waiting_s": int(elapsed), **{k: v for k, v in d.detail.items() if k != "log"}})
-        if elapsed > settings.index_stall_timeout_s:
-            raise IndexError_(f"indexer stalled: no status.json after {int(elapsed)}s ({d.detail})")
+        now_batches = await _batches_written(s3, c, run_id)
+        if now_batches is not None and now_batches != batches:
+            batches, last_progress = now_batches, time.monotonic()
+        idle = time.monotonic() - last_progress
+        await on_progress({"waiting_s": int(time.monotonic() - t0), "batches_written": batches,
+                           **{k: v for k, v in d.detail.items() if k != "log"}})
+        if idle > settings.index_stall_timeout_s:
+            raise IndexError_(f"indexer stalled: no new vectorized batch for {int(idle)}s "
+                              f"({batches or 0} batches written) ({d.detail})")
         await asyncio.sleep(settings.index_poll_interval_s)
+
+
+async def _batches_written(s3: S3, c: Collection, run_id: str) -> int | None:
+    """How many vectorized batches the run has written, or None if S3 cannot say (that poll then
+    counts as no progress)."""
+    try:
+        return await s3.count(vectorized_prefix(c.collection_key, run_id))
+    except Exception as e:  # noqa: BLE001 - a listing error must not fail a run that may be fine
+        log.warning("could not list vectorized batches for %s/%s: %s", c.collection_key, run_id, e)
+        return None
