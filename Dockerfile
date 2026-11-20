@@ -5,6 +5,10 @@ FROM python:3.13-slim
 ENV PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 DATA_DIR=/data
 WORKDIR /app
 
+# Debian security fixes newer than the base image (Inspector flagged zlib on 2026-11-12). Rebuilds
+# pick up new fixes only when this layer's cache is invalidated: CDK builds without a shared cache.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
+
 # pinned deps first (layer cached until requirements.txt changes)
 COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
